@@ -1,0 +1,3 @@
+# Task model
+
+Leader role exists for onboarding and task delegation. After context is ingested, leader describes their delegation intent — AI structures and enriches it from project context, or generates the full breakdown if asked. Leader assigns tasks to members. Every member must actively confirm their tasks before they go live. Tasks update over time via conversation or direct leader edits. No task lands on anyone's board without their confirmation.

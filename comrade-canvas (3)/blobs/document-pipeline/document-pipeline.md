@@ -1,0 +1,3 @@
+# Document pipeline
+
+Background Python worker (same codebase as ADK agent). Job queue: simple jobs table in Supabase, polling worker. Parsers: PyMuPDF for PDFs, python-docx for .docx, structured parse (date/time/sender) for WhatsApp exports before chunking. Chunking: RecursiveCharacterTextSplitter for docs, time/topic windows for WhatsApp. On upload, AI auto-generates a summary preview card that posts inline in group chat. Engagement tracked via card interactions (expanded, questions asked), not raw clicks. Doc link tracking uses auth session for user ID, not query string.

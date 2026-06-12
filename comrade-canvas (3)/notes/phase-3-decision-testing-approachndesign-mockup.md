@@ -1,0 +1,1 @@
+**Phase 3 decision — testing approach**\nDesign mockup testing skipped. User is a student with access to 2–3 real teams. Testing will happen with the live v1 product instead. Interested students from the survey are already asking. Group room layout is an open design question to resolve during the technical build phase.

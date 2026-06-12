@@ -1,0 +1,1 @@
+**~~From phase 2 — open question~~** **Decided:** Any member can trigger AI actions on shared content. Result posts to group chat.

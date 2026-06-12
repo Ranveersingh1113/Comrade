@@ -1,0 +1,3 @@
+# LLM stack
+
+Primary model: Gemini 2.5 Flash (nudges, summaries, thread analysis). Escalation: Gemini 2.5 Pro (document ingestion, multi-step action planning). Embeddings: OpenAI text-embedding-3-small + pgvector. Tool layer: MCP — GitHub MCP server for GitHub integration, custom MCP server for platform actions. Simple inactivity nudges use templates, not LLM. LLM-wiki pattern for project memory (incremental, not re-derived per query). No Assistants API — sunsets August 2026. Estimated pilot cost: $10–40/month.

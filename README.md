@@ -11,7 +11,7 @@ This is a solo-dev pilot targeting small student teams (≤4 members).
 
 - **Agent:** Google ADK (Python), single `LlmAgent` on Gemini 2.5 Flash (Pro for escalation)
 - **Backend:** Supabase (Postgres + pgvector + Realtime + Auth + Storage)
-- **Tools:** MCP — GitHub MCP server + a custom platform MCP server (FastMCP, stateless)
+- **Tools:** ADK native function tools (call the DB under team-scoped worker roles); GitHub integration TBD
 - **Embeddings:** OpenAI `text-embedding-3-small` + pgvector
 - **Eval:** DeepEval (deterministic metrics only)
 
@@ -19,8 +19,7 @@ This is a solo-dev pilot targeting small student teams (≤4 members).
 
 | Path | Purpose |
 |------|---------|
-| `agent/` | Google ADK `LlmAgent` and its wiring |
-| `mcp_server/` | Custom platform MCP server (FastMCP) |
+| `agent/` | Google ADK `LlmAgent` and its function tools |
 | `pipeline/` | Document pipeline worker (PDF/.docx/WhatsApp ingestion) |
 | `supabase/` | Supabase config + SQL migrations (`supabase/migrations/`) |
 | `shared/` | Shared config, models, and utilities |

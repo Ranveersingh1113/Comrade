@@ -4,6 +4,7 @@ Every worker connects under an RLS-enforced role (never service_role) and scopes
 itself to a single team per transaction via SET LOCAL app.current_team_id. The
 policies in 0002_rls.sql then constrain every row the worker can see or write.
 """
+import json
 from contextlib import contextmanager
 from enum import Enum
 from typing import Iterator
@@ -63,6 +64,29 @@ def team_session(role: Role, team_id: str) -> Iterator[psycopg.Connection]:
             )
             conn.execute(
                 "select set_config('app.actor_kind', %s, true)", (_ACTOR_KIND[role],)
+            )
+            yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def user_session(user_id: str) -> Iterator[psycopg.Connection]:
+    """Open a connection acting as an end user (role `authenticated`, auth.uid()
+    = user_id), so RLS applies exactly as it would for that user in the app.
+
+    Commits on clean exit, rolls back on error. NOTE: this uses the admin URL as
+    a PostgREST-style authenticator that SET ROLEs down to authenticated; once
+    the role is switched, RLS is enforced. Production should use a dedicated
+    least-privilege authenticator role, not postgres.
+    """
+    conn = psycopg.connect(_URLS[Role.ADMIN])
+    try:
+        with conn.transaction():
+            conn.execute("set local role authenticated")
+            conn.execute(
+                "select set_config('request.jwt.claims', %s, true)",
+                (json.dumps({"sub": str(user_id), "role": "authenticated"}),),
             )
             yield conn
     finally:

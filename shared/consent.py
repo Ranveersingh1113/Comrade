@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from psycopg.types.json import Json
 
-from shared.db import Role, team_session
+from shared.db import Role, team_session, user_session
 
 
 class ConsentError(Exception):
@@ -103,6 +103,56 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
 
         result = executor(conn, team_id, requester_id, args)
         return {"status": "executed", "result": result}
+
+
+# ---------- human-side resolution (authorization happens here, via RLS) ----------
+# The approver acts as themselves; RLS (au_consent_queue_update: requester only)
+# is the authorization. execute_consent below never receives the approver id.
+
+def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
+    """Requester approves a pending item, then it executes."""
+    with user_session(approver_id) as conn:
+        row = conn.execute(
+            "update public.consent_queue set status='approved'"
+            " where id=%s and status='pending' returning id",
+            (consent_id,),
+        ).fetchone()
+    if row is None:
+        return {"status": "not_approved", "reason": "not pending or not yours"}
+    return execute_consent(team_id, consent_id)
+
+
+def reject_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
+    """Requester rejects a pending item (it will never execute)."""
+    with user_session(approver_id) as conn:
+        row = conn.execute(
+            "update public.consent_queue set status='rejected', resolved_at=now()"
+            " where id=%s and status='pending' returning id",
+            (consent_id,),
+        ).fetchone()
+    return {"status": "rejected" if row is not None else "not_found"}
+
+
+def edit_and_approve(
+    team_id: str, consent_id: str, approver_id: str, new_args: dict
+) -> dict:
+    """Requester edits the args (re-stamping the hash) and approves, then it executes."""
+    with user_session(approver_id) as conn:
+        row = conn.execute(
+            "select tool_name, requesting_member_id from public.consent_queue"
+            " where id=%s and status='pending'",
+            (consent_id,),
+        ).fetchone()
+        if row is None:
+            return {"status": "not_approved", "reason": "not pending or not yours"}
+        tool_name, requester_id = row
+        new_hash = compute_hash(tool_name, team_id, str(requester_id), new_args)
+        conn.execute(
+            "update public.consent_queue set tool_args=%s, action_hash=%s,"
+            " status='edited' where id=%s",
+            (Json(new_args), new_hash, consent_id),
+        )
+    return execute_consent(team_id, consent_id)
 
 
 # ---------- per-tool executors + precondition checks ----------

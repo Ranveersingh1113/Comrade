@@ -11,4 +11,9 @@ def test_tools_registered():
     names = [
         getattr(t, "name", getattr(t, "__name__", "")) for t in root_agent.tools
     ]
-    assert {"team_get_state", "team_propose_task", "member_send_nudge"} <= set(names)
+    assert {
+        "team_get_state",
+        "team_propose_task",
+        "team_propose_group_message",
+        "member_send_nudge",
+    } <= set(names)

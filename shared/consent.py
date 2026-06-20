@@ -178,5 +178,31 @@ def _exec_task_create(conn, team_id, requester_id, args) -> dict:
     return {"task_id": str(row[0])}
 
 
-_PRECHECKS = {"task_create": _precheck_task_create}
-_EXECUTORS = {"task_create": _exec_task_create}
+def _precheck_post_group_message(conn, team_id, requester_id, args) -> None:
+    ok = conn.execute(
+        "select 1 from public.memberships where team_id=%s and user_id=%s"
+        " and status='active'",
+        (team_id, requester_id),
+    ).fetchone()
+    if ok is None:
+        raise ConsentError("requester is no longer an active team member")
+
+
+def _exec_post_group_message(conn, team_id, requester_id, args) -> dict:
+    # AI posts to the group as itself (not attributed to the requester)
+    row = conn.execute(
+        "insert into public.messages (team_id, thread_type, sender_kind, body)"
+        " values (%s,'group','ai',%s) returning id",
+        (team_id, args["body"]),
+    ).fetchone()
+    return {"message_id": str(row[0])}
+
+
+_PRECHECKS = {
+    "task_create": _precheck_task_create,
+    "post_group_message": _precheck_post_group_message,
+}
+_EXECUTORS = {
+    "task_create": _exec_task_create,
+    "post_group_message": _exec_post_group_message,
+}

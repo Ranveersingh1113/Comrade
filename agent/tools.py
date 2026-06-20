@@ -116,6 +116,29 @@ def team_propose_task(
     )
 
 
+def team_propose_group_message(
+    body: str,
+    source: str,
+    tool_context: ToolContext,
+) -> dict:
+    """Propose posting a message to the group room (the AI posts as itself).
+    GATED: not posted now — it goes to the requester for approval and is posted
+    only if they approve.
+
+    Args:
+        body: the exact message text that would be posted.
+        source: short note on what prompted this (shown on the consent card).
+    """
+    return propose_action(
+        team_id=tool_context.state["team_id"],
+        requester_id=tool_context.state["requester_id"],
+        tool_name="post_group_message",
+        args={"body": body},
+        source_snippet=source or None,
+        reversible=False,
+    )
+
+
 def member_send_nudge(
     member_id: str,
     nudge_type: Literal["pending_task", "overdue_deadline", "idle", "unopened_doc"],

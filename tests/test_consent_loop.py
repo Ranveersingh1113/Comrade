@@ -69,6 +69,35 @@ def test_reject_then_execute_is_noop(seeded):
         conn.close()
 
 
+def test_propose_group_message_approve_posts(seeded):
+    cid = propose_action(
+        TEAM_A, A1, "post_group_message", {"body": "Standup at 5pm."},
+    )["consent_id"]
+    conn = _admin()
+    try:
+        # nothing posted yet
+        assert conn.execute(
+            "select count(*) from public.messages where team_id=%s"
+            " and thread_type='group' and sender_kind='ai'",
+            (TEAM_A,),
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    assert approve_consent(TEAM_A, cid, approver_id=A1)["status"] == "executed"
+
+    conn = _admin()
+    try:
+        posted = conn.execute(
+            "select body from public.messages where team_id=%s"
+            " and thread_type='group' and sender_kind='ai'",
+            (TEAM_A,),
+        ).fetchall()
+        assert [r[0] for r in posted] == ["Standup at 5pm."]
+    finally:
+        conn.close()
+
+
 def test_edit_and_approve_executes_new_args(seeded):
     cid = _propose(title="Old")
     result = edit_and_approve(

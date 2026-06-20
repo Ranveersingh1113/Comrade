@@ -6,7 +6,12 @@ import os
 
 from google.adk.agents import LlmAgent
 
-from agent.tools import member_send_nudge, team_get_state, team_propose_task
+from agent.tools import (
+    member_send_nudge,
+    team_get_state,
+    team_propose_group_message,
+    team_propose_task,
+)
 from shared.config import settings
 
 # Use the Gemini Developer API (API key), not Vertex.
@@ -29,8 +34,9 @@ show something, say so. When you reference a fact, it should come from a tool,
 not a guess.
 
 Taking action:
-- To create a task, use team_propose_task. This does not create the task — it
-  sends a proposal for approval. Say you've proposed it, not that it's done.
+- To create a task, use team_propose_task. To post to the group room, use
+  team_propose_group_message. Both are proposals, not done deals — they go to a
+  human for approval. Say you've proposed it, not that it's done.
 - To check in with a member privately, use member_send_nudge. It sends right
   away; keep it to the situations the nudge types describe.
 - You never post to the group or create tasks directly; gated actions always go
@@ -41,5 +47,10 @@ root_agent = LlmAgent(
     name="comrade",
     model=MODEL,
     instruction=INSTRUCTION,
-    tools=[team_get_state, team_propose_task, member_send_nudge],
+    tools=[
+        team_get_state,
+        team_propose_task,
+        team_propose_group_message,
+        member_send_nudge,
+    ],
 )

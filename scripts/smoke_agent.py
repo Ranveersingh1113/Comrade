@@ -10,7 +10,7 @@ from google.genai import types
 
 from agent.agent import root_agent
 from shared.config import settings
-from tests._seed import TEAM_A, cleanup, seed
+from tests._seed import A1, TEAM_A, cleanup, seed
 
 
 def _seed_team():
@@ -49,10 +49,12 @@ async def main():
 
         runner = InMemoryRunner(agent=root_agent, app_name="comrade")
         user_id = "smoke-user"
+        # team_id / requester_id are server-bound in session state (never LLM args)
         session = await runner.session_service.create_session(
-            app_name="comrade", user_id=user_id
+            app_name="comrade", user_id=user_id,
+            state={"team_id": TEAM_A, "requester_id": A1},
         )
-        prompt = f"Give me a short status summary for team {TEAM_A}."
+        prompt = "Give me a short status summary."
         msg = types.Content(role="user", parts=[types.Part(text=prompt)])
 
         async for ev in runner.run_async(

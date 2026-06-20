@@ -14,19 +14,25 @@ from .config import settings
 
 
 class Role(str, Enum):
-    ADMIN = "admin"        # tests only — table owner, bypasses RLS
-    AGENT = "agent"        # conversational agent + platform MCP server
-    PIPELINE = "pipeline"  # document parser + memory compiler
+    ADMIN = "admin"          # tests only — table owner, bypasses RLS
+    AGENT = "agent"          # reads + proposes + private nudges
+    EXECUTOR = "executor"    # performs approved consent actions only
+    PIPELINE = "pipeline"    # document parser + memory compiler
 
 
 _URLS: dict[Role, str] = {
     Role.ADMIN: settings.comrade_db_url_admin,
     Role.AGENT: settings.comrade_agent_db_url,
+    Role.EXECUTOR: settings.comrade_executor_db_url,
     Role.PIPELINE: settings.comrade_pipeline_db_url,
 }
 
 # how each worker is recorded in change_log (via app.actor_kind GUC)
-_ACTOR_KIND: dict[Role, str] = {Role.AGENT: "ai", Role.PIPELINE: "compiler"}
+_ACTOR_KIND: dict[Role, str] = {
+    Role.AGENT: "ai",
+    Role.EXECUTOR: "ai",     # executes the AI's approved action
+    Role.PIPELINE: "compiler",
+}
 
 
 @contextmanager

@@ -128,16 +128,23 @@ def test_audit_records_user_actor(seeded):
     assert actor_kind == "user" and str(actor_id) == A1 and action == "create"
 
 
-def test_audit_records_agent_actor(seeded):
-    with team_session(Role.AGENT, TEAM_A) as conn:
+def test_audit_records_worker_actor(seeded):
+    # the executor is the worker that writes tasks (agent's task-write was revoked)
+    with team_session(Role.EXECUTOR, TEAM_A) as conn:
         tid = conn.execute(
             "insert into public.tasks (team_id, assignee_id, title, created_by_kind)"
             " values (%s, %s, 't', 'ai') returning id",
             (TEAM_A, A2),
         ).fetchone()[0]
+    # executor has no change_log SELECT; read the audit row via admin
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
         actor_kind, actor_id = conn.execute(
             "select actor_kind, actor_id from public.change_log"
             " where table_name='tasks' and row_id=%s",
             (tid,),
         ).fetchone()
+    finally:
+        conn.close()
     assert actor_kind == "ai" and actor_id is None

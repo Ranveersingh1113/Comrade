@@ -2,7 +2,7 @@
 
 Conversation history is the messages table's job (source of truth); each turn
 uses a fresh, stateless ADK runner seeded with the server-bound team/requester.
-The orchestrator (run_turn / run_turn_sync) is added in Task 3.
+The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
 from typing import Any
@@ -90,5 +90,9 @@ async def run_turn(
 def run_turn_sync(
     team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
 ) -> dict[str, Any]:
-    """Blocking wrapper around run_turn for sync callers (the HTTP handler)."""
+    """Blocking wrapper around run_turn for sync callers (the HTTP handler).
+
+    Must not be called from within a running event loop — asyncio.run() creates
+    a new loop and raises if one is already running.
+    """
     return asyncio.run(run_turn(team_id, requester_id, user_text, trigger_type))

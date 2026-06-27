@@ -13,7 +13,7 @@ from shared.config import settings
 from tests._seed import A1, TEAM_A, cleanup, seed
 
 
-def _admin():
+def _admin() -> psycopg.Connection:
     conn = psycopg.connect(settings.comrade_db_url_admin)
     conn.autocommit = True
     return conn

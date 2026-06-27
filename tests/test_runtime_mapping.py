@@ -41,12 +41,17 @@ def test_maps_result_and_text_with_continuing_seq():
     )
     steps = _steps_from_event(ev, 3)
     assert [s["seq"] for s in steps] == [3, 4]
-    assert steps[0]["type"] == "tool_result"
+    assert steps[0] == {"seq": 3, "type": "tool_result", "tool": "team_get_state", "response": {"members": []}}
     assert steps[1] == {"seq": 4, "type": "text", "text": "All caught up."}
 
 
 def test_empty_event_yields_nothing():
     assert _steps_from_event(SimpleNamespace(content=None), 0) == []
+
+
+def test_emits_empty_string_text_part():
+    steps = _steps_from_event(_event(_text_part("")), 0)
+    assert steps == [{"seq": 0, "type": "text", "text": ""}]
 
 
 def test_reply_joins_text_steps_only():

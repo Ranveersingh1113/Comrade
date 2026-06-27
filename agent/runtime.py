@@ -33,7 +33,7 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
                 "tool": fr.name, "response": fr.response,
             })
             seq += 1
-        elif text:
+        elif text is not None:
             steps.append({"seq": seq, "type": "text", "text": text})
             seq += 1
     return steps

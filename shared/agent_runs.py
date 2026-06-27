@@ -20,28 +20,38 @@ def start_run(team_id: str, trigger_type: str, input_summary: str) -> str:
             " values (%s, %s, %s) returning id",
             (team_id, trigger_type, input_summary),
         ).fetchone()
+    if row is None:
+        raise RuntimeError(f"agent_runs insert returned no row for team {team_id!r}")
     return str(row[0])
 
 
 def append_step(team_id: str, run_id: str, step: dict[str, Any]) -> None:
     """Append one ordered step to the run and bump current_step."""
     with team_session(Role.AGENT, team_id) as conn:
-        conn.execute(
+        cur = conn.execute(
             "update public.agent_runs"
             " set steps = steps || %s::jsonb, current_step = current_step + 1"
             " where id = %s",
             (Json([step]), run_id),
         )
+        if cur.rowcount == 0:
+            raise LookupError(
+                f"agent_run {run_id!r} not found or not accessible for team {team_id!r}"
+            )
 
 
 def finish_run(team_id: str, run_id: str, status: str) -> None:
     """Close the run with a terminal status ('done' | 'failed')."""
     with team_session(Role.AGENT, team_id) as conn:
-        conn.execute(
+        cur = conn.execute(
             "update public.agent_runs set status = %s, finished_at = now()"
             " where id = %s",
             (status, run_id),
         )
+        if cur.rowcount == 0:
+            raise LookupError(
+                f"agent_run {run_id!r} not found or not accessible for team {team_id!r}"
+            )
 
 
 def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:

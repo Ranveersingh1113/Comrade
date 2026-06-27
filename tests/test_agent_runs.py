@@ -1,4 +1,6 @@
 """agent_runs observability: durable run + step logging under the AGENT role."""
+import pytest
+
 from shared.agent_runs import append_step, finish_run, get_run, start_run
 from tests._seed import TEAM_A, TEAM_B
 
@@ -34,3 +36,8 @@ def test_runs_are_team_scoped(seeded):
     run_id = start_run(TEAM_A, "user", "summary")
     # TEAM_B's agent session must not see TEAM_A's run (RLS via current_team()).
     assert get_run(TEAM_B, run_id) is None
+
+
+def test_append_step_unknown_run_raises(seeded):
+    with pytest.raises(LookupError):
+        append_step(TEAM_A, "00000000-0000-0000-0000-000000000000", {"seq": 0, "type": "text", "text": "x"})

@@ -3,15 +3,18 @@ name = "comrade"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "fastapi>=0.137.1",
     "google-adk>=2.2.0",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.1",
     "pymupdf4llm>=1.27.2.3",
     "python-docx>=1.2.0",
+    "uvicorn[standard]>=0.49.0",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.0.3",
 ]
 

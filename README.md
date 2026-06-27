@@ -20,6 +20,7 @@ This is a solo-dev pilot targeting small student teams (≤4 members).
 | Path | Purpose |
 |------|---------|
 | `agent/` | Google ADK `LlmAgent` and its function tools |
+| `server/` | FastAPI runtime — `POST /agent/turn` runs one agent turn |
 | `pipeline/` | Document pipeline worker (PDF/.docx/WhatsApp ingestion) |
 | `supabase/` | Supabase config + SQL migrations (`supabase/migrations/`) |
 | `shared/` | Shared config, models, and utilities |
@@ -34,3 +35,17 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12 (uv manages this autom
 uv sync                 # create the virtualenv and install dependencies
 cp .env.example .env    # then fill in real values (never commit .env)
 ```
+
+## Run the agent service
+
+```bash
+uv run uvicorn server.app:app --reload      # serves on http://127.0.0.1:8000
+
+curl -s http://127.0.0.1:8000/agent/turn \
+  -H 'content-type: application/json' \
+  -d '{"team_id":"<team-uuid>","requester_id":"<user-uuid>","text":"Give me a status summary."}'
+```
+
+Every turn is recorded to `public.agent_runs` (one row per turn, one step per tool
+call / result / text chunk) for observability. `team_id` / `requester_id` are
+bound server-side; sourcing them from the Supabase JWT is the next task.

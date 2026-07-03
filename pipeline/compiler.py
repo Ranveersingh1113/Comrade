@@ -59,6 +59,7 @@ def _unmark(s: str) -> str:
 
 FAST_PATH_MAX_FACTS = 150   # ≤ this many active facts -> pass ALL as neighbors
 K_NEIGHBORS = 5             # per-candidate top-k past the fast path
+MIN_PARSE_CHARS = 20        # below this the parse is a scan/binary/blank -> fail loudly
 
 _EXTRACT_SYSTEM = (
     "You are Comrade's memory compiler (stage 1: extraction). From the document,"
@@ -331,6 +332,19 @@ def handle_document_job(team_id: str, payload: dict) -> None:
     """
     document_id = payload["document_id"]
     text = _parse_by_kind(payload.get("kind", "text"), payload.get("content", ""))
+    if len(text.strip()) < MIN_PARSE_CHARS:
+        # Scanned PDFs and unknown binaries parse to (near-)empty text. Mark the
+        # document failed instead of compiling nothing silently; the router
+        # slice will add multimodal fallback here.
+        with team_session(Role.PIPELINE, team_id) as conn:
+            conn.execute(
+                "update public.documents set status='failed' where id=%s",
+                (document_id,),
+            )
+        raise ValueError(
+            f"document {document_id} parsed to {len(text.strip())} chars"
+            " - likely scanned or unsupported; compile skipped"
+        )
     compile_document(team_id, document_id, spotlight(text))
     with team_session(Role.PIPELINE, team_id) as conn:
         conn.execute(

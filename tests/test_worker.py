@@ -103,3 +103,32 @@ def test_skip_locked_prevents_double_claim(seeded):
     finally:
         holder.rollback()
         holder.close()
+
+
+def test_empty_parse_marks_document_failed(seeded):
+    """Scanned/empty documents must fail loudly, not compile silently."""
+    import psycopg
+    import pytest as _pytest
+
+    from pipeline.compiler import handle_document_job
+    from shared.config import settings as _settings
+    from tests._seed import TEAM_A as _TEAM_A
+
+    conn = psycopg.connect(_settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
+        doc_id = conn.execute(
+            "insert into public.documents (team_id, kind, filename)"
+            " values (%s,'text','blank.txt') returning id",
+            (_TEAM_A,),
+        ).fetchone()[0]
+        with _pytest.raises(ValueError, match="parsed to"):
+            handle_document_job(
+                _TEAM_A, {"document_id": str(doc_id), "kind": "text", "content": "   "}
+            )
+        status = conn.execute(
+            "select status from public.documents where id=%s", (doc_id,)
+        ).fetchone()[0]
+        assert status == "failed"
+    finally:
+        conn.close()

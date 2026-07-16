@@ -10,8 +10,6 @@ import pytest
 from pipeline.compiler import compile_document
 from pipeline.parsers import spotlight
 from shared.config import settings
-from shared.db import Role, team_session
-from shared.embeddings import embed_one
 from tests._seed import TEAM_A
 
 pytestmark = pytest.mark.skipif(
@@ -48,19 +46,3 @@ def test_two_stage_compile_and_revise_roundtrip(seeded):
         conn.close()
     assert len(active_deadlines) <= 1, f"contradictory facts coexist: {active_deadlines}"
     assert r2["revised"] + r2["removed"] + r2["added"] >= 1
-
-
-def test_embeddings_carry_provenance(seeded):
-    compile_document(TEAM_A, DOC1, spotlight("Decision: we will use PostgreSQL."))
-    conn = psycopg.connect(settings.comrade_db_url_admin)
-    conn.autocommit = True
-    try:
-        row = conn.execute(
-            "select embedding_model, embedding_dim from public.memory_versions"
-            " where team_id=%s and embedding is not null"
-            " order by created_at desc limit 1",
-            (TEAM_A,),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row == ("gemini-embedding-001", 1536)

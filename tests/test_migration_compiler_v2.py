@@ -43,13 +43,11 @@ def test_change_type_still_rejects_unknown(admin, seeded):
         )
 
 
-def test_embedding_provenance_columns_exist(admin):
-    cols = {
-        r[0]: r[1]
-        for r in admin.execute(
-            "select column_name, data_type from information_schema.columns"
-            " where table_schema='public' and table_name='memory_versions'"
-            " and column_name in ('embedding_model','embedding_dim')"
-        ).fetchall()
-    }
-    assert cols == {"embedding_model": "text", "embedding_dim": "integer"}
+def test_vector_columns_removed(admin):
+    """2026-07-15 pivot: retrieval-style memory deleted — columns must be gone."""
+    cols = admin.execute(
+        "select column_name from information_schema.columns"
+        " where table_schema='public' and table_name='memory_versions'"
+        " and column_name in ('embedding','embedding_model','embedding_dim')"
+    ).fetchall()
+    assert cols == []

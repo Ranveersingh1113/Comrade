@@ -19,7 +19,6 @@ class Settings(BaseSettings):
 
     # Filled in as those features are built.
     gemini_api_key: str = ""
-    openai_api_key: str = ""
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_secret_key: str = ""

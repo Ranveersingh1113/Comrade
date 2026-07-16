@@ -5,15 +5,14 @@ Two-stage design so the deterministic part is unit-testable:
     document alone — no existing-fact context, so recall doesn't degrade as
     the team's memory grows.
   - Stage 2 (consolidate): one LLM call decides an action per candidate
-    ('add' | 'revise' | 'invalidate' | 'noop') against that candidate's own
-    neighbor set (assemble_neighbors: all active facts under a fast-path
-    threshold, else per-candidate top-k similarity search).
+    ('add' | 'revise' | 'invalidate' | 'noop') against the team's whole
+    active fact set (PromptQL-style: pilot corpora fit in the context
+    window; page-scoped consolidation arrives with the wiki-pages slice).
   - apply_compilation(): pure DB writes given candidates + validated
-    decisions + vectors — unit-tested, deterministic.
+    decisions — unit-tested, deterministic.
 
-compile_document() orchestrates extract -> embed once -> assemble neighbors
--> consolidate -> apply, and handle_document_job() is the worker handler
-(parse -> spotlight -> compile).
+compile_document() orchestrates extract -> consolidate -> apply, and
+handle_document_job() is the worker handler (parse -> spotlight -> compile).
 """
 import base64
 
@@ -25,15 +24,9 @@ from pydantic import BaseModel
 from pipeline.parsers import (
     SPACE_MARK, parse_docx, parse_pdf, parse_whatsapp, spotlight,
 )
-from pipeline.retrieval import (
-    all_active_facts, count_active_facts, find_similar_facts, vec_literal,
-)
 from pipeline.worker import register
 from shared.config import settings
 from shared.db import Role, connect, team_session
-from shared.embeddings import DIM as EMBED_DIM
-from shared.embeddings import MODEL as EMBED_MODEL
-from shared.embeddings import embed
 
 MODEL_FLASH = "gemini-2.5-flash"
 MODEL_PRO = "gemini-2.5-pro"
@@ -57,8 +50,19 @@ def _unmark(s: str) -> str:
     return s.replace(SPACE_MARK, " ")
 
 
-FAST_PATH_MAX_FACTS = 150   # ≤ this many active facts -> pass ALL as neighbors
-K_NEIGHBORS = 5             # per-candidate top-k past the fast path
+def all_active_facts(conn, team_id: str) -> list[dict]:
+    """Every active, unarchived fact — the consolidation context. Runs on a
+    caller-provided team_session(Role.PIPELINE) connection, so RLS confines it
+    to the one team; team_id in SQL is belt-and-braces."""
+    rows = conn.execute(
+        "select e.id, v.fact from public.memory_entries e"
+        " join public.memory_versions v on v.entry_id = e.id and v.is_active"
+        " where e.team_id = %s and not e.archived order by v.created_at",
+        (team_id,),
+    ).fetchall()
+    return [{"entry_id": str(r[0]), "text": r[1]} for r in rows]
+
+
 MIN_PARSE_CHARS = 20        # below this the parse is a scan/binary/blank -> fail loudly
 
 _EXTRACT_SYSTEM = (
@@ -181,26 +185,12 @@ def consolidate(
     return validate_decisions(candidates, neighbors, raw)
 
 
-def assemble_neighbors(
-    conn, team_id: str, vectors: list[list[float]], total_active: int
-) -> list[list[dict]]:
-    """Fast path (small teams): every candidate sees ALL active facts — recall
-    identical to compiler v1. Past the threshold: per-candidate top-k."""
-    if total_active <= FAST_PATH_MAX_FACTS:
-        shared = all_active_facts(conn, team_id)
-        return [shared for _ in vectors]
-    return [
-        find_similar_facts(conn, team_id, vec, K_NEIGHBORS) for vec in vectors
-    ]
-
-
 def apply_compilation(
     conn,
     team_id: str,
     document_id: str,
     candidates: list[Candidate],
     decisions: list[Decision],
-    vectors: list[list[float]],
 ) -> dict:
     """Write a compilation run: four verbs, bi-temporal supersession, citations,
     diff card. Deterministic given inputs; runs in the caller's transaction."""
@@ -211,7 +201,7 @@ def apply_compilation(
     ).fetchone()[0]
 
     added = revised = removed = skipped = 0
-    for cand, dec, vec in zip(candidates, decisions, vectors):
+    for cand, dec in zip(candidates, decisions):
         action, target = dec.action, dec.entry_id
         if action in ("revise", "invalidate", "noop"):
             valid = conn.execute(
@@ -244,9 +234,8 @@ def apply_compilation(
                 change, removed = "invalidated", removed + 1
 
         if change == "invalidated":
-            # Tombstone: never active, closed immediately; no embedding (it is
-            # never retrieved), but the retraction text + citation stay on the
-            # entry so history shows why it died.
+            # Tombstone: never active, closed immediately; the retraction text
+            # + citation stay on the entry so history shows why it died.
             version_id = conn.execute(
                 "insert into public.memory_versions (entry_id, team_id,"
                 " compilation_id, fact, change_type, is_active, valid_until)"
@@ -256,10 +245,9 @@ def apply_compilation(
         else:
             version_id = conn.execute(
                 "insert into public.memory_versions (entry_id, team_id,"
-                " compilation_id, fact, embedding, embedding_model, embedding_dim,"
-                " change_type) values (%s,%s,%s,%s,%s::vector,%s,%s,%s) returning id",
-                (target, team_id, comp_id, _unmark(cand.text), vec_literal(vec),
-                 EMBED_MODEL, EMBED_DIM, change),
+                " compilation_id, fact, change_type)"
+                " values (%s,%s,%s,%s,%s) returning id",
+                (target, team_id, comp_id, _unmark(cand.text), change),
             ).fetchone()[0]
 
         if cand.excerpt:
@@ -293,22 +281,23 @@ def apply_compilation(
 
 
 def compile_document(team_id: str, document_id: str, marked_text: str) -> dict:
-    """Two-stage compile: extract -> embed once -> neighbors -> consolidate -> apply."""
+    """Two-stage compile: extract -> consolidate against all active facts -> apply.
+
+    PromptQL-style: the team's whole fact set is the consolidation context
+    (pilot corpora fit in the window). Page-scoped consolidation arrives with
+    the wiki-pages slice."""
     candidates = extract_candidates(marked_text)
-    vectors = embed([c.text for c in candidates]) if candidates else []
 
     with team_session(Role.PIPELINE, team_id) as conn:
-        total = count_active_facts(conn, team_id)
-        neighbors = assemble_neighbors(conn, team_id, vectors, total)
+        facts = all_active_facts(conn, team_id)
+    neighbors = [facts for _ in candidates]
 
     decisions = (
         consolidate(candidates, neighbors, len(marked_text)) if candidates else []
     )
 
     with team_session(Role.PIPELINE, team_id) as conn:
-        return apply_compilation(
-            conn, team_id, document_id, candidates, decisions, vectors
-        )
+        return apply_compilation(conn, team_id, document_id, candidates, decisions)
 
 
 # ---------- worker integration ----------

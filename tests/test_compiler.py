@@ -4,16 +4,14 @@ from types import SimpleNamespace
 import psycopg
 
 from pipeline.compiler import (
-    Candidate, Decision, apply_compilation, build_consolidation_prompt,
-    validate_decisions,
+    Candidate, Decision, all_active_facts, apply_compilation,
+    build_consolidation_prompt, validate_decisions,
 )
 from shared.config import settings
 from shared.db import Role, team_session
-from shared.embeddings import DIM, MODEL
-from tests._seed import TEAM_A
+from tests._seed import TEAM_A, TEAM_B
 
 DOC = "d0000000-0000-0000-0000-0000000000d1"  # source_id has no FK
-VEC = [0.1] * 1536
 
 
 def _admin():
@@ -85,15 +83,15 @@ def test_apply_add_writes_fact_provenance_citation_card(seeded):
     cands = [Candidate(text="Deadline is Friday", excerpt="due Friday")]
     decs = [Decision(candidate_index=0, action="add")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs, [VEC])
+        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
     assert (result["added"], result["revised"], result["removed"]) == (1, 0, 0)
     conn = _admin()
     try:
         row = conn.execute(
-            "select fact, embedding_model, embedding_dim from public.memory_versions"
+            "select fact from public.memory_versions"
             " where compilation_id=%s", (result["compilation_id"],),
         ).fetchone()
-        assert row == ("Deadline is Friday", MODEL, DIM)
+        assert row == ("Deadline is Friday",)
         card = conn.execute(
             "select body from public.messages where id=%s",
             (result["diff_message_id"],),
@@ -108,7 +106,7 @@ def test_apply_revise_supersedes(seeded):
     cands = [Candidate(text="Deadline is Friday", excerpt="moved")]
     decs = [Decision(candidate_index=0, action="revise", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs, [VEC])
+        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
     assert result["revised"] == 1
     conn = _admin()
     try:
@@ -128,7 +126,7 @@ def test_apply_invalidate_tombstones_without_replacement(seeded):
     cands = [Candidate(text="Mobile app was dropped", excerpt="drop the mobile app")]
     decs = [Decision(candidate_index=0, action="invalidate", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs, [VEC])
+        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
     assert (result["added"], result["removed"]) == (0, 1)
     conn = _admin()
     try:
@@ -156,7 +154,7 @@ def test_apply_noop_writes_nothing(seeded):
     cands = [Candidate(text="Deadline is Friday")]
     decs = [Decision(candidate_index=0, action="noop", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs, [VEC])
+        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
     assert result["skipped"] == 1 and result["added"] == 0
     conn = _admin()
     try:
@@ -169,10 +167,20 @@ def test_apply_noop_writes_nothing(seeded):
         conn.close()
 
 
+def test_all_active_facts_scoped_to_team(seeded):
+    _seed_entry("A-only fact")
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
+        texts_a = {f["text"] for f in all_active_facts(conn, TEAM_A)}
+    with team_session(Role.PIPELINE, TEAM_B) as conn:
+        texts_b = {f["text"] for f in all_active_facts(conn, TEAM_B)}
+    assert "A-only fact" in texts_a
+    assert "A-only fact" not in texts_b
+
+
 def test_apply_bad_target_falls_back_to_add(seeded):
     cands = [Candidate(text="Orphan fact")]
     decs = [Decision(candidate_index=0, action="revise",
                      entry_id="00000000-0000-0000-0000-0000000000ff")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs, [VEC])
+        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
     assert result["added"] == 1 and result["revised"] == 0

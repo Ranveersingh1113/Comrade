@@ -25,6 +25,13 @@ def _admin():
     return conn
 
 
+DOC2_ID = "d0000000-0000-0000-0000-0000000000d2"
+DOC2_TEXT = (
+    "Update from today's meeting: the final demo moved to Monday, December 21.\n"
+    "We are cancelling the React frontend — the demo will be CLI-only."
+)
+
+
 def main():
     conn = _admin()
     with conn.cursor() as cur:
@@ -32,25 +39,22 @@ def main():
         seed(cur)
     conn.close()
     try:
-        result = compile_document(TEAM_A, DOC_ID, spotlight(DOC_TEXT))
-        print(f"[COMPILE] {result}")
+        r1 = compile_document(TEAM_A, DOC_ID, spotlight(DOC_TEXT))
+        print(f"[COMPILE 1] {r1}")
+        r2 = compile_document(TEAM_A, DOC2_ID, spotlight(DOC2_TEXT))
+        print(f"[COMPILE 2] {r2}")
         conn = _admin()
         facts = conn.execute(
-            "select v.change_type, v.fact, c.excerpt"
+            "select v.change_type, v.is_active, v.fact"
             " from public.memory_versions v"
             " join public.memory_entries e on e.id = v.entry_id"
-            " left join public.memory_citations c on c.version_id = v.id"
-            " where e.team_id=%s and v.is_active and v.compilation_id is not null"
+            " where e.team_id=%s and v.compilation_id is not null"
             " order by v.created_at",
             (TEAM_A,),
         ).fetchall()
-        for change, fact, excerpt in facts:
-            print(f"[{change.upper()}] {fact}   (cite: {excerpt})")
-        card = conn.execute(
-            "select body from public.messages where id=%s",
-            (result["diff_message_id"],),
-        ).fetchone()[0]
-        print(f"[CARD] {card}")
+        for change, active, fact in facts:
+            flag = "ACTIVE" if active else "closed"
+            print(f"[{change.upper():11s}|{flag}] {fact}")
         conn.close()
     finally:
         conn = _admin()

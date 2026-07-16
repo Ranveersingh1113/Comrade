@@ -3,6 +3,14 @@
 > Date: 2026-06-28. Produced from a 6-lens web-backed research pass + 2 synthesis passes, weighed against
 > independent judgment. Decisions below were reviewed and accepted by the owner.
 > Status: **findings + accepted direction — no code changes yet.**
+>
+> ⚠️ **PARTIALLY SUPERSEDED 2026-07-15** (post PromptQL.io + Viktor.com analysis, owner-accepted):
+> RAG demoted architecture→dormant fallback (wiki-PAGE memory primary: topic pages + LLM-selector
+> recall, page-based consolidation neighbors; embeddings still computed, nothing built on them).
+> Per-file-type ingestion router THROWN → curated pinned skills-based ingestion (agent dispatches
+> by doc type; sandboxed exec; spotlighting + "stored, never lost" survive). Graph-over-vectors
+> parked harder. Trust layer (bi-temporal/citations/reverts/compiler-only) unchanged. Full pivot
+> record: memory entry `project-comrade-memory-ingestion` (PIVOT section).
 
 ---
 

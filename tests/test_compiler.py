@@ -108,7 +108,7 @@ def test_apply_add_writes_fact_provenance_citation_card(seeded):
     cands = [Candidate(text="Deadline is Friday", excerpt="due Friday")]
     decs = [Decision(candidate_index=0, action="add")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     assert (result["added"], result["revised"], result["removed"]) == (1, 0, 0)
     conn = _admin()
     try:
@@ -131,7 +131,7 @@ def test_apply_revise_supersedes(seeded):
     cands = [Candidate(text="Deadline is Friday", excerpt="moved")]
     decs = [Decision(candidate_index=0, action="revise", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     assert result["revised"] == 1
     conn = _admin()
     try:
@@ -151,7 +151,7 @@ def test_apply_invalidate_tombstones_without_replacement(seeded):
     cands = [Candidate(text="Mobile app was dropped", excerpt="drop the mobile app")]
     decs = [Decision(candidate_index=0, action="invalidate", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     assert (result["added"], result["removed"]) == (0, 1)
     conn = _admin()
     try:
@@ -179,7 +179,7 @@ def test_apply_noop_writes_nothing(seeded):
     cands = [Candidate(text="Deadline is Friday")]
     decs = [Decision(candidate_index=0, action="noop", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     assert result["skipped"] == 1 and result["added"] == 0
     conn = _admin()
     try:
@@ -199,7 +199,7 @@ def test_apply_add_routes_to_named_page_and_reuses_case_insensitively(seeded):
         Decision(candidate_index=1, action="add", page_title="deadlines"),
     ]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     conn = _admin()
     try:
         pages = conn.execute(
@@ -221,7 +221,7 @@ def test_apply_add_without_page_title_lands_on_default_page(seeded):
     cands = [Candidate(text="Orphanish fact")]
     decs = [Decision(candidate_index=0, action="add")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     conn = _admin()
     try:
         title = conn.execute(
@@ -240,5 +240,5 @@ def test_apply_bad_target_falls_back_to_add(seeded):
     decs = [Decision(candidate_index=0, action="revise",
                      entry_id="00000000-0000-0000-0000-0000000000ff")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, DOC, cands, decs)
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
     assert result["added"] == 1 and result["revised"] == 0

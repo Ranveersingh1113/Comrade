@@ -4,14 +4,19 @@ from types import SimpleNamespace
 import psycopg
 
 from pipeline.compiler import (
-    Candidate, Decision, all_active_facts, apply_compilation,
+    DEFAULT_PAGE_TITLE, Candidate, Decision, apply_compilation,
     build_consolidation_prompt, validate_decisions,
 )
 from shared.config import settings
 from shared.db import Role, team_session
-from tests._seed import TEAM_A, TEAM_B
+from tests._seed import TEAM_A
 
 DOC = "d0000000-0000-0000-0000-0000000000d1"  # source_id has no FK
+
+
+def _page(title, facts, description=""):
+    return {"page_id": "p-x", "title": title, "description": description,
+            "facts": facts}
 
 
 def _admin():
@@ -39,23 +44,31 @@ def _seed_entry(fact="Deadline is Thursday"):
 
 # ---------- pure units ----------
 
-def test_prompt_lists_candidates_with_their_neighbors():
+def test_prompt_shows_wiki_by_page_then_candidates():
     cands = [Candidate(text="Deadline is Friday", excerpt="due Fri")]
-    neigh = [[{"entry_id": "e-1", "text": "Deadline is Thursday"}]]
-    prompt = build_consolidation_prompt(cands, neigh)
+    pages = [_page("Deadlines", [{"entry_id": "e-1", "text": "Deadline is Thursday"}],
+                   description="key dates")]
+    prompt = build_consolidation_prompt(cands, pages)
+    assert "## Page: Deadlines — key dates" in prompt
+    assert "[e-1] Deadline is Thursday" in prompt
     assert "### Candidate 0" in prompt
     assert "Deadline is Friday" in prompt
-    assert "[e-1] Deadline is Thursday" in prompt
+    # the wiki appears once, before the candidates
+    assert prompt.index("## Page: Deadlines") < prompt.index("### Candidate 0")
 
 
-def test_prompt_marks_empty_neighbor_sets():
-    prompt = build_consolidation_prompt([Candidate(text="New fact")], [[]])
-    assert "(none)" in prompt
+def test_prompt_marks_empty_page_and_empty_wiki():
+    prompt = build_consolidation_prompt(
+        [Candidate(text="New fact")], [_page("Empty", [])],
+    )
+    assert "(no facts yet)" in prompt
+    prompt = build_consolidation_prompt([Candidate(text="New fact")], [])
+    assert "(wiki is empty)" in prompt
 
 
 def test_validate_fills_missing_and_fixes_bad_targets():
     cands = [Candidate(text="a"), Candidate(text="b"), Candidate(text="c")]
-    neigh = [[{"entry_id": "e-1", "text": "x"}], [], []]
+    pages = [_page("P", [{"entry_id": "e-1", "text": "x"}])]
     decisions = [
         Decision(candidate_index=0, action="revise", entry_id="e-1"),   # valid
         Decision(candidate_index=1, action="revise", entry_id="e-9"),   # bad target -> add
@@ -63,7 +76,7 @@ def test_validate_fills_missing_and_fixes_bad_targets():
         Decision(candidate_index=0, action="noop", entry_id="e-1"),     # duplicate -> ignored
         Decision(candidate_index=9, action="add"),                      # unknown index -> ignored
     ]
-    out = validate_decisions(cands, neigh, decisions)
+    out = validate_decisions(cands, pages, decisions)
     assert [(d.candidate_index, d.action) for d in out] == [
         (0, "revise"), (1, "add"), (2, "add"),
     ]
@@ -71,10 +84,22 @@ def test_validate_fills_missing_and_fixes_bad_targets():
 
 def test_validate_rejects_unknown_action():
     out = validate_decisions(
-        [Candidate(text="a")], [[]],
+        [Candidate(text="a")], [],
         [Decision(candidate_index=0, action="obliterate")],
     )
     assert out[0].action == "add"
+
+
+def test_validate_normalises_page_title():
+    out = validate_decisions(
+        [Candidate(text="a"), Candidate(text="b")], [],
+        [
+            Decision(candidate_index=0, action="add", page_title="  Deadlines "),
+            Decision(candidate_index=1, action="add", page_title="   "),
+        ],
+    )
+    assert out[0].page_title == "Deadlines"
+    assert out[1].page_title is None
 
 
 # ---------- apply step (DB) ----------
@@ -167,14 +192,47 @@ def test_apply_noop_writes_nothing(seeded):
         conn.close()
 
 
-def test_all_active_facts_scoped_to_team(seeded):
-    _seed_entry("A-only fact")
+def test_apply_add_routes_to_named_page_and_reuses_case_insensitively(seeded):
+    cands = [Candidate(text="Demo is Friday"), Candidate(text="Report due Monday")]
+    decs = [
+        Decision(candidate_index=0, action="add", page_title="Deadlines"),
+        Decision(candidate_index=1, action="add", page_title="deadlines"),
+    ]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        texts_a = {f["text"] for f in all_active_facts(conn, TEAM_A)}
-    with team_session(Role.PIPELINE, TEAM_B) as conn:
-        texts_b = {f["text"] for f in all_active_facts(conn, TEAM_B)}
-    assert "A-only fact" in texts_a
-    assert "A-only fact" not in texts_b
+        apply_compilation(conn, TEAM_A, DOC, cands, decs)
+    conn = _admin()
+    try:
+        pages = conn.execute(
+            "select id, title from public.memory_pages where team_id=%s",
+            (TEAM_A,),
+        ).fetchall()
+        assert len(pages) == 1 and pages[0][1] == "Deadlines"  # reused, not duplicated
+        n = conn.execute(
+            "select count(*) from public.memory_entries"
+            " where team_id=%s and page_id=%s",
+            (TEAM_A, pages[0][0]),
+        ).fetchone()[0]
+        assert n == 2
+    finally:
+        conn.close()
+
+
+def test_apply_add_without_page_title_lands_on_default_page(seeded):
+    cands = [Candidate(text="Orphanish fact")]
+    decs = [Decision(candidate_index=0, action="add")]
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
+        apply_compilation(conn, TEAM_A, DOC, cands, decs)
+    conn = _admin()
+    try:
+        title = conn.execute(
+            "select p.title from public.memory_entries e"
+            " join public.memory_pages p on p.id = e.page_id"
+            " where e.team_id=%s order by e.created_at desc limit 1",
+            (TEAM_A,),
+        ).fetchone()[0]
+        assert title == DEFAULT_PAGE_TITLE
+    finally:
+        conn.close()
 
 
 def test_apply_bad_target_falls_back_to_add(seeded):

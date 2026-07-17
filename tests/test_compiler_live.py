@@ -46,3 +46,27 @@ def test_two_stage_compile_and_revise_roundtrip(seeded):
         conn.close()
     assert len(active_deadlines) <= 1, f"contradictory facts coexist: {active_deadlines}"
     assert r2["revised"] + r2["removed"] + r2["added"] >= 1
+
+
+def test_compiled_facts_land_on_pages(seeded):
+    compile_document(
+        TEAM_A, DOC1,
+        spotlight("Decision: we will use PostgreSQL. Alice owns the backend."),
+    )
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
+        orphaned = conn.execute(
+            "select count(*) from public.memory_entries e"
+            " join public.memory_versions v on v.entry_id = e.id"
+            " where e.team_id=%s and v.compilation_id is not null"
+            " and e.page_id is null",
+            (TEAM_A,),
+        ).fetchone()[0]
+        titles = [r[0] for r in conn.execute(
+            "select title from public.memory_pages where team_id=%s", (TEAM_A,),
+        ).fetchall()]
+    finally:
+        conn.close()
+    assert orphaned == 0, "compile produced page-less entries"
+    assert titles, "no wiki pages were created"

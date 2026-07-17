@@ -45,16 +45,18 @@ def main():
         print(f"[COMPILE 2] {r2}")
         conn = _admin()
         facts = conn.execute(
-            "select v.change_type, v.is_active, v.fact"
+            "select coalesce(p.title,'Uncategorized'), v.change_type,"
+            " v.is_active, v.fact"
             " from public.memory_versions v"
             " join public.memory_entries e on e.id = v.entry_id"
+            " left join public.memory_pages p on p.id = e.page_id"
             " where e.team_id=%s and v.compilation_id is not null"
-            " order by v.created_at",
+            " order by 1, v.created_at",
             (TEAM_A,),
         ).fetchall()
-        for change, active, fact in facts:
+        for page, change, active, fact in facts:
             flag = "ACTIVE" if active else "closed"
-            print(f"[{change.upper():11s}|{flag}] {fact}")
+            print(f"[{page:14s}|{change.upper():11s}|{flag}] {fact}")
         conn.close()
     finally:
         conn = _admin()

@@ -24,5 +24,15 @@ class Settings(BaseSettings):
     supabase_secret_key: str = ""
     github_pat: str = ""
 
+    # HTTP surface. The JWT secret verifies Supabase-issued user tokens; without
+    # it the API refuses to authenticate anyone rather than trusting the caller.
+    supabase_jwt_secret: str = ""
+    # Comma-separated browser origins allowed to call the API.
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
 
 settings = Settings()

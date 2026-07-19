@@ -46,13 +46,26 @@ Backend workers use separate Postgres roles (`comrade_agent` propose-only, `comr
 
 ## 3. API surface (the honest version)
 
+**Every endpoint below except `/health` requires `Authorization: Bearer <supabase session access_token>`.**
+Identity (`requester_id`) comes from the verified JWT — never from the body. `team_id` is still a body
+field (you belong to many teams, so it is routing, not identity), but every endpoint re-checks your
+membership through your *own* RLS context, so naming a team you're not in gets a 403.
+
 | Endpoint | Status | Notes |
 |---|---|---|
-| `POST /agent/turn` `{team_id, requester_id, text}` → `{run_id, reply}` | ✅ built | ⚠️ **identity comes from the request body — DEV ONLY.** JWT binding is a pending backend slice. Build the frontend to send the logged-in user's ids for now; expect this endpoint to switch to `Authorization: Bearer <supabase JWT>` later. |
+| `POST /agent/turn` `{team_id, text, thread_type}` → `{run_id, reply, user_message_id, reply_message_id}` | ✅ built | Persists both the member's message and the AI reply to `messages`; let Realtime deliver them rather than double-inserting client-side. `thread_type` is `private` (default) or `group`. |
+| `POST /consent/{id}/approve` `{team_id}` | ✅ built | Approves **and executes**. Authorisation is RLS (`au_consent_queue_update`: requester only) → 404 if not yours. |
+| `POST /consent/{id}/reject` `{team_id}` | ✅ built | |
+| `POST /consent/{id}/edit_and_approve` `{team_id, args}` | ✅ built | Re-stamps the action hash, then executes. |
+| `POST /documents/{id}/ingest?team_id=…` (multipart `file`) | ✅ built | Members can't write `jobs`; this is the bridge. Insert the `documents` row under RLS first. |
 | `GET /health` | ✅ built | |
 | Everything else | **direct Supabase** | tables + Realtime + Storage via supabase-js under RLS |
 
-Run it: `uv run uvicorn server.app:app --reload` (port 8000).
+Read consent state from the `consent_queue` table (RLS-scoped, Realtime-subscribable); use the
+endpoints only to *act*.
+
+Run it: `uv run uvicorn server.app:app --reload` (port 8000). Needs `SUPABASE_JWT_SECRET`
+(from `npx supabase status`) and `CORS_ORIGINS` in `.env` — see `.env.example`.
 
 ## 4. What a member can do via RLS (drives every screen)
 
@@ -102,17 +115,20 @@ arrangement) — owner never settled it; you have latitude, confirm big choices 
 
 ## 6. Known gaps you will hit (planned backend work, don't work around silently)
 
-1. **Auth on `/agent/turn`** — body-supplied identity, dev-only (slice: JWT binding).
-2. **No consent execute endpoint** — `approve/reject/edit_and_approve → execute_consent` exist as
-   Python (`shared/consent.py`) but aren't exposed over HTTP. Frontend can flip status via RLS, but
-   nothing executes it yet.
-3. **No document-upload→job glue** — `enqueue_document` is backend-only (members can't insert `jobs`).
-   Needs a small endpoint or DB trigger.
-4. **AI replies not persisted to `messages`** — `/agent/turn` returns the reply; persistence is a
-   deferred slice.
-5. **Chat→memory trigger unwired** — `enqueue_chat_compile` exists; nothing calls it yet (event-bus slice).
-6. **No cron/webhooks/event bus**; GitHub ingestion tables exist but nothing writes them.
-7. Consent TTL is 7 days in code (schema comment says ~5 min — code wins).
+*(1–4 below were closed on 2026-07-19 — see §3. What remains:)*
+
+1. **Chat→memory trigger unwired** — `enqueue_chat_compile` exists; nothing calls it yet (event-bus slice).
+   Until then the wiki only grows from document ingestion.
+2. **No cron/webhooks/event bus**; GitHub ingestion tables exist but nothing writes them, so the
+   contribution screen's GitHub half has no data.
+3. **Document ingest double-uploads** — the client sends bytes to Storage *and* to `/documents/{id}/ingest`,
+   because v1 carries content inline in the job payload. Fetching by `storage_path` server-side is a
+   later slice that removes the second upload.
+4. **Agent turns are synchronous** — `/agent/turn` blocks for the whole turn. Fine at pilot scale; a
+   streaming or job-backed turn is a later slice.
+5. Consent TTL is 7 days in code (schema comment says ~5 min — code wins).
+6. `user_session()` still connects via the postgres superuser URL and `SET ROLE`s down. Correct
+   behaviour, wrong principal — production needs a dedicated least-privilege authenticator role.
 
 ## 7. Governance rulings that shape UX (owner-accepted, provisional)
 

@@ -44,7 +44,9 @@ function makeQuery(table: string) {
   const q: Record<string, unknown> = {};
   const chain = () => q;
   Object.assign(q, {
-    select: chain, eq: chain, in: chain, is: chain, order: chain, limit: chain,
+    select: chain, eq: chain, neq: chain, in: chain, is: chain, not: chain,
+    gte: chain, lte: chain, order: chain, limit: chain,
+    single: () => Promise.resolve({ data: rows()[0] ?? null, error: null }),
     maybeSingle: () => Promise.resolve({ data: rows()[0] ?? null, error: null }),
     insert: (values: unknown) => {
       const message = supaState.insertErrors[table];
@@ -58,8 +60,8 @@ function makeQuery(table: string) {
         return Promise.resolve({ data: null, error: null });
       },
     }),
-    then: (resolve: (v: { data: unknown[]; error: null }) => unknown) =>
-      Promise.resolve({ data: rows(), error: null }).then(resolve),
+    then: (resolve: (v: { data: unknown[]; error: null; count: number }) => unknown) =>
+      Promise.resolve({ data: rows(), error: null, count: rows().length }).then(resolve),
   });
   return q;
 }
@@ -119,6 +121,20 @@ export function makeTeamMock() {
       refreshRoster: () => Promise.resolve(),
     }),
     TeamProvider: ({ children }: { children: ReactNode }) => children,
+  };
+}
+
+export function makeAuthMock() {
+  return {
+    useAuth: () => ({
+      session: {
+        access_token: 'test-token',
+        user: { id: teamState.myUserId, email: 'test@test.dev' },
+      },
+      loading: false,
+      signOut: () => Promise.resolve(),
+    }),
+    AuthProvider: ({ children }: { children: ReactNode }) => children,
   };
 }
 

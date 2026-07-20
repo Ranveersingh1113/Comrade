@@ -4,6 +4,7 @@ import { daysUntil, firstNameOf, shortDate } from '../lib/format';
 import type { ContributionRow, Milestone } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { taskCell, taskMark, taskPill, useTasks } from '../hooks/useTasks';
+import { taskAffordance } from '../lib/taskFlow';
 import { Avatar } from '../components/Avatar';
 
 export function Tasks() {
@@ -167,7 +168,6 @@ export function Tasks() {
                   {mine.map((t) => {
                     const cc = taskCell(t.status);
                     const p = taskPill(t.status);
-                    const isMine = t.assignee_id === myUserId;
                     return (
                       <div
                         key={t.id}
@@ -213,62 +213,73 @@ export function Tasks() {
                           {p.label}
                         </span>
                         {/* Only the assignee advances — mirrors the DB trigger. */}
-                        {isMine && t.status === 'proposed' && (
-                          <button
-                            onClick={() => void advance(t)}
-                            className="btn-primary"
-                            style={{ marginLeft: 'auto', fontSize: 10.5, padding: '5px 11px' }}
-                          >
-                            CONFIRM — IT'S YOURS
-                          </button>
-                        )}
-                        {isMine && t.status === 'confirmed' && (
-                          <button
-                            onClick={() => void advance(t)}
-                            className="btn-secondary"
-                            style={{
-                              marginLeft: 'auto',
-                              fontSize: 10.5,
-                              fontWeight: 600,
-                              letterSpacing: '0.06em',
-                              padding: '5px 11px',
-                              borderRadius: 2,
-                            }}
-                          >
-                            START
-                          </button>
-                        )}
-                        {isMine && t.status === 'in_progress' && (
-                          <button
-                            onClick={() => void advance(t)}
-                            style={{
-                              marginLeft: 'auto',
-                              border: '1px solid rgba(210,89,59,0.5)',
-                              background: '#fff',
-                              color: 'var(--terracotta)',
-                              fontSize: 10.5,
-                              fontWeight: 600,
-                              letterSpacing: '0.06em',
-                              borderRadius: 2,
-                              padding: '5px 11px',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            MARK DONE
-                          </button>
-                        )}
-                        {!isMine && t.status === 'proposed' && (
-                          <span
-                            style={{
-                              marginLeft: 'auto',
-                              fontSize: 11,
-                              fontStyle: 'italic',
-                              color: 'var(--faint)',
-                            }}
-                          >
-                            waiting on {firstNameOf(profile.display_name)} to confirm
-                          </span>
-                        )}
+                        {(() => {
+                          const a = taskAffordance(t, myUserId, firstNameOf(profile.display_name));
+                          switch (a.kind) {
+                            case 'confirm':
+                              return (
+                                <button
+                                  onClick={() => void advance(t)}
+                                  className="btn-primary"
+                                  style={{ marginLeft: 'auto', fontSize: 10.5, padding: '5px 11px' }}
+                                >
+                                  CONFIRM — IT'S YOURS
+                                </button>
+                              );
+                            case 'start':
+                              return (
+                                <button
+                                  onClick={() => void advance(t)}
+                                  className="btn-secondary"
+                                  style={{
+                                    marginLeft: 'auto',
+                                    fontSize: 10.5,
+                                    fontWeight: 600,
+                                    letterSpacing: '0.06em',
+                                    padding: '5px 11px',
+                                    borderRadius: 2,
+                                  }}
+                                >
+                                  START
+                                </button>
+                              );
+                            case 'finish':
+                              return (
+                                <button
+                                  onClick={() => void advance(t)}
+                                  style={{
+                                    marginLeft: 'auto',
+                                    border: '1px solid rgba(210,89,59,0.5)',
+                                    background: '#fff',
+                                    color: 'var(--terracotta)',
+                                    fontSize: 10.5,
+                                    fontWeight: 600,
+                                    letterSpacing: '0.06em',
+                                    borderRadius: 2,
+                                    padding: '5px 11px',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  MARK DONE
+                                </button>
+                              );
+                            case 'wait':
+                              return (
+                                <span
+                                  style={{
+                                    marginLeft: 'auto',
+                                    fontSize: 11,
+                                    fontStyle: 'italic',
+                                    color: 'var(--faint)',
+                                  }}
+                                >
+                                  waiting on {a.assigneeName} to confirm
+                                </span>
+                              );
+                            default:
+                              return null;
+                          }
+                        })()}
                       </div>
                     );
                   })}

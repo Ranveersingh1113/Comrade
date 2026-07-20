@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import type { Task, TaskStatus } from '../lib/types';
+import { confirmPatch, nextStatus } from '../lib/taskFlow';
+import type { Task } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { useTeamRealtime } from './useRealtime';
 
-const NEXT: Partial<Record<TaskStatus, TaskStatus>> = {
-  proposed: 'confirmed',
-  confirmed: 'in_progress',
-  in_progress: 'done',
-};
+// Presentation maps moved to lib/taskFlow (pure, unit-tested); re-exported
+// so existing imports keep working.
+export { taskCell, taskMark, taskPill } from '../lib/taskFlow';
 
 export interface TaskActions {
   tasks: Task[];
@@ -47,10 +46,9 @@ export function useTasks(): TaskActions {
 
   const advance = useCallback(
     async (task: Task) => {
-      const next = NEXT[task.status];
+      const next = nextStatus(task.status);
       if (!next) return;
-      const patch: Partial<Task> = { status: next };
-      if (next === 'confirmed') patch.confirmed_at = new Date().toISOString();
+      const patch = confirmPatch(next);
       const { error: err } = await supabase.from('tasks').update(patch).eq('id', task.id);
       if (err) {
         // e.g. "only the assignee may confirm their own task" from the trigger
@@ -84,29 +82,4 @@ export function useTasks(): TaskActions {
   );
 
   return { tasks, loading, error, advance, create, refresh };
-}
-
-/** Prototype's task-cell styling, keyed by status. */
-export function taskCell(status: TaskStatus) {
-  return {
-    proposed: { bg: 'transparent', border: 'rgba(35,33,48,0.35)', style: 'dashed' },
-    confirmed: { bg: 'transparent', border: 'rgba(35,33,48,0.5)', style: 'solid' },
-    in_progress: { bg: '#F0A28A', border: '#E4795B', style: 'solid' },
-    done: { bg: '#D2593B', border: '#D2593B', style: 'solid' },
-  }[status];
-}
-
-export function taskPill(status: TaskStatus) {
-  return {
-    proposed: { label: 'PROPOSED', color: '#A9A5B0', border: 'rgba(169,165,176,0.5)' },
-    confirmed: { label: 'CONFIRMED', color: '#6E5F87', border: 'rgba(110,95,135,0.5)' },
-    in_progress: { label: 'IN PROGRESS', color: '#E4795B', border: 'rgba(228,121,91,0.5)' },
-    done: { label: 'DONE', color: '#D2593B', border: 'rgba(210,89,59,0.5)' },
-  }[status];
-}
-
-export function taskMark(status: TaskStatus): string {
-  if (status === 'done') return '✓';
-  if (status === 'in_progress') return '·';
-  return '';
 }

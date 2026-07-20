@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from agent.runtime import run_turn_sync
 from pipeline.compiler import enqueue_document
 from server.auth import CurrentUserId, require_membership
+from server.invites import invite_member
 from shared.config import settings
 from shared.consent import (
     ConsentError, add_second_key, approve_consent, edit_and_approve,
@@ -185,6 +186,25 @@ def consent_second_key(
         return _consent_result(add_second_key(req.team_id, consent_id, user_id))
     except ConsentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+# ---------- teams ----------
+
+class InviteRequest(BaseModel):
+    email: str
+
+
+@app.post("/teams/{team_id}/invite")
+def team_invite(
+    team_id: str, req: InviteRequest, user_id: CurrentUserId
+) -> dict:
+    """Leader invites by email — works for people with no account yet.
+
+    GoTrue sends the invite email and creates the auth user; the membership
+    row is written as the leader under their own RLS policy.
+    """
+    require_membership(user_id, team_id)
+    return invite_member(team_id, user_id, req.email)
 
 
 # ---------- observations ----------

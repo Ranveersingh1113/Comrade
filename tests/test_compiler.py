@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 
 import psycopg
+import pytest
 
 from pipeline.compiler import (
     DEFAULT_PAGE_TITLE, Candidate, Decision, apply_compilation,
@@ -11,7 +12,7 @@ from shared.config import settings
 from shared.db import Role, team_session
 from tests._seed import TEAM_A
 
-DOC = "d0000000-0000-0000-0000-0000000000d1"  # source_id has no FK
+DOC = "d0000000-0000-0000-0000-0000000000d1"
 
 
 def _page(title, facts, description=""):
@@ -23,6 +24,20 @@ def _admin():
     conn = psycopg.connect(settings.comrade_db_url_admin)
     conn.autocommit = True
     return conn
+
+
+def _source_document() -> str:
+    """Create the provenance source required by the citation trigger."""
+    conn = _admin()
+    try:
+        conn.execute(
+            "insert into public.documents (id, team_id, kind, filename)"
+            " values (%s,%s,'text','source.txt')",
+            (DOC, TEAM_A),
+        )
+    finally:
+        conn.close()
+    return DOC
 
 
 def _seed_entry(fact="Deadline is Thursday"):
@@ -102,13 +117,20 @@ def test_validate_normalises_page_title():
     assert out[1].page_title is None
 
 
+def test_apply_rejects_misaligned_inputs():
+    with pytest.raises(ValueError, match="equal lengths"):
+        apply_compilation(
+            None, TEAM_A, [Candidate(text="fact")], [], [None],
+        )
+
+
 # ---------- apply step (DB) ----------
 
 def test_apply_add_writes_fact_provenance_citation_card(seeded):
     cands = [Candidate(text="Deadline is Friday", excerpt="due Friday")]
     decs = [Decision(candidate_index=0, action="add")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert (result["added"], result["revised"], result["removed"]) == (1, 0, 0)
     conn = _admin()
     try:
@@ -131,7 +153,7 @@ def test_apply_revise_supersedes(seeded):
     cands = [Candidate(text="Deadline is Friday", excerpt="moved")]
     decs = [Decision(candidate_index=0, action="revise", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert result["revised"] == 1
     conn = _admin()
     try:
@@ -151,7 +173,7 @@ def test_apply_invalidate_tombstones_without_replacement(seeded):
     cands = [Candidate(text="Mobile app was dropped", excerpt="drop the mobile app")]
     decs = [Decision(candidate_index=0, action="invalidate", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert (result["added"], result["removed"]) == (0, 1)
     conn = _admin()
     try:
@@ -179,7 +201,7 @@ def test_apply_noop_writes_nothing(seeded):
     cands = [Candidate(text="Deadline is Friday")]
     decs = [Decision(candidate_index=0, action="noop", entry_id=entry_id)]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert result["skipped"] == 1 and result["added"] == 0
     conn = _admin()
     try:
@@ -199,7 +221,7 @@ def test_apply_add_routes_to_named_page_and_reuses_case_insensitively(seeded):
         Decision(candidate_index=1, action="add", page_title="deadlines"),
     ]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     conn = _admin()
     try:
         pages = conn.execute(
@@ -221,7 +243,7 @@ def test_apply_add_without_page_title_lands_on_default_page(seeded):
     cands = [Candidate(text="Orphanish fact")]
     decs = [Decision(candidate_index=0, action="add")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     conn = _admin()
     try:
         title = conn.execute(
@@ -240,5 +262,5 @@ def test_apply_bad_target_falls_back_to_add(seeded):
     decs = [Decision(candidate_index=0, action="revise",
                      entry_id="00000000-0000-0000-0000-0000000000ff")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
-        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", DOC)] * len(cands))
+        result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert result["added"] == 1 and result["revised"] == 0

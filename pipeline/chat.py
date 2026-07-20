@@ -27,7 +27,7 @@ from pipeline.compiler import (
 from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
 from pipeline.worker import register
-from shared.db import Role, connect, team_session
+from shared.db import Role, team_session
 
 MIN_CHAT_MESSAGES = 5  # debounce: don't compile until this many new messages
 
@@ -101,15 +101,23 @@ def enqueue_chat_compile(
         "message_ids": [m["id"] for m in messages],
         "through": max(m["created_at"] for m in messages).isoformat(),
     }
-    with connect(Role.ADMIN) as conn:
-        conn.autocommit = True
-        return str(
-            conn.execute(
-                "insert into public.jobs (team_id, job_type, payload)"
-                " values (%s,'compile_memory',%s) returning id",
-                (team_id, Json(payload)),
-            ).fetchone()[0]
-        )
+    dedupe_key = f"chat:{payload['through']}"
+    with team_session(Role.PIPELINE, team_id) as conn:
+        row = conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
+            " values (%s,'compile_memory',%s,%s)"
+            " on conflict (team_id, job_type, dedupe_key)"
+            " where dedupe_key is not null and status in ('pending','processing')"
+            " do nothing returning id",
+            (team_id, Json(payload), dedupe_key),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "select id from public.jobs where team_id=%s and job_type='compile_memory'"
+                " and dedupe_key=%s",
+                (team_id, dedupe_key),
+            ).fetchone()
+    return str(row[0])
 
 
 def compile_messages(team_id: str, messages: list[dict], through) -> dict:

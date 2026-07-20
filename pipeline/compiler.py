@@ -26,9 +26,9 @@ from pipeline.parsers import (
     SPACE_MARK, parse_docx, parse_pdf, parse_whatsapp, spotlight,
 )
 from pipeline.wiki import all_active_pages
-from pipeline.worker import register
+from pipeline.worker import PermanentJobError, register
 from shared.config import settings
-from shared.db import Role, connect, team_session
+from shared.db import Role, team_session
 
 MODEL_FLASH = "gemini-2.5-flash"
 MODEL_PRO = "gemini-2.5-pro"
@@ -222,9 +222,17 @@ def _resolve_page(conn, team_id: str, title: str | None):
     ).fetchone()
     if row is not None:
         return row[0]
-    return conn.execute(
+    created = conn.execute(
         "insert into public.memory_pages (team_id, title) values (%s,%s)"
-        " returning id",
+        " on conflict do nothing returning id",
+        (team_id, name),
+    ).fetchone()
+    if created is not None:
+        return created[0]
+    # Another compilation inserted the same page between our lookup and insert.
+    return conn.execute(
+        "select id from public.memory_pages"
+        " where team_id=%s and lower(title)=lower(%s)",
         (team_id, name),
     ).fetchone()[0]
 
@@ -244,6 +252,9 @@ def apply_compilation(
     sources: one (source_kind, source_id) per candidate — ('document', doc_id)
     for uploads, ('message', message_id) for chat — or None to skip the
     citation. chat_through: watermark recorded on chat compilations."""
+    if not (len(candidates) == len(decisions) == len(sources)):
+        raise ValueError("candidates, decisions, and sources must have equal lengths")
+
     comp_id = conn.execute(
         "insert into public.memory_compilations (team_id, trigger, status,"
         " chat_through) values (%s,%s,'running',%s) returning id",
@@ -385,7 +396,7 @@ def handle_document_job(team_id: str, payload: dict) -> None:
                 "update public.documents set status='failed' where id=%s",
                 (document_id,),
             )
-        raise ValueError(
+        raise PermanentJobError(
             f"document {document_id} parsed to {len(text.strip())} chars"
             " - likely scanned or unsupported; compile skipped"
         )
@@ -399,15 +410,33 @@ def handle_document_job(team_id: str, payload: dict) -> None:
 def enqueue_document(team_id: str, document_id: str, kind: str, content: str) -> str:
     """Queue a document for compilation. Returns the job id."""
     payload = {"document_id": document_id, "kind": kind, "content": content}
-    with connect(Role.ADMIN) as conn:
-        conn.autocommit = True
-        return str(
-            conn.execute(
-                "insert into public.jobs (team_id, job_type, payload)"
-                " values (%s,'parse_document',%s) returning id",
-                (team_id, Json(payload)),
-            ).fetchone()[0]
+    dedupe_key = f"document:{document_id}"
+    with team_session(Role.PIPELINE, team_id) as conn:
+        document = conn.execute(
+            "select id from public.documents where id=%s and deleted_at is null",
+            (document_id,),
+        ).fetchone()
+        if document is None:
+            raise LookupError("document not found or not accessible")
+        conn.execute(
+            "update public.documents set status='parsing' where id=%s",
+            (document_id,),
         )
+        row = conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
+            " values (%s,'parse_document',%s,%s)"
+            " on conflict (team_id, job_type, dedupe_key)"
+            " where dedupe_key is not null and status in ('pending','processing')"
+            " do nothing returning id",
+            (team_id, Json(payload), dedupe_key),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "select id from public.jobs where team_id=%s and job_type='parse_document'"
+                " and dedupe_key=%s",
+                (team_id, dedupe_key),
+            ).fetchone()
+    return str(row[0])
 
 
 register("parse_document", handle_document_job)

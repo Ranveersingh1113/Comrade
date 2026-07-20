@@ -157,3 +157,26 @@ def test_enqueue_fires_at_threshold_and_advances_watermark(seeded):
 
     with team_session(Role.PIPELINE, TEAM_A) as conn:
         assert chat_watermark(conn, TEAM_A) is not None
+
+
+def test_enqueue_deduplicates_an_active_chat_batch(seeded):
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            for i in range(MIN_CHAT_MESSAGES - 1):
+                _post_group(cur, TEAM_A, A2, f"update {i}: backend on track")
+    finally:
+        conn.close()
+
+    first = enqueue_chat_compile(TEAM_A)
+    second = enqueue_chat_compile(TEAM_A)
+    assert first == second
+
+    conn = _admin()
+    try:
+        count = conn.execute(
+            "select count(*) from public.jobs where id=%s", (first,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1

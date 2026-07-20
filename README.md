@@ -10,10 +10,11 @@ This is a solo-dev pilot targeting small student teams (≤4 members).
 ## Stack
 
 - **Agent:** Google ADK (Python), single `LlmAgent` on Gemini 2.5 Flash (Pro for escalation)
-- **Backend:** Supabase (Postgres + pgvector + Realtime + Auth + Storage)
+- **Backend:** Supabase (Postgres + Realtime + Auth + Storage)
 - **Tools:** ADK native function tools (call the DB under team-scoped worker roles); GitHub integration TBD
-- **Embeddings:** OpenAI `text-embedding-3-small` + pgvector
-- **Eval:** DeepEval (deterministic metrics only)
+- **Memory:** Gemini two-stage compiler with cited, versioned wiki facts; vector
+  retrieval is intentionally not part of the current design
+- **Eval:** deterministic tool-routing checks, with optional live-model smoke tests
 
 ## Repository layout
 
@@ -24,7 +25,7 @@ This is a solo-dev pilot targeting small student teams (≤4 members).
 | `pipeline/` | Document pipeline worker (PDF/.docx/WhatsApp ingestion) |
 | `supabase/` | Supabase config + SQL migrations (`supabase/migrations/`) |
 | `shared/` | Shared config, models, and utilities |
-| `tests/` | pytest + DeepEval suites |
+| `tests/` | pytest unit, integration, and live-model smoke suites |
 | `comrade-canvas (3)/` | Planning & research docs (design source of truth) |
 
 ## Setup
@@ -35,6 +36,10 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12 (uv manages this autom
 uv sync                 # create the virtualenv and install dependencies
 cp .env.example .env    # then fill in real values (never commit .env)
 ```
+
+For the database-backed test suite and workers, also start the local Supabase
+stack, apply migrations, and create the local worker login roles as described
+in [HANDOFF.md](HANDOFF.md#8-running-the-stack-locally).
 
 ## Run the agent service
 

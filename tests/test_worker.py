@@ -81,6 +81,36 @@ def test_failing_job_retries_then_fails(seeded):
     assert "kaboom" in err
 
 
+def test_permanent_failure_does_not_retry(seeded):
+    _clear_jobs()
+    jid = _enqueue()
+
+    def bad_payload(team_id, payload):
+        raise worker.PermanentJobError("unsupported input")
+
+    assert worker.run_once(handlers={"parse_document": bad_payload}) is True
+    status, attempts, err = _status(jid)
+    assert (status, attempts, err) == ("failed", 1, "unsupported input")
+
+
+def test_expired_lease_is_reclaimed(seeded):
+    _clear_jobs()
+    jid = _enqueue()
+    conn = _admin()
+    try:
+        conn.execute(
+            "update public.jobs set status='processing', attempts=1,"
+            " lease_expires_at=now() - interval '1 minute' where id=%s",
+            (jid,),
+        )
+    finally:
+        conn.close()
+
+    assert worker.run_once(handlers={"parse_document": lambda *_: None}) is True
+    status, attempts, err = _status(jid)
+    assert status == "done" and attempts == 2 and err is None
+
+
 def test_skip_locked_prevents_double_claim(seeded):
     _clear_jobs()
     a = _enqueue(payload={"document_id": "A"})

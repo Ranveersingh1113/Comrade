@@ -16,12 +16,20 @@ Handler = Callable[[str, dict], None]
 
 _HANDLERS: dict[str, Handler] = {}
 MAX_ATTEMPTS = 3
+LEASE_INTERVAL = "30 minutes"
+
+
+class PermanentJobError(ValueError):
+    """A job failure that cannot succeed by retrying the same payload."""
 
 # Atomic claim: pick the oldest pending job, skipping rows another worker holds.
 _CLAIM_SQL = (
     "update public.jobs set status='processing', attempts=attempts+1,"
-    " picked_at=now() where id = ("
-    "  select id from public.jobs where status='pending'"
+    f" picked_at=now(), lease_expires_at=now() + interval '{LEASE_INTERVAL}',"
+    " finished_at=null where id = ("
+    "  select id from public.jobs"
+    "  where (status='pending' or (status='processing' and lease_expires_at < now()))"
+    f"    and attempts < {MAX_ATTEMPTS}"
     "  order by created_at for update skip locked limit 1"
     ") returning id, team_id, job_type, payload, attempts"
 )
@@ -37,14 +45,30 @@ def _finish(job_id, status: str, error: str | None = None) -> None:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status=%s, last_error=%s,"
+            " lease_expires_at=null,"
             " finished_at = case when %s then now() else null end where id=%s",
             (status, error, terminal, job_id),
+        )
+
+
+def _fail_expired_leases() -> None:
+    """Terminally fail work abandoned after its final lease expires."""
+    with connect(Role.ADMIN) as conn:
+        conn.autocommit = True
+        conn.execute(
+            "update public.jobs set status='failed', finished_at=now(),"
+            " lease_expires_at=null,"
+            " last_error=coalesce(last_error, 'worker lease expired')"
+            " where status='processing' and lease_expires_at < now()"
+            " and attempts >= %s",
+            (MAX_ATTEMPTS,),
         )
 
 
 def run_once(handlers: dict[str, Handler] | None = None) -> bool:
     """Claim and process one pending job. Returns False if the queue was empty."""
     handlers = _HANDLERS if handlers is None else handlers
+    _fail_expired_leases()
     with connect(Role.ADMIN) as conn:
         conn.autocommit = True
         job = conn.execute(_CLAIM_SQL).fetchone()
@@ -58,7 +82,9 @@ def run_once(handlers: dict[str, Handler] | None = None) -> bool:
             raise ValueError(f"no handler registered for job_type: {job_type}")
         handler(str(team_id), payload or {})
         _finish(job_id, "done")
-    except Exception as exc:  # noqa: BLE001 - record any failure on the job
+    except PermanentJobError as exc:
+        _finish(job_id, "failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - record any transient failure on the job
         retry = attempts < MAX_ATTEMPTS
         _finish(job_id, "pending" if retry else "failed", error=str(exc))
     return True

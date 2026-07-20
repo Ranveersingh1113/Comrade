@@ -17,7 +17,9 @@ from shared.config import settings
 # Use the Gemini Developer API (API key), not Vertex.
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
 if settings.gemini_api_key:
-    os.environ.setdefault("GOOGLE_API_KEY", settings.gemini_api_key)
+    # The explicit Comrade setting must win over an ambient process variable;
+    # otherwise a deployment can silently send team data to the wrong project.
+    os.environ["GOOGLE_API_KEY"] = settings.gemini_api_key
 
 MODEL = "gemini-2.5-flash"
 

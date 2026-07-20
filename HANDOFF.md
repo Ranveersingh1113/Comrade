@@ -115,7 +115,15 @@ arrangement) — owner never settled it; you have latitude, confirm big choices 
 
 ## 6. Known gaps you will hit (planned backend work, don't work around silently)
 
-*(1–4 below were closed on 2026-07-19 — see §3. What remains:)*
+*(The original 1–4 were closed on 2026-07-19 — see §3. What remains:)*
+
+0. **Invites only reach existing profiles** — RLS hides `profiles` you don't share a team with, so
+   inviting a brand-new user by email needs a backend endpoint. The UI surfaces this rather than
+   failing silently.
+0b. **No tier / second-key columns on `consent_queue`** — so the prototype's T3 two-key card and the
+   "remove + don't do this again" observation-suppression affordance are not built. Both need schema.
+0c. **`document_opens` is per-viewer by RLS** — "opened by 3 of 4" is impossible client-side; the UI
+   shows "opened by you / not opened yet". Needs an aggregate view if the fuller signal is wanted.
 
 1. **Chat→memory trigger unwired** — `enqueue_chat_compile` exists; nothing calls it yet (event-bus slice).
    Until then the wiki only grows from document ingestion.

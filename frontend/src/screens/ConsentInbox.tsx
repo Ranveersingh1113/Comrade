@@ -7,14 +7,15 @@ import { useTeamRealtime } from '../hooks/useRealtime';
 import { ConsentCard } from '../components/ConsentCard';
 
 export function ConsentInbox() {
-  const { team } = useTeam();
+  const { team, myUserId } = useTeam();
   const teamId = team?.id ?? '';
   const [items, setItems] = useState<ConsentItem[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!teamId) return;
-    // RLS already scopes this to items where requesting_member_id = me.
+    // RLS scopes this to my own items — plus pending T3 items from
+    // teammates, which arrive here for a countersign.
     const { data, error: err } = await supabase
       .from('consent_queue')
       .select('*')
@@ -85,7 +86,7 @@ export function ConsentInbox() {
           </div>
         )}
         {pending.map((item) => (
-          <ConsentCard key={item.id} item={item} onResolved={load} />
+          <ConsentCard key={item.id} item={item} onResolved={load} viewerId={myUserId} />
         ))}
 
         {history.length > 0 && (

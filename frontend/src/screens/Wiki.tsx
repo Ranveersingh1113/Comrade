@@ -10,23 +10,15 @@ import type {
   MemoryVersion,
 } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
+import {
+  projectWiki,
+  type WikiFact,
+  type WikiPage as WikiPageView,
+} from '../lib/wikiModel';
 
-const ORPHAN_TITLE = 'Uncategorized'; // mirrors pipeline/wiki.py
-
-interface Fact {
-  entryId: string;
-  active: MemoryVersion;
-  history: MemoryVersion[]; // inactive, newest first
-  citations: MemoryCitation[];
-  revertQueued: boolean;
-}
-
-interface PageView {
-  pageId: string | null;
-  title: string;
-  description: string;
-  facts: Fact[];
-}
+// Projection logic lives in lib/wikiModel (pure, unit-tested).
+type Fact = WikiFact;
+type PageView = WikiPageView;
 
 export function Wiki() {
   const { team, myUserId } = useTeam();
@@ -72,45 +64,7 @@ export function Wiki() {
         .in('version_id', activeIds);
       citations = (cits as MemoryCitation[] | null) ?? [];
     }
-    const citationsByVersion = new Map<string, MemoryCitation[]>();
-    for (const c of citations) {
-      const list = citationsByVersion.get(c.version_id) ?? [];
-      list.push(c);
-      citationsByVersion.set(c.version_id, list);
-    }
-    const revertedEntries = new Set(reverts.map((r) => r.entry_id));
-
-    const factsByEntry = new Map<string, Fact>();
-    for (const e of entries) {
-      const vs = versions.filter((v) => v.entry_id === e.id);
-      const active = vs.find((v) => v.is_active);
-      if (!active) continue;
-      factsByEntry.set(e.id, {
-        entryId: e.id,
-        active,
-        history: vs.filter((v) => !v.is_active).reverse(),
-        citations: citationsByVersion.get(active.id) ?? [],
-        revertQueued: revertedEntries.has(e.id),
-      });
-    }
-
-    const views: PageView[] = pageRows.map((p) => ({
-      pageId: p.id,
-      title: p.title,
-      description: p.description,
-      facts: entries
-        .filter((e) => e.page_id === p.id)
-        .map((e) => factsByEntry.get(e.id))
-        .filter((f): f is Fact => f !== undefined),
-    }));
-    const orphans = entries
-      .filter((e) => e.page_id === null)
-      .map((e) => factsByEntry.get(e.id))
-      .filter((f): f is Fact => f !== undefined);
-    if (orphans.length > 0) {
-      views.push({ pageId: null, title: ORPHAN_TITLE, description: '', facts: orphans });
-    }
-    setPages(views.filter((v) => v.facts.length > 0));
+    setPages(projectWiki(pageRows, entries, versions, citations, reverts));
     setError(null);
   }, [teamId]);
 

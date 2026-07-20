@@ -90,7 +90,8 @@ export interface MemoryEntry {
   created_at: string;
 }
 
-export type MemoryChangeType = 'added' | 'revised' | 'reverted';
+// 'invalidated' added by migration 20260703090000_compiler_v2.sql
+export type MemoryChangeType = 'added' | 'revised' | 'invalidated' | 'reverted';
 
 export interface MemoryVersion {
   id: string;

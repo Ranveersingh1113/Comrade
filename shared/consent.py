@@ -24,6 +24,27 @@ class ConsentError(Exception):
     """Raised when an approved action can no longer be safely executed."""
 
 
+# Blast-radius tiers (governance ruling, provisional): T0 read-only, T1
+# affects one member, T2 shared+reversible, T3 external/irreversible/money.
+_TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2, "T3": 3}
+
+# Per-tool FLOORS — a proposal may raise its own tier, never lower it below
+# these. Money / outbound-to-non-members tools must be registered at T3.
+_TOOL_TIER_FLOORS = {
+    "task_create": "T1",           # assignee-confirm is the affected member's key
+    "post_group_message": "T2",    # shared, visible, reversible (delete trace)
+}
+DEFAULT_TIER = "T2"
+
+
+def resolve_tier(tool_name: str, requested: str | None = None) -> str:
+    """The proposal's tier: the requested one, floored per tool."""
+    floor = _TOOL_TIER_FLOORS.get(tool_name, DEFAULT_TIER)
+    if requested is None or requested not in _TIER_ORDER:
+        return floor
+    return requested if _TIER_ORDER[requested] >= _TIER_ORDER[floor] else floor
+
+
 def compute_hash(tool_name: str, team_id: str, requester_id: str, args: dict) -> str:
     payload = json.dumps(
         {
@@ -47,23 +68,27 @@ def propose_action(
     args: dict,
     source_snippet: str | None = None,
     reversible: bool = True,
+    tier: str | None = None,
 ) -> dict:
     """Write a pending consent item (does NOT perform the action). 7-day backstop."""
     action_hash = compute_hash(tool_name, team_id, requester_id, args)
+    final_tier = resolve_tier(tool_name, tier)
     with team_session(Role.AGENT, team_id) as conn:
         row = conn.execute(
             "insert into public.consent_queue (team_id, requesting_member_id,"
             " tool_name, tool_args, source_snippet, action_hash, reversible,"
-            " expires_at) values (%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')"
+            " tier, expires_at)"
+            " values (%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')"
             " returning id, status",
             (team_id, requester_id, tool_name, Json(args), source_snippet,
-             action_hash, reversible),
+             action_hash, reversible, final_tier),
         ).fetchone()
     return {
         "consent_id": str(row[0]),
         "status": row[1],
         "tool_name": tool_name,
         "action_hash": action_hash,
+        "tier": final_tier,
     }
 
 
@@ -79,16 +104,26 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
             "update public.consent_queue set status='executed', resolved_at=now()"
             " where id=%s and status in ('approved','edited')"
             " returning tool_name, tool_args, action_hash, requesting_member_id,"
-            " expires_at",
+            " expires_at, tier, second_approver_id",
             (consent_id,),
         ).fetchone()
         if claimed is None:
             return {"status": "noop", "reason": "not approved or already executed"}
 
-        tool_name, args, action_hash, requester_id, expires_at = claimed
+        (tool_name, args, action_hash, requester_id, expires_at,
+         tier, second_approver_id) = claimed
 
         if expires_at is not None and expires_at < datetime.now(timezone.utc):
             raise ConsentError(f"consent {consent_id} has expired")
+
+        # T3 hard gate: two keys, and the second is never the initiator (the
+        # DB check constraint backs this; re-checked here so the error is a
+        # clean ConsentError rollback, not a constraint failure).
+        if tier == "T3" and second_approver_id is None:
+            raise ConsentError(
+                f"consent {consent_id} is T3 and needs a second key"
+                " from another member"
+            )
 
         if compute_hash(tool_name, team_id, requester_id, args) != action_hash:
             raise ConsentError(f"consent {consent_id} hash mismatch")
@@ -110,16 +145,48 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
 # is the authorization. execute_consent below never receives the approver id.
 
 def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
-    """Requester approves a pending item, then it executes."""
+    """Requester approves a pending item; it executes once its keys are in.
+
+    For T0–T2 approval IS the last key. A T3 item without its countersign
+    stays approved-but-waiting rather than erroring — the second key's
+    arrival (add_second_key) completes it.
+    """
     with user_session(approver_id) as conn:
         row = conn.execute(
             "update public.consent_queue set status='approved'"
-            " where id=%s and status='pending' returning id",
+            " where id=%s and status='pending'"
+            " returning tier, second_approver_id",
             (consent_id,),
         ).fetchone()
     if row is None:
         return {"status": "not_approved", "reason": "not pending or not yours"}
+    tier, second_approver_id = row
+    if tier == "T3" and second_approver_id is None:
+        return {"status": "approved", "awaiting": "second_key"}
     return execute_consent(team_id, consent_id)
+
+
+def add_second_key(team_id: str, consent_id: str, member_id: str) -> dict:
+    """A teammate countersigns a T3 item; executes if already approved.
+
+    Authorization is RLS + the second-key trigger: the write only succeeds if
+    the actor is a team member other than the requester, touches nothing but
+    the second-key columns, and stamps themselves.
+    """
+    with user_session(member_id) as conn:
+        row = conn.execute(
+            "update public.consent_queue set second_approver_id=%s"
+            " where id=%s and tier='T3' and status in ('pending','approved')"
+            " and requesting_member_id <> %s"    # initiator is never a key twice
+            " returning status",
+            (member_id, consent_id, member_id),
+        ).fetchone()
+    if row is None:
+        return {"status": "not_found",
+                "reason": "not a countersignable T3 item in your team"}
+    if row[0] in ("approved", "edited"):
+        return execute_consent(team_id, consent_id)
+    return {"status": "countersigned", "awaiting": "requester_approval"}
 
 
 def reject_consent(team_id: str, consent_id: str, approver_id: str) -> dict:

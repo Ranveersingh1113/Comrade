@@ -21,7 +21,8 @@ from pipeline.compiler import enqueue_document
 from server.auth import CurrentUserId, require_membership
 from shared.config import settings
 from shared.consent import (
-    ConsentError, approve_consent, edit_and_approve, reject_consent,
+    ConsentError, add_second_key, approve_consent, edit_and_approve,
+    reject_consent,
 )
 from shared.db import Role, team_session, user_session
 
@@ -168,6 +169,63 @@ def consent_edit_and_approve(
         )
     except ConsentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+@app.post("/consent/{consent_id}/second_key")
+def consent_second_key(
+    consent_id: str, req: TeamScoped, user_id: CurrentUserId
+) -> dict:
+    """A teammate countersigns a T3 item (executes if the requester approved).
+
+    The trigger + RLS make this fail for the requester themselves, for
+    non-members, and for any write beyond the second-key columns.
+    """
+    require_membership(user_id, req.team_id)
+    try:
+        return _consent_result(add_second_key(req.team_id, consent_id, user_id))
+    except ConsentError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+# ---------- observations ----------
+
+class SuppressRequest(TeamScoped):
+    kind: str
+
+
+@app.post("/observations/{message_id}/suppress")
+def observation_suppress(
+    message_id: str, req: SuppressRequest, user_id: CurrentUserId
+) -> dict:
+    """One tap: remove a proactive AI observation + record 'don't do this again'.
+
+    The suppression row is written as the member (RLS authorises); the message
+    tombstone needs the agent role, because members can only edit their OWN
+    messages and AI messages have no sender. Tombstoning, not deleting — the
+    deletion-leaves-a-trace invariant applies to the AI too.
+    """
+    require_membership(user_id, req.team_id)
+    with user_session(user_id) as conn:
+        row = conn.execute(
+            "insert into public.observation_suppressions"
+            " (team_id, member_id, kind, message_id)"
+            " select %s, %s, %s, m.id from public.messages m"
+            " where m.id=%s and m.team_id=%s and m.sender_kind='ai'"
+            " and m.thread_type='group'"
+            " returning id",
+            (req.team_id, user_id, req.kind, message_id, req.team_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "not an AI group message in this team"
+        )
+    with team_session(Role.AGENT, req.team_id) as conn:
+        conn.execute(
+            "update public.messages set deleted_scope='everyone',"
+            " deleted_at=now() where id=%s and deleted_at is null",
+            (message_id,),
+        )
+    return {"suppression_id": str(row[0]), "kind": req.kind}
 
 
 # ---------- documents ----------

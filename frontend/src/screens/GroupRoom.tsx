@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { agentTurn, agentErrorText } from '../lib/agentApi';
+import { agentTurn, agentErrorText, suppressObservation } from '../lib/agentApi';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
 import { classifyMessage, memberBars } from '../lib/roomModel';
 import type { DocumentRow, MemoryCompilation, Message, Milestone, Task } from '../lib/types';
@@ -105,6 +105,18 @@ export function GroupRoom() {
     await refresh();
   };
 
+  const suppressObs = async (m: Message) => {
+    // "remove + don't do this again": the backend tombstones the message and
+    // records a standing suppression the agent must respect.
+    if (!team) return;
+    try {
+      await suppressObservation(m.id, team.id, 'proactive_observation');
+    } catch (e) {
+      setSendError(agentErrorText(e));
+    }
+    await refresh();
+  };
+
   const nextMilestone = milestones.find((m) => m.due_at && new Date(m.due_at) > new Date());
 
   return (
@@ -188,6 +200,7 @@ export function GroupRoom() {
                 mine={m.sender_id === myUserId}
                 compilation={compilationsByMessage.get(m.id) ?? null}
                 onDelete={() => void deleteForEveryone(m)}
+                onSuppress={() => void suppressObs(m)}
               />
             ))}
             {aiTyping && (
@@ -258,12 +271,14 @@ function MessageRow({
   mine,
   compilation,
   onDelete,
+  onSuppress,
 }: {
   m: Message;
   senderName: string;
   mine: boolean;
   compilation: MemoryCompilation | null;
   onDelete: () => void;
+  onSuppress: () => void;
 }) {
   const cls = classifyMessage(
     m,
@@ -357,6 +372,27 @@ function MessageRow({
               }}
             >
               ✕ remove
+            </button>
+          )}
+          {/* Proactive AI observations get a one-tap standing objection (any
+              member; diff cards are notifications, not observations). */}
+          {isAI && !compilation && hover && (
+            <button
+              onClick={onSuppress}
+              className="mono"
+              title="Tombstones this message and tells Comrade not to post this kind of observation again"
+              style={{
+                border: '1px solid rgba(210,89,59,0.35)',
+                background: 'transparent',
+                color: 'var(--terracotta)',
+                fontSize: 9,
+                letterSpacing: '0.1em',
+                borderRadius: 2,
+                padding: '2px 7px',
+                cursor: 'pointer',
+              }}
+            >
+              ✕ REMOVE · DON'T DO THIS AGAIN
             </button>
           )}
         </div>

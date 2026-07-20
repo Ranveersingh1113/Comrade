@@ -92,7 +92,11 @@ export function ConsentCard({
   };
 
   return (
-    <div style={{ position: 'relative', marginBottom: 18 }}>
+    <div
+      data-testid="consent-card"
+      data-consent-id={item.id}
+      style={{ position: 'relative', marginBottom: 18 }}
+    >
       <div
         style={{
           background: 'var(--card)',

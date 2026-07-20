@@ -30,8 +30,14 @@ export function ConsentInbox() {
   }, [load]);
   useTeamRealtime('consent_queue', teamId, load);
 
-  const pending = items.filter((i) => i.status === 'pending');
-  const history = items.filter((i) => i.status !== 'pending');
+  // A T3 item that is approved but not yet countersigned is still LIVE — it
+  // needs a teammate's key — so it stays with the actionable cards instead of
+  // collapsing into history.
+  const isActionable = (i: ConsentItem) =>
+    i.status === 'pending' ||
+    (i.tier === 'T3' && i.status === 'approved' && i.second_approver_id === null);
+  const pending = items.filter(isActionable);
+  const history = items.filter((i) => !isActionable(i));
 
   return (
     <main style={{ flex: 1, overflowY: 'auto' }}>

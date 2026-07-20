@@ -24,6 +24,11 @@ describe('consentPhase', () => {
   test('T3 pending viewed by a TEAMMATE -> can_countersign', () => {
     expect(consentPhase(item({ tier: 'T3' }), 'u2', false)).toBe('can_countersign');
   });
+  test('T3 APPROVED but uncountersigned still lets a teammate countersign', () => {
+    // regression: the awaiting-branch must not shadow the teammate's view
+    expect(consentPhase(item({ tier: 'T3', status: 'approved' }), 'u2', false))
+      .toBe('can_countersign');
+  });
   test('T3 countersigned but unapproved stays ACTIONABLE for the requester', () => {
     // Their key still has to turn — hiding the approve buttons would deadlock.
     expect(consentPhase(item({ tier: 'T3', second_approver_id: 'u2' }), 'u1', false))

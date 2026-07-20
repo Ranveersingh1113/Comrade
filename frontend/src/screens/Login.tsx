@@ -6,6 +6,8 @@ import { useAuth } from '../state/AuthContext';
 export function Login() {
   const { session } = useAuth();
   const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [usePassword, setUsePassword] = useState(false);
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -24,6 +26,20 @@ export function Login() {
     setBusy(false);
     if (err) setError(err.message);
     else setSent(true);
+  };
+
+  const signInPassword = async () => {
+    const target = email.trim();
+    if (!target || !password) return;
+    setBusy(true);
+    setError(null);
+    const { error: err } = await supabase.auth.signInWithPassword({
+      email: target,
+      password,
+    });
+    setBusy(false);
+    if (err) setError(err.message);
+    // success: AuthContext picks up the session and Navigate fires
   };
 
   return (
@@ -61,15 +77,50 @@ export function Login() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') void sendLink();
+                  if (e.key === 'Enter') void (usePassword ? signInPassword() : sendLink());
                 }}
                 placeholder="you@university.edu"
                 autoFocus
               />
-              <button className="btn-ink" disabled={busy} onClick={() => void sendLink()}>
-                {busy ? '…' : 'SEND LINK'}
-              </button>
+              {!usePassword && (
+                <button className="btn-ink" disabled={busy} onClick={() => void sendLink()}>
+                  {busy ? '…' : 'SEND LINK'}
+                </button>
+              )}
             </div>
+            {usePassword && (
+              <div className="composer" style={{ marginTop: 10 }}>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void signInPassword();
+                  }}
+                  placeholder="password"
+                  aria-label="password"
+                />
+                <button className="btn-ink" disabled={busy} onClick={() => void signInPassword()}>
+                  {busy ? '…' : 'SIGN IN'}
+                </button>
+              </div>
+            )}
+            <button
+              onClick={() => setUsePassword((x) => !x)}
+              className="mono"
+              style={{
+                marginTop: 14,
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--muted)',
+                fontSize: 10.5,
+                letterSpacing: '0.1em',
+                cursor: 'pointer',
+                padding: 0,
+              }}
+            >
+              {usePassword ? '← MAGIC LINK INSTEAD' : 'USE A PASSWORD INSTEAD'}
+            </button>
             {error && (
               <div style={{ marginTop: 12, fontSize: 12, color: 'var(--terracotta)' }}>{error}</div>
             )}

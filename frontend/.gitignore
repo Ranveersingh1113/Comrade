@@ -28,3 +28,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+tests/e2e/.state.json
+playwright-report/
+test-results/

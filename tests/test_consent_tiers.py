@@ -214,3 +214,34 @@ def test_opens_summary_counts_without_naming(seeded):
             (doc,),
         ).fetchone()
     assert row is None
+
+
+def test_tombstone_fn_marks_only_ai_messages_and_is_agent_only(seeded):
+    from shared.db import Role, team_session
+
+    conn = _admin()
+    try:
+        ai_id, user_id = conn.execute(
+            "with a as (insert into public.messages (team_id, thread_type,"
+            " sender_kind, body) values (%s,'group','ai','obs') returning id),"
+            " u as (insert into public.messages (team_id, thread_type,"
+            " sender_kind, sender_id, body) values (%s,'group','user',%s,'hi')"
+            " returning id) select a.id, u.id from a, u",
+            (TEAM_A, TEAM_A, A1),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    with team_session(Role.AGENT, TEAM_A) as conn:
+        hit = conn.execute(
+            "select public.tombstone_ai_message(%s,%s)", (ai_id, TEAM_A)
+        ).fetchone()[0]
+        assert hit is True
+        miss = conn.execute(
+            "select public.tombstone_ai_message(%s,%s)", (user_id, TEAM_A)
+        ).fetchone()[0]
+        assert miss is False  # human messages are untouchable
+
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        with as_user(A1) as conn:
+            conn.execute("select public.tombstone_ai_message(%s,%s)", (ai_id, TEAM_A))

@@ -94,6 +94,14 @@ export function secondKeyConsent(consentId: string, teamId: string) {
   return request<ConsentActionResult>(`/consent/${consentId}/second_key`, { team_id: teamId });
 }
 
+/** One tap: tombstone a proactive AI observation + record "don't do this again". */
+export function suppressObservation(messageId: string, teamId: string, kind: string) {
+  return request<{ suppression_id: string; kind: string }>(
+    `/observations/${messageId}/suppress`,
+    { team_id: teamId, kind },
+  );
+}
+
 export function editAndApproveConsent(
   consentId: string,
   teamId: string,

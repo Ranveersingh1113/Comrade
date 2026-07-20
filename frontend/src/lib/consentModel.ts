@@ -26,13 +26,14 @@ export function consentPhase(
   const isRequester = viewerId !== null && item.requesting_member_id === viewerId;
   if (item.tier === 'T3') {
     const countersigned = item.second_approver_id !== null;
-    if (item.status === 'approved' && !countersigned) return 'awaiting_second_key';
     if (!isRequester) {
-      // Teammate's view: sign it, or watch it wait on the requester.
+      // Teammate's view first: they can countersign a pending OR an
+      // already-approved item — the backend accepts both.
       return countersigned ? 'countersigned_pending' : 'can_countersign';
     }
-    // Requester's view stays actionable — their key still has to turn,
-    // countersigned or not.
+    if (item.status === 'approved' && !countersigned) return 'awaiting_second_key';
+    // Otherwise the requester's view stays actionable — their key still has
+    // to turn, countersigned or not.
   }
   return 'pending';
 }

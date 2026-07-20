@@ -239,11 +239,13 @@ def observation_suppress(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "not an AI group message in this team"
         )
+    # The agent role has no UPDATE on messages (propose-only, by design);
+    # tombstoning goes through a definer function that can do exactly this
+    # one thing to exactly AI messages.
     with team_session(Role.AGENT, req.team_id) as conn:
         conn.execute(
-            "update public.messages set deleted_scope='everyone',"
-            " deleted_at=now() where id=%s and deleted_at is null",
-            (message_id,),
+            "select public.tombstone_ai_message(%s, %s)",
+            (message_id, req.team_id),
         )
     return {"suppression_id": str(row[0]), "kind": req.kind}
 

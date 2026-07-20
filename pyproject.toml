@@ -24,3 +24,7 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# `live` = talks to a paid/nondeterministic external service (Gemini).
+# Excluded by default; run explicitly with: uv run pytest -m live
+markers = ["live: hits external paid services (Gemini); run with -m live"]
+addopts = "-m 'not live'"

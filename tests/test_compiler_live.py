@@ -1,4 +1,4 @@
-"""Live two-stage compile: real Gemini extract + consolidate + embeddings.
+"""Live two-stage compile: real Gemini extract + consolidate.
 
 Skipped without a Gemini key. Model nondeterminism note: the revise assertion
 tolerates 'revised' OR 'invalidated' on the target entry (both supersede);
@@ -13,12 +13,33 @@ from pipeline.parsers import spotlight
 from shared.config import settings
 from tests._seed import A2, TEAM_A
 
-pytestmark = pytest.mark.skipif(
-    not settings.gemini_api_key, reason="no GEMINI_API_KEY configured"
-)
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not settings.gemini_api_key, reason="no GEMINI_API_KEY configured"
+    ),
+]
 
 DOC1 = "d0000000-0000-0000-0000-0000000000d1"
 DOC2 = "d0000000-0000-0000-0000-0000000000d2"
+
+
+@pytest.fixture(autouse=True)
+def _source_documents(seeded):
+    """Citations must point at real same-team documents (integrity trigger,
+    migration 20260719090000) — seed the rows the compiles will cite."""
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
+        for doc_id, name in ((DOC1, "plan.txt"), (DOC2, "update.txt")):
+            conn.execute(
+                "insert into public.documents (id, team_id, kind, filename)"
+                " values (%s,%s,'text',%s) on conflict (id) do nothing",
+                (doc_id, TEAM_A, name),
+            )
+        yield
+    finally:
+        conn.close()
 
 
 def test_two_stage_compile_and_revise_roundtrip(seeded):

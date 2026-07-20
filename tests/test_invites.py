@@ -1,4 +1,4 @@
-"""Invite-by-email: profile auto-creation, leader gate, and the live flow."""
+"""Invite-by-email: profile auto-creation, leader gate, and the real GoTrue flow (local stack)."""
 import uuid
 
 import psycopg
@@ -52,7 +52,6 @@ def test_non_leader_cannot_invite(seeded):
     assert exc.value.status_code == 403
 
 
-@pytest.mark.live
 def test_leader_invites_a_brand_new_email_end_to_end(seeded):
     """Real GoTrue: auth user created, profile materialised, membership invited."""
     email = f"pilot-{uuid.uuid4().hex[:10]}@test.dev"
@@ -74,7 +73,6 @@ def test_leader_invites_a_brand_new_email_end_to_end(seeded):
         conn.close()
 
 
-@pytest.mark.live
 def test_inviting_an_existing_account_resolves_instead_of_failing(seeded):
     """GoTrue only dedupes accounts IT registered (identity rows), so the
     existing account must come from a real signup, not the DB seed."""

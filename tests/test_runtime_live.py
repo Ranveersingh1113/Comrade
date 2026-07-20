@@ -10,9 +10,9 @@ from shared.agent_runs import get_run
 from shared.config import settings
 from tests._seed import A1, TEAM_A
 
-pytestmark = pytest.mark.skipif(
+pytestmark = [pytest.mark.live] + [pytest.mark.skipif(
     not settings.gemini_api_key, reason="no GEMINI_API_KEY configured"
-)
+)]
 
 
 def test_run_turn_records_and_replies(seeded):

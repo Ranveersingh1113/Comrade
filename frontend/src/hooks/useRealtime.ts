@@ -10,11 +10,9 @@ import { supabase } from '../lib/supabase';
  * to an already-subscribed channel throws. Two components watching the same
  * table (e.g. the sidebar badge and the consent inbox) must not collide.
  *
- * NOTE: tables must be in the `supabase_realtime` publication server-side
- * (`alter publication supabase_realtime add table public.messages, ...`).
- * No migration does this yet — flagged to the backend. Until then this
- * subscribes cleanly but receives nothing, so callers also refetch on
- * window focus as a fallback.
+ * Tables are published server-side by migration
+ * 20260719120000_realtime_publication.sql; the focus-refetch remains as a
+ * belt-and-braces fallback for dropped websocket connections.
  */
 export function useTeamRealtime(
   table: 'messages' | 'tasks' | 'consent_queue',

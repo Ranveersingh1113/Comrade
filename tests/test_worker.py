@@ -162,3 +162,35 @@ def test_empty_parse_marks_document_failed(seeded):
         assert status == "failed"
     finally:
         conn.close()
+
+
+def test_tick_drains_queue_then_sweeps(seeded, monkeypatch):
+    _clear_jobs()
+    _enqueue(payload={"document_id": "A"})
+    _enqueue(payload={"document_id": "B"})
+
+    swept = []
+    monkeypatch.setattr(
+        "pipeline.chat.sweep_chat_compiles", lambda: swept.append(1) or []
+    )
+    handled = []
+    original = worker._HANDLERS.get("parse_document")
+    worker.register("parse_document", lambda t, p: handled.append(p))
+    try:
+        assert worker.tick() == 2
+    finally:
+        if original is not None:
+            worker._HANDLERS["parse_document"] = original
+        else:
+            worker._HANDLERS.pop("parse_document", None)
+    assert len(handled) == 2 and swept == [1]
+
+
+def test_tick_survives_sweep_failure(seeded, monkeypatch):
+    _clear_jobs()
+
+    def boom():
+        raise RuntimeError("sweep exploded")
+
+    monkeypatch.setattr("pipeline.chat.sweep_chat_compiles", boom)
+    assert worker.tick() == 0  # no crash — drain path unaffected

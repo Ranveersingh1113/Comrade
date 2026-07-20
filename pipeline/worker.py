@@ -7,10 +7,17 @@ handler, team-scoped under team_session(PIPELINE, team_id) — that is where RLS
 enforces the data boundary.
 
 Handlers are registered by job_type and receive (team_id, payload).
+
+Run it: `uv run python -m pipeline.worker` — drains the queue, then sweeps
+chat->memory (ambient capture), then sleeps and repeats.
 """
+import logging
+import time
 from typing import Callable
 
 from shared.db import Role, connect
+
+logger = logging.getLogger(__name__)
 
 Handler = Callable[[str, dict], None]
 
@@ -88,3 +95,46 @@ def run_once(handlers: dict[str, Handler] | None = None) -> bool:
         retry = attempts < MAX_ATTEMPTS
         _finish(job_id, "pending" if retry else "failed", error=str(exc))
     return True
+
+
+POLL_SECONDS = 5.0
+
+
+def tick() -> int:
+    """One worker iteration: drain the queue, then sweep chat->memory.
+
+    The sweep runs after the drain so a batch enqueued this tick is picked up
+    on the next — keeping each tick short and each job claim fair across
+    workers. Returns how many jobs were processed. Sweep failures are logged,
+    not fatal: a broken sweep must not stop document jobs from draining.
+    """
+    # Imported here: chat.py registers its handler via this module, so a
+    # module-level import would be circular.
+    from pipeline.chat import sweep_chat_compiles
+
+    processed = 0
+    while run_once():
+        processed += 1
+    try:
+        swept = sweep_chat_compiles()
+        if swept:
+            logger.info("chat sweep enqueued %d compile job(s)", len(swept))
+    except Exception:  # noqa: BLE001 - sweep is best-effort by design
+        logger.exception("chat sweep failed; queue drain unaffected")
+    return processed
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    # Handlers register at import time.
+    import pipeline.chat  # noqa: F401
+    import pipeline.compiler  # noqa: F401
+
+    logger.info("worker up: polling every %.0fs", POLL_SECONDS)
+    while True:
+        if tick() == 0:
+            time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

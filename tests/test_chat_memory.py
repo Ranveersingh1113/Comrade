@@ -180,3 +180,70 @@ def test_enqueue_deduplicates_an_active_chat_batch(seeded):
     finally:
         conn.close()
     assert count == 1
+
+
+# ---------- sweep: the trigger that makes chat capture ambient ----------
+
+def test_sweep_enqueues_only_teams_past_threshold(seeded):
+    from pipeline.chat import sweep_chat_compiles
+    from tests._seed import B1, TEAM_B
+
+    conn = _admin()
+    try:
+        conn.execute("delete from public.jobs where job_type='compile_memory'")
+        with conn.cursor() as cur:
+            for i in range(MIN_CHAT_MESSAGES):       # TEAM_A: at threshold
+                _post_group(cur, TEAM_A, A2, f"decision {i}: we ship friday")
+            _post_group(cur, TEAM_B, B1, "just one message")  # TEAM_B: below
+    finally:
+        conn.close()
+
+    jobs = sweep_chat_compiles()
+    assert len(jobs) == 1
+
+    conn = _admin()
+    try:
+        rows = conn.execute(
+            "select team_id from public.jobs where job_type='compile_memory'"
+            " and status='pending'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [str(r[0]) for r in rows] == [TEAM_A]
+
+
+def test_sweep_is_idempotent_while_batch_pending(seeded):
+    from pipeline.chat import sweep_chat_compiles
+
+    conn = _admin()
+    try:
+        conn.execute("delete from public.jobs where job_type='compile_memory'")
+        with conn.cursor() as cur:
+            for i in range(MIN_CHAT_MESSAGES):
+                _post_group(cur, TEAM_A, A2, f"note {i}: api freeze monday")
+    finally:
+        conn.close()
+
+    first = sweep_chat_compiles()
+    second = sweep_chat_compiles()
+    assert len(first) == 1 and first == second  # same job, not a duplicate
+
+    conn = _admin()
+    try:
+        n = conn.execute(
+            "select count(*) from public.jobs where job_type='compile_memory'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 1
+
+
+def test_sweep_quiet_when_no_new_messages(seeded):
+    from pipeline.chat import sweep_chat_compiles
+
+    conn = _admin()
+    try:
+        conn.execute("delete from public.jobs where job_type='compile_memory'")
+    finally:
+        conn.close()
+    assert sweep_chat_compiles() == []

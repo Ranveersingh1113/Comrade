@@ -15,9 +15,8 @@ Hard invariants:
   - Debounce: enqueue_chat_compile only fires at >= min_messages new group
     messages since the last chat compilation's watermark (chat_through).
 
-Trigger wiring (cron / agent capture tool) arrives with the event-bus slice;
-until then enqueue_chat_compile is called explicitly (tests, smoke, future
-runtime).
+Trigger: the worker loop calls sweep_chat_compiles() between queue drains, so
+capture is ambient — nobody asks for it, it just keeps up with the room.
 """
 from psycopg.types.json import Json
 
@@ -27,7 +26,7 @@ from pipeline.compiler import (
 from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
 from pipeline.worker import register
-from shared.db import Role, team_session
+from shared.db import Role, connect, team_session
 
 MIN_CHAT_MESSAGES = 5  # debounce: don't compile until this many new messages
 
@@ -118,6 +117,35 @@ def enqueue_chat_compile(
                 (team_id, dedupe_key),
             ).fetchone()
     return str(row[0])
+
+
+def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
+    """Enqueue a chat compile for every team with enough unswept group chatter.
+
+    The scan crosses teams, so it is control-plane (admin), like the job claim.
+    It is only a prefilter — enqueue_chat_compile re-checks the watermark and
+    threshold authoritatively under the PIPELINE role, and its dedupe key makes
+    a repeat sweep return the same job rather than a duplicate. Returns the job
+    ids touched this pass.
+    """
+    with connect(Role.ADMIN) as conn:
+        rows = conn.execute(
+            "select m.team_id from public.messages m"
+            " where m.thread_type='group' and m.sender_kind='user'"
+            " and m.deleted_scope is null"
+            " and m.created_at > coalesce(("
+            "   select max(c.chat_through) from public.memory_compilations c"
+            "   where c.team_id = m.team_id and c.chat_through is not null"
+            "   and c.status='done'), '-infinity'::timestamptz)"
+            " group by m.team_id having count(*) >= %s",
+            (min_messages,),
+        ).fetchall()
+    jobs = []
+    for (team_id,) in rows:
+        job_id = enqueue_chat_compile(str(team_id), min_messages)
+        if job_id is not None:
+            jobs.append(job_id)
+    return jobs
 
 
 def compile_messages(team_id: str, messages: list[dict], through) -> dict:

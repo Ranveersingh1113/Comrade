@@ -5,6 +5,7 @@ rejected *before* any handler logic runs, which is the property that matters.
 """
 import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
 from server.app import app
@@ -14,11 +15,36 @@ SECRET = "test-jwt-secret-at-least-32-characters-long"
 USER = "11111111-1111-1111-1111-111111111111"
 TEAM = "22222222-2222-2222-2222-222222222222"
 
+# Supabase issues ES256 user tokens signed by a key published via JWKS. A test
+# key pair stands in for the auth server's.
+_EC_KEY = ec.generate_private_key(ec.SECP256R1())
+
 
 @pytest.fixture
 def client(monkeypatch):
     monkeypatch.setattr(settings, "supabase_jwt_secret", SECRET)
     return TestClient(app)
+
+
+@pytest.fixture
+def es256_client(monkeypatch):
+    """A client whose JWKS lookup resolves to the test key pair."""
+    monkeypatch.setattr(settings, "supabase_url", "http://auth.test")
+
+    class _Key:
+        key = _EC_KEY.public_key()
+
+    class _Client:
+        def get_signing_key_from_jwt(self, _token):
+            return _Key()
+
+    monkeypatch.setattr("server.auth._jwk_client", lambda: _Client())
+    return TestClient(app)
+
+
+def _es256_token(**overrides):
+    claims = {"sub": USER, "aud": "authenticated"} | overrides
+    return jwt.encode(claims, _EC_KEY, algorithm="ES256")
 
 
 def _token(secret=SECRET, **overrides):
@@ -77,6 +103,41 @@ def test_requester_id_in_body_is_ignored(client):
         "/agent/turn",
         json={"team_id": TEAM, "text": "hi", "requester_id": USER},
     )
+    assert resp.status_code == 401
+
+
+# ---------- asymmetric (ES256) tokens: what Supabase actually issues ----------
+
+def test_es256_token_is_accepted(es256_client, monkeypatch):
+    """Regression: real Supabase tokens are ES256, not HS256.
+
+    An HS256-only verifier rejects every genuine browser session with
+    "The specified alg value is not allowed" — the whole API is unreachable.
+    """
+    monkeypatch.setattr("server.app.require_membership", lambda *_: None)
+    monkeypatch.setattr(
+        "server.app.run_turn_sync",
+        lambda *a, **k: {"run_id": "r", "reply": "ok", "steps": []},
+    )
+    monkeypatch.setattr("server.app._persist_user_message", lambda *a: "m1")
+    monkeypatch.setattr("server.app._persist_ai_reply", lambda *a: "m2")
+    resp = _turn(es256_client, {"Authorization": f"Bearer {_es256_token()}"})
+    assert resp.status_code == 200
+
+
+def test_es256_token_signed_by_another_key_is_rejected(es256_client):
+    other = ec.generate_private_key(ec.SECP256R1())
+    token = jwt.encode({"sub": USER, "aud": "authenticated"}, other,
+                       algorithm="ES256")
+    resp = _turn(es256_client, {"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401
+
+
+def test_es256_path_does_not_accept_alg_none(es256_client):
+    """Algorithm confusion: a token must not talk the verifier into a weaker scheme."""
+    token = jwt.encode({"sub": USER, "aud": "authenticated"}, key="",
+                       algorithm="none")
+    resp = _turn(es256_client, {"Authorization": f"Bearer {token}"})
     assert resp.status_code == 401
 
 

@@ -75,12 +75,14 @@ def user_session(user_id: str) -> Iterator[psycopg.Connection]:
     """Open a connection acting as an end user (role `authenticated`, auth.uid()
     = user_id), so RLS applies exactly as it would for that user in the app.
 
-    Commits on clean exit, rolls back on error. NOTE: this uses the admin URL as
-    a PostgREST-style authenticator that SET ROLEs down to authenticated; once
-    the role is switched, RLS is enforced. Production should use a dedicated
-    least-privilege authenticator role, not postgres.
+    Commits on clean exit, rolls back on error. Connects as the dedicated
+    authenticator role (comrade_authenticator: LOGIN + noinherit, may only
+    SET ROLE authenticated) when COMRADE_AUTHENTICATOR_DB_URL is set; falls
+    back to the admin URL for dev environments that predate the role. Either
+    way, once the role is switched RLS is enforced.
     """
-    conn = psycopg.connect(_URLS[Role.ADMIN])
+    url = settings.comrade_authenticator_db_url or _URLS[Role.ADMIN]
+    conn = psycopg.connect(url)
     try:
         with conn.transaction():
             conn.execute("set local role authenticated")

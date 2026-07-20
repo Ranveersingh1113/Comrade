@@ -11,3 +11,13 @@
 alter role comrade_agent    with login password :'agent_pwd';
 alter role comrade_executor with login password :'executor_pwd';
 alter role comrade_pipeline with login password :'pipeline_pwd';
+
+-- PostgREST-style authenticator for user_session(): may become `authenticated`
+-- and nothing else. noinherit = its own privileges stay empty until SET ROLE.
+do $$ begin
+  if not exists (select 1 from pg_roles where rolname = 'comrade_authenticator') then
+    create role comrade_authenticator noinherit;
+  end if;
+end $$;
+alter role comrade_authenticator with login noinherit password :'authenticator_pwd';
+grant authenticated to comrade_authenticator;

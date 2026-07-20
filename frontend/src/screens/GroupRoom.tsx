@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { agentTurn, agentErrorText } from '../lib/agentApi';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
+import { classifyMessage, memberBars } from '../lib/roomModel';
 import type { DocumentRow, MemoryCompilation, Message, Milestone, Task } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { useMessages } from '../hooks/useMessages';
@@ -264,10 +265,14 @@ function MessageRow({
   compilation: MemoryCompilation | null;
   onDelete: () => void;
 }) {
-  const isAI = m.sender_kind === 'ai';
+  const cls = classifyMessage(
+    m,
+    compilation?.diff_message_id ? new Set([compilation.diff_message_id]) : new Set(),
+  );
+  const isAI = cls.kind === 'ai';
   const [hover, setHover] = useState(false);
 
-  if (m.deleted_scope === 'everyone') {
+  if (cls.kind === 'deleted') {
     return (
       <div className="fade-up" style={{ display: 'flex', gap: 14, padding: '10px 28px' }}>
         <span
@@ -379,16 +384,12 @@ function useMemberBars(taskState: TaskActions) {
   const { roster } = useTeam();
   return useMemo(
     () =>
-      roster.map(({ profile }) => {
-        const mine = taskState.tasks.filter((t) => t.assignee_id === profile.id);
-        const done = mine.filter((t) => t.status === 'done').length;
-        return {
-          id: profile.id,
-          first: firstNameOf(profile.display_name),
-          tasks: mine,
-          label: `${done}/${mine.length} done`,
-        };
-      }),
+      memberBars(roster, taskState.tasks).map((b) => ({
+        id: b.userId,
+        first: firstNameOf(b.name),
+        tasks: b.tasks,
+        label: `${b.doneCount}/${b.tasks.length} done`,
+      })),
     [roster, taskState.tasks],
   );
 }

@@ -47,12 +47,12 @@ Gemini call. A loop from any authenticated member runs up the API bill and,
 because turns block threadpool workers for seconds, freezes the API for
 everyone.
 
-**Fix —** `agent_runs` already records `team_id` and `started_at` for every
+**Fix —** `agent_runs` already records `team_id` and `created_at` for every
 turn, so the rate limit is a count query against a table that exists:
 
 ```sql
 select count(*) from public.agent_runs
- where team_id = %s and started_at > now() - interval '1 hour'
+ where team_id = %s and created_at > now() - interval '1 hour'
 ```
 
 Reject with **429** when the count is at or above the cap. No new table, no

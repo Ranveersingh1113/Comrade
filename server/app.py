@@ -11,12 +11,16 @@ Identity always comes from the verified Supabase JWT (see server/auth.py); the
 model never receives team_id / requester_id as tool arguments.
 """
 import base64
+import json
+import logging
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
-from agent.runtime import run_turn_sync
+from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
@@ -26,6 +30,8 @@ from shared.consent import (
     reject_consent,
 )
 from shared.db import Role, team_session, user_session
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Comrade Agent Runtime")
 
@@ -150,6 +156,51 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
         user_message_id=user_message_id,
         reply_message_id=reply_message_id,
     )
+
+
+@app.post("/agent/turn/stream")
+async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
+    """Same turn as /agent/turn, delivered as newline-delimited JSON.
+
+    NDJSON over fetch rather than SSE: EventSource cannot send an
+    Authorization header, and a token in the query string would leak into
+    logs. One JSON object per line, no frame parsing.
+
+    Both guards run BEFORE the response starts, so a non-member still gets a
+    real 403 and an over-budget team a real 429 — never a 200 whose first
+    frame is an apology.
+    """
+    require_membership(user_id, req.team_id)
+    _check_turn_budget(user_id, req.team_id)
+    owner = None if req.thread_type == "group" else user_id
+    user_message_id = await run_in_threadpool(
+        _persist_user_message, user_id, req.team_id, req.thread_type, req.text
+    )
+
+    async def frames():
+        reply = ""
+        try:
+            async for item in stream_turn(req.team_id, user_id, req.text):
+                if item.get("type") == "final":
+                    reply = item["reply"]
+                    continue
+                yield json.dumps(item) + "\n"
+        except Exception as exc:  # noqa: BLE001 - the stream owns its errors
+            logger.exception("streamed turn failed")
+            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+            return
+        reply_message_id = None
+        if reply:
+            reply_message_id = await run_in_threadpool(
+                _persist_ai_reply, req.team_id, req.thread_type, owner, reply
+            )
+        yield json.dumps({
+            "type": "done",
+            "user_message_id": user_message_id,
+            "reply_message_id": reply_message_id,
+        }) + "\n"
+
+    return StreamingResponse(frames(), media_type="application/x-ndjson")
 
 
 # ---------- consent ----------

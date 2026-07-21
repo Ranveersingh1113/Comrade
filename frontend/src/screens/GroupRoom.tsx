@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { agentTurn, agentErrorText, suppressObservation } from '../lib/agentApi';
+import { streamTurn, agentErrorText, suppressObservation } from '../lib/agentApi';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
 import { classifyMessage, memberBars } from '../lib/roomModel';
 import type { DocumentRow, MemoryCompilation, Message, Milestone, Task } from '../lib/types';
@@ -21,6 +21,7 @@ export function GroupRoom() {
   );
   const [draft, setDraft] = useState('');
   const [aiTyping, setAiTyping] = useState(false);
+  const [pending, setPending] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
@@ -66,13 +67,18 @@ export function GroupRoom() {
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
       setAiTyping(true);
+      setPending('');
       try {
-        await agentTurn(teamId, text, 'group');
+        await streamTurn(teamId, text, 'group', (f) => {
+          if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
+          else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
+        });
       } catch (e) {
         setSendError(agentErrorText(e));
         setDraft(text);
       } finally {
         setAiTyping(false);
+        setPending('');
         await refresh();
       }
     } else {
@@ -215,20 +221,35 @@ export function GroupRoom() {
                 <span className="orb" style={{ width: 36, height: 36, fontSize: 13, animation: 'breathe 2s ease-in-out infinite' }}>
                   ◈
                 </span>
-                <div style={{ display: 'flex', gap: 4, alignItems: 'center', paddingTop: 13 }}>
-                  {[0, 0.2, 0.4].map((d) => (
-                    <span
-                      key={d}
-                      style={{
-                        width: 6,
-                        height: 6,
-                        borderRadius: '50%',
-                        background: 'var(--muted)',
-                        animation: `blink 1.2s ${d}s infinite`,
-                      }}
-                    />
-                  ))}
-                </div>
+                {pending ? (
+                  <div
+                    style={{
+                      paddingTop: 10,
+                      fontSize: 13.5,
+                      lineHeight: 1.5,
+                      color: 'var(--text-body)',
+                      whiteSpace: 'pre-wrap',
+                      overflowWrap: 'anywhere',
+                    }}
+                  >
+                    {pending}
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', paddingTop: 13 }}>
+                    {[0, 0.2, 0.4].map((d) => (
+                      <span
+                        key={d}
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          background: 'var(--muted)',
+                          animation: `blink 1.2s ${d}s infinite`,
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { agentTurn, agentErrorText } from '../lib/agentApi';
+import { streamTurn, agentErrorText } from '../lib/agentApi';
 import { messageTime } from '../lib/format';
 import { useTeam } from '../state/TeamContext';
 import { useMessages } from '../hooks/useMessages';
@@ -10,6 +10,8 @@ export function PrivateThread() {
   const { messages, refresh, error } = useMessages('private');
   const [draft, setDraft] = useState('');
   const [waiting, setWaiting] = useState(false);
+  const [pending, setPending] = useState('');
+  const [step, setStep] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -26,14 +28,23 @@ export function PrivateThread() {
     setDraft('');
     setSendError(null);
     setWaiting(true);
+    setPending('');
+    setStep('');
     try {
       // Server persists both sides of the exchange; refresh/Realtime shows them.
-      await agentTurn(team.id, text, 'private');
+      // The stream is only for watching it happen.
+      await streamTurn(team.id, text, 'private', (f) => {
+        if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
+        else if (f.type === 'tool_call') setStep(`checking ${f.tool}…`);
+        else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
+      });
     } catch (e) {
       setSendError(agentErrorText(e));
       setDraft(text);
     } finally {
       setWaiting(false);
+      setPending('');
+      setStep('');
       await refresh();
     }
   };
@@ -145,20 +156,47 @@ export function PrivateThread() {
           {waiting && (
             <div style={{ display: 'flex', gap: 13 }}>
               <AiOrb size={32} breathing />
-              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                {[0, 0.2, 0.4].map((d) => (
-                  <span
-                    key={d}
-                    style={{
-                      width: 6,
-                      height: 6,
-                      borderRadius: '50%',
-                      background: 'var(--muted)',
-                      animation: `blink 1.2s ${d}s infinite`,
-                    }}
-                  />
-                ))}
-              </div>
+              {pending ? (
+                <div
+                  style={{
+                    background: 'var(--card)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 3,
+                    boxShadow: '3px 3px 0 rgba(35,33,48,0.08)',
+                    padding: '13px 16px',
+                    fontSize: 13.5,
+                    lineHeight: 1.55,
+                    color: 'var(--text-body)',
+                    maxWidth: 470,
+                    whiteSpace: 'pre-wrap',
+                    overflowWrap: 'anywhere',
+                  }}
+                >
+                  {pending}
+                </div>
+              ) : (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <span style={{ display: 'flex', gap: 4 }}>
+                    {[0, 0.2, 0.4].map((d) => (
+                      <span
+                        key={d}
+                        style={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          background: 'var(--muted)',
+                          animation: `blink 1.2s ${d}s infinite`,
+                        }}
+                      />
+                    ))}
+                  </span>
+                  {step && (
+                    <span className="mono" style={{ fontSize: 10, color: 'var(--faint)' }}>
+                      {step}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>

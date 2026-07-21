@@ -145,3 +145,57 @@ export async function ingestDocument(
   }
   return (await res.json()) as { job_id: string };
 }
+
+export interface StreamFrame {
+  type: 'run' | 'tool_call' | 'tool_result' | 'text' | 'done' | 'error';
+  run_id?: string;
+  tool?: string;
+  text?: string;
+  detail?: string;
+  user_message_id?: string;
+  reply_message_id?: string | null;
+}
+
+/**
+ * Stream one agent turn, calling `onFrame` per NDJSON line.
+ * fetch (not EventSource) because the turn needs the Authorization header.
+ */
+export async function streamTurn(
+  teamId: string,
+  text: string,
+  threadType: 'private' | 'group',
+  onFrame: (frame: StreamFrame) => void,
+): Promise<void> {
+  const res = await fetch(`${BASE}/agent/turn/stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: await authHeader(),
+    },
+    body: JSON.stringify({ team_id: teamId, text, thread_type: threadType }),
+  });
+  if (!res.ok || !res.body) {
+    let detail = res.statusText;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new AgentApiError(res.status, detail);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? ''; // keep the partial line
+    for (const line of lines) {
+      if (line.trim()) onFrame(JSON.parse(line) as StreamFrame);
+    }
+  }
+  if (buffer.trim()) onFrame(JSON.parse(buffer) as StreamFrame);
+}

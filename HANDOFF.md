@@ -54,6 +54,7 @@ membership through your *own* RLS context, so naming a team you're not in gets a
 | Endpoint | Status | Notes |
 |---|---|---|
 | `POST /agent/turn` `{team_id, text, thread_type}` → `{run_id, reply, user_message_id, reply_message_id}` | ✅ built | Persists both the member's message and the AI reply to `messages`; let Realtime deliver them rather than double-inserting client-side. `thread_type` is `private` (default) or `group`. Returns **429** when the team is over its hourly turn cap (`AGENT_TURNS_PER_HOUR`, default 60). |
+| `POST /agent/turn/stream` — same body | ✅ built | Newline-delimited JSON: `run` → `tool_call`/`text` → `done` (or `error`). Use `fetch` + `ReadableStream`, **not `EventSource`** (it cannot send `Authorization`). 403/429 arrive as real statuses before the stream opens. |
 | `POST /consent/{id}/approve` `{team_id}` | ✅ built | Approves **and executes**. Authorisation is RLS (`au_consent_queue_update`: requester only) → 404 if not yours. |
 | `POST /consent/{id}/reject` `{team_id}` | ✅ built | |
 | `POST /consent/{id}/edit_and_approve` `{team_id, args}` | ✅ built | Re-stamps the action hash, then executes. |
@@ -139,6 +140,11 @@ arrangement) — owner never settled it; you have latitude, confirm big choices 
    behaviour, wrong principal — production needs a dedicated least-privilege authenticator role.
 7. **Rate limiting covers `/agent/turn` only** — team-scoped and turn-count-based (not tokens).
    Other endpoints are unlimited; they are cheap RLS'd DB writes.
+8b. **The agent reads the wiki but never writes it** — the page index (titles +
+   descriptions) is auto-loaded into its instruction each turn, Claude-Code
+   style, and `memory_read_page(title)` pulls one page with its citations on
+   demand. Nothing sends the whole wiki into a turn. The compiler remains the
+   sole writer; `Role.AGENT` has `select` only on `memory_*`.
 8. **Storage RLS is tenant-scoped by path prefix** — uploads MUST keep the
    `{team_id}/{uuid}-{filename}` shape or the policy rejects them. Bucket `documents` is private;
    read via `createSignedUrl`.

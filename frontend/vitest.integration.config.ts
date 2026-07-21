@@ -7,7 +7,9 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/integration/**/*.test.ts'],
     globalSetup: ['./tests/integration/global-setup.ts'],
-    testTimeout: 15000,
+    // must exceed realtime.test.ts's EVENT_WAIT_MS ceiling, or vitest kills
+    // the test before its own bound reports a useful message
+    testTimeout: 20000,
     hookTimeout: 30000,
     // team fixtures are cheap; serial keeps realtime tests deterministic
     fileParallelism: false,

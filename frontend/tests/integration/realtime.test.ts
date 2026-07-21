@@ -8,7 +8,11 @@ import {
   cleanupTeam, createTeam, createUser, stackUp, type TestUser,
 } from './harness';
 
-const EVENT_WAIT_MS = 5000;
+// A ceiling, not a delay: a passing run resolves the moment the event lands,
+// so raising this costs nothing when things are healthy. It was 5s, which
+// flaked twice under load (a full backend suite running alongside).
+const EVENT_WAIT_MS = 15000;
+// The negative assertion DOES wait this long every run, so it stays short.
 const SILENCE_WAIT_MS = 2000;
 
 function subscribed(channel: RealtimeChannel): Promise<void> {

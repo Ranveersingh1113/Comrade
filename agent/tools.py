@@ -9,6 +9,7 @@ from typing import Literal
 
 from google.adk.tools import ToolContext
 
+from pipeline.wiki import all_active_pages
 from shared.consent import propose_action
 from shared.db import Role, team_session
 from shared.nudge import send_nudge
@@ -72,6 +73,50 @@ def fetch_team_state(team_id: str) -> dict:
     }
 
 
+def read_memory_page(team_id: str, title: str) -> dict:
+    """One wiki page's active facts with their citations (pure; explicit team).
+
+    Titles match case-insensitively — the model reads them off an index, so a
+    capitalisation slip should not read as "no such page".
+    """
+    with team_session(Role.AGENT, team_id) as conn:
+        pages = [p for p in all_active_pages(conn, team_id) if p["facts"]]
+        page = next(
+            (p for p in pages if p["title"].lower() == title.strip().lower()), None
+        )
+        if page is None:
+            return {
+                "error": "no such page",
+                "available": [p["title"] for p in pages],
+            }
+        entry_ids = [f["entry_id"] for f in page["facts"]]
+        rows = conn.execute(
+            "select v.entry_id, c.source_kind, c.source_id, c.excerpt"
+            " from public.memory_versions v"
+            " join public.memory_citations c on c.version_id = v.id"
+            " where v.entry_id = any(%s::uuid[]) and v.is_active",
+            (entry_ids,),
+        ).fetchall()
+
+    by_entry: dict[str, list[dict]] = {}
+    for entry_id, source_kind, source_id, excerpt in rows:
+        by_entry.setdefault(str(entry_id), []).append(
+            {
+                "source_kind": source_kind,
+                "source_id": str(source_id),
+                "excerpt": excerpt,
+            }
+        )
+    return {
+        "title": page["title"],
+        "description": page["description"],
+        "facts": [
+            {"fact": f["text"], "citations": by_entry.get(f["entry_id"], [])}
+            for f in page["facts"]
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # ADK tools — team_id / requester_id are server-bound from session state.
 # ---------------------------------------------------------------------------
@@ -80,6 +125,19 @@ def team_get_state(tool_context: ToolContext) -> dict:
     """Get the current team's state: members, live tasks, and pending consent
     items. Call this before summarising status or referencing who/what exists."""
     return fetch_team_state(tool_context.state["team_id"])
+
+
+def memory_read_page(title: str, tool_context: ToolContext) -> dict:
+    """Read one page of the team wiki: its facts and where each came from.
+
+    Use this before answering about decisions, deadlines, scope, or history.
+    The page titles are listed in your instructions. Cite what you find. If a
+    page does not contain the answer, say the wiki does not record it.
+
+    Args:
+        title: a page title from the wiki index in your instructions.
+    """
+    return read_memory_page(tool_context.state["team_id"], title)
 
 
 def team_propose_task(

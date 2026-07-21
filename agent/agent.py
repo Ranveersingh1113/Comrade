@@ -9,6 +9,7 @@ from google.adk.agents.readonly_context import ReadonlyContext
 
 from agent.tools import (
     member_send_nudge,
+    memory_read_page,
     team_get_state,
     team_propose_group_message,
     team_propose_task,
@@ -37,6 +38,12 @@ members, tasks, or pending actions, call team_get_state and base your reply on
 what it returns. Never invent members, tasks, or deadlines; if the data doesn't
 show something, say so. When you reference a fact, it should come from a tool,
 not a guess.
+
+The team wiki is what the team has decided and recorded — its index is below.
+For anything about decisions, deadlines, scope, or history, read the relevant
+page with memory_read_page before answering, and say where the fact came from.
+The wiki is a record, not an authority: if live state contradicts it, trust
+live state and say the wiki looks out of date.
 
 Taking action:
 - To create a task, use team_propose_task. To post to the group room, use
@@ -89,6 +96,7 @@ root_agent = LlmAgent(
     instruction=build_instruction,
     tools=[
         team_get_state,
+        memory_read_page,
         team_propose_task,
         team_propose_group_message,
         member_send_nudge,

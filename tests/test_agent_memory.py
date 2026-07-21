@@ -82,3 +82,74 @@ def test_index_is_team_scoped(seeded):
     finally:
         conn.close()
     assert "OtherTeamSecrets" not in wiki_section(TEAM_A)
+
+
+def test_read_page_returns_facts_with_citations(seeded):
+    from agent.tools import read_memory_page
+
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _, _, version_id = _seed_page(
+                cur, TEAM_A, "Deadlines", "Demo is Friday", description="key dates",
+            )
+            doc_id = cur.execute(
+                "insert into public.documents (team_id, kind, filename)"
+                " values (%s,'text','plan.txt') returning id",
+                (TEAM_A,),
+            ).fetchone()[0]
+            cur.execute(
+                "insert into public.memory_citations (version_id, source_kind,"
+                " source_id, excerpt) values (%s,'document',%s,'demo on Friday')",
+                (version_id, doc_id),
+            )
+    finally:
+        conn.close()
+
+    page = read_memory_page(TEAM_A, "Deadlines")
+    assert page["title"] == "Deadlines"
+    assert page["facts"][0]["fact"] == "Demo is Friday"
+    citation = page["facts"][0]["citations"][0]
+    assert citation["source_kind"] == "document"
+    assert citation["excerpt"] == "demo on Friday"
+
+
+def test_read_page_is_case_insensitive(seeded):
+    from agent.tools import read_memory_page
+
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page(cur, TEAM_A, "Deadlines", "Demo is Friday")
+    finally:
+        conn.close()
+    assert read_memory_page(TEAM_A, "deadlines")["title"] == "Deadlines"
+
+
+def test_unknown_page_lists_what_is_available(seeded):
+    from agent.tools import read_memory_page
+
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page(cur, TEAM_A, "Deadlines", "Demo is Friday")
+    finally:
+        conn.close()
+
+    out = read_memory_page(TEAM_A, "Budget")
+    assert out["error"] == "no such page"
+    assert "Deadlines" in out["available"]
+
+
+def test_read_page_cannot_reach_another_team(seeded):
+    from agent.tools import read_memory_page
+
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page(cur, TEAM_B, "OtherTeamSecrets", "not yours")
+    finally:
+        conn.close()
+
+    out = read_memory_page(TEAM_A, "OtherTeamSecrets")
+    assert out["error"] == "no such page"

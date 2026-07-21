@@ -15,7 +15,11 @@ TEAM = "team-1"
 
 @pytest.fixture
 def client(monkeypatch):
+    # Both guards are stubbed: these tests exercise handler behaviour with no
+    # DB. Membership is covered in test_server_auth, the budget in
+    # test_server_budget.
     monkeypatch.setattr("server.app.require_membership", lambda *_: None)
+    monkeypatch.setattr("server.app._check_turn_budget", lambda *_: None)
     app.dependency_overrides[current_user_id] = lambda: USER
     yield TestClient(app)
     app.dependency_overrides.clear()

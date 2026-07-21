@@ -97,6 +97,31 @@ def _persist_ai_reply(
     return str(row[0])
 
 
+def _check_turn_budget(user_id: str, team_id: str) -> None:
+    """Refuse the turn when the team is at its hourly cap.
+
+    agent_runs already records every turn (team_id, created_at), so the limit
+    is a count over a table that exists: no new store, correct across API
+    instances, and it survives a restart. idx_agent_runs_team covers the
+    query. Runs as the member, so RLS scopes the count to their own team.
+    """
+    cap = settings.agent_turns_per_hour
+    if cap <= 0:
+        return
+    with user_session(user_id) as conn:
+        used = conn.execute(
+            "select count(*) from public.agent_runs"
+            " where team_id=%s and created_at > now() - interval '1 hour'",
+            (team_id,),
+        ).fetchone()[0]
+    if used >= cap:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"This team has used its {cap} agent turns for the hour."
+            " Comrade will be available again shortly.",
+        )
+
+
 @app.post("/agent/turn", response_model=TurnResponse)
 def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     """Run one agent turn and persist both sides of it to `messages`.
@@ -107,6 +132,7 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     through propose_action -> the consent queue.
     """
     require_membership(user_id, req.team_id)
+    _check_turn_budget(user_id, req.team_id)
     user_message_id = _persist_user_message(
         user_id, req.team_id, req.thread_type, req.text
     )

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     supabase_jwt_secret: str = ""
     # Comma-separated browser origins allowed to call the API.
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # Per-team hourly cap on agent turns — the lid on LLM spend and the
+    # simplest abuse brake. 0 disables the cap entirely.
+    agent_turns_per_hour: int = 60
 
     @property
     def cors_origin_list(self) -> list[str]:

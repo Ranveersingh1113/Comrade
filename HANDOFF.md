@@ -53,7 +53,7 @@ membership through your *own* RLS context, so naming a team you're not in gets a
 
 | Endpoint | Status | Notes |
 |---|---|---|
-| `POST /agent/turn` `{team_id, text, thread_type}` → `{run_id, reply, user_message_id, reply_message_id}` | ✅ built | Persists both the member's message and the AI reply to `messages`; let Realtime deliver them rather than double-inserting client-side. `thread_type` is `private` (default) or `group`. |
+| `POST /agent/turn` `{team_id, text, thread_type}` → `{run_id, reply, user_message_id, reply_message_id}` | ✅ built | Persists both the member's message and the AI reply to `messages`; let Realtime deliver them rather than double-inserting client-side. `thread_type` is `private` (default) or `group`. Returns **429** when the team is over its hourly turn cap (`AGENT_TURNS_PER_HOUR`, default 60). |
 | `POST /consent/{id}/approve` `{team_id}` | ✅ built | Approves **and executes**. Authorisation is RLS (`au_consent_queue_update`: requester only) → 404 if not yours. |
 | `POST /consent/{id}/reject` `{team_id}` | ✅ built | |
 | `POST /consent/{id}/edit_and_approve` `{team_id, args}` | ✅ built | Re-stamps the action hash, then executes. |
@@ -137,6 +137,11 @@ arrangement) — owner never settled it; you have latitude, confirm big choices 
 5. Consent TTL is 7 days in code (schema comment says ~5 min — code wins).
 6. `user_session()` still connects via the postgres superuser URL and `SET ROLE`s down. Correct
    behaviour, wrong principal — production needs a dedicated least-privilege authenticator role.
+7. **Rate limiting covers `/agent/turn` only** — team-scoped and turn-count-based (not tokens).
+   Other endpoints are unlimited; they are cheap RLS'd DB writes.
+8. **Storage RLS is tenant-scoped by path prefix** — uploads MUST keep the
+   `{team_id}/{uuid}-{filename}` shape or the policy rejects them. Bucket `documents` is private;
+   read via `createSignedUrl`.
 
 ## 7. Governance rulings that shape UX (owner-accepted, provisional)
 

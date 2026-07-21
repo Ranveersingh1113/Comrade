@@ -5,6 +5,7 @@ fact-based, no filler/emojis).
 import os
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.readonly_context import ReadonlyContext
 
 from agent.tools import (
     member_send_nudge,
@@ -12,7 +13,9 @@ from agent.tools import (
     team_propose_group_message,
     team_propose_task,
 )
+from pipeline.wiki import all_active_pages
 from shared.config import settings
+from shared.db import Role, team_session
 
 # Use the Gemini Developer API (API key), not Vertex.
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
@@ -45,10 +48,45 @@ Taking action:
   through a proposal a human approves.
 """
 
+def wiki_section(team_id: str) -> str:
+    """The team wiki's page index — titles and descriptions only.
+
+    Claude Code's model: the index is always in context, page bodies load on
+    demand (memory_read_page). Pages with no active facts are omitted so the
+    agent never opens an empty one.
+    """
+    with team_session(Role.AGENT, team_id) as conn:
+        pages = [p for p in all_active_pages(conn, team_id) if p["facts"]]
+    if not pages:
+        return (
+            "\n## The team wiki\n"
+            "The wiki is empty — nothing has been compiled yet. Say so plainly"
+            " rather than guessing at decisions or deadlines.\n"
+        )
+    lines = "\n".join(
+        f"- {p['title']}" + (f" — {p['description']}" if p["description"] else "")
+        for p in pages
+    )
+    return (
+        "\n## The team wiki\n"
+        "Compiled from the team's own documents and chat. Every fact is cited,"
+        " versioned, and revertible by any member.\n\n"
+        f"{lines}\n\n"
+        "Call memory_read_page with a title before answering about decisions,"
+        " deadlines, scope, or history. Cite what you find. If the wiki does not"
+        " say it, say that it does not.\n"
+    )
+
+
+def build_instruction(ctx: ReadonlyContext) -> str:
+    """Per-turn instruction: static rules + this team's wiki index."""
+    return INSTRUCTION + wiki_section(ctx.state["team_id"])
+
+
 root_agent = LlmAgent(
     name="comrade",
     model=MODEL,
-    instruction=INSTRUCTION,
+    instruction=build_instruction,
     tools=[
         team_get_state,
         team_propose_task,

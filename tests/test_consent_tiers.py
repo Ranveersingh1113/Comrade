@@ -245,3 +245,79 @@ def test_tombstone_fn_marks_only_ai_messages_and_is_agent_only(seeded):
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         with as_user(A1) as conn:
             conn.execute("select public.tombstone_ai_message(%s,%s)", (ai_id, TEAM_A))
+
+
+def test_suppress_refuses_a_memory_diff_card(seeded):
+    """Diff cards are notifications, not observations — silencing them would
+    break the post-hoc transparency the memory model depends on."""
+    from fastapi.testclient import TestClient
+
+    from server.app import app
+    from server.auth import current_user_id
+
+    conn = _admin()
+    try:
+        msg_id = conn.execute(
+            "insert into public.messages (team_id, thread_type, sender_kind, body)"
+            " values (%s,'group','ai','Memory updated — 2 added, 1 revised, 0 removed.')"
+            " returning id",
+            (TEAM_A,),
+        ).fetchone()[0]
+        conn.execute(
+            "insert into public.memory_compilations (team_id, trigger, status,"
+            " diff_message_id) values (%s,'on_demand','done',%s)",
+            (TEAM_A, msg_id),
+        )
+    finally:
+        conn.close()
+
+    app.dependency_overrides[current_user_id] = lambda: A1
+    try:
+        resp = TestClient(app).post(
+            f"/observations/{msg_id}/suppress",
+            json={"team_id": TEAM_A, "kind": "proactive_observation"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 404
+    conn = _admin()
+    try:
+        deleted, suppressions = conn.execute(
+            "select (select deleted_at from public.messages where id=%(m)s),"
+            " (select count(*) from public.observation_suppressions"
+            "  where message_id=%(m)s)",
+            {"m": msg_id},
+        ).fetchone()
+    finally:
+        conn.close()
+    assert deleted is None            # card still visible
+    assert suppressions == 0          # nothing recorded
+
+
+def test_suppress_still_works_on_a_plain_observation(seeded):
+    from fastapi.testclient import TestClient
+
+    from server.app import app
+    from server.auth import current_user_id
+
+    conn = _admin()
+    try:
+        msg_id = conn.execute(
+            "insert into public.messages (team_id, thread_type, sender_kind, body)"
+            " values (%s,'group','ai','Observation: the doc has not moved.')"
+            " returning id",
+            (TEAM_A,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    app.dependency_overrides[current_user_id] = lambda: A1
+    try:
+        resp = TestClient(app).post(
+            f"/observations/{msg_id}/suppress",
+            json={"team_id": TEAM_A, "kind": "proactive_observation"},
+        )
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200

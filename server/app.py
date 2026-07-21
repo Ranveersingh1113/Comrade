@@ -232,12 +232,17 @@ def observation_suppress(
             " select %s, %s, %s, m.id from public.messages m"
             " where m.id=%s and m.team_id=%s and m.sender_kind='ai'"
             " and m.thread_type='group'"
+            # Diff cards are notifications, not observations: silencing them
+            # would break the transparency that replaces a memory approval gate.
+            " and not exists (select 1 from public.memory_compilations c"
+            "                 where c.diff_message_id = m.id)"
             " returning id",
             (req.team_id, user_id, req.kind, message_id, req.team_id),
         ).fetchone()
     if row is None:
         raise HTTPException(
-            status.HTTP_404_NOT_FOUND, "not an AI group message in this team"
+            status.HTTP_404_NOT_FOUND,
+            "not a suppressible AI observation in this team",
         )
     # The agent role has no UPDATE on messages (propose-only, by design);
     # tombstoning goes through a definer function that can do exactly this

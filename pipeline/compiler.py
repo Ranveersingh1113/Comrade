@@ -81,7 +81,10 @@ _CONSOLIDATE_SYSTEM = (
     " pages with their current facts, then candidate facts from a new document."
     " For each candidate choose one action:"
     " 'add' (genuinely new information - also set page_title to the existing"
-    " page it belongs on, or propose a short new page title of 2-4 words),"
+    " page it belongs on, or propose a short new page title of 2-4 words; when"
+    " you propose a NEW title, also set page_description to one short line"
+    " saying what belongs on that page, so a reader can pick it from an index"
+    " without opening it),"
     " 'revise' (it updates or replaces one existing fact - set entry_id to that"
     " fact's id), 'invalidate' (it states an existing fact no longer holds and"
     " nothing replaces it - set entry_id), 'noop' (it duplicates an existing"
@@ -108,6 +111,10 @@ class Decision(BaseModel):
     action: str  # 'add' | 'revise' | 'invalidate' | 'noop'
     entry_id: str | None = None
     page_title: str | None = None  # for 'add': target page (existing or new)
+    # For 'add' onto a NEW page: one line saying what the page is for. This is
+    # the input the LIVE recall index selects on (agent/agent.py:wiki_section),
+    # not routing polish — findings §2.3, promoted by §20.4-1.
+    page_description: str | None = None
 
 
 class _Consolidation(BaseModel):
@@ -186,10 +193,12 @@ def validate_decisions(
             out.append(Decision(candidate_index=i, action="add"))
             continue
         title = (d.page_title or "").strip() or None
+        description = (d.page_description or "").strip() or None
         out.append(
             Decision(
                 candidate_index=i, action=d.action,
                 entry_id=d.entry_id, page_title=title,
+                page_description=description,
             )
         )
     return out
@@ -215,20 +224,31 @@ def consolidate(
     return validate_decisions(candidates, pages, raw)
 
 
-def _resolve_page(conn, team_id: str, title: str | None):
-    """Find (case-insensitively) or create the page an added fact lands on."""
+def _resolve_page(conn, team_id: str, title: str | None, description: str | None = None):
+    """Find (case-insensitively) or create the page an added fact lands on.
+
+    An existing page's description is filled in if it is still blank, but
+    never overwritten — the first compiler to name a page wins, and a later
+    document should not silently rewrite what the page is for.
+    """
     name = (title or "").strip() or DEFAULT_PAGE_TITLE
+    desc = (description or "").strip()
     row = conn.execute(
-        "select id from public.memory_pages"
+        "select id, description from public.memory_pages"
         " where team_id=%s and lower(title)=lower(%s)",
         (team_id, name),
     ).fetchone()
     if row is not None:
+        if desc and not row[1]:
+            conn.execute(
+                "update public.memory_pages set description=%s where id=%s",
+                (desc, row[0]),
+            )
         return row[0]
     created = conn.execute(
-        "insert into public.memory_pages (team_id, title) values (%s,%s)"
-        " on conflict do nothing returning id",
-        (team_id, name),
+        "insert into public.memory_pages (team_id, title, description)"
+        " values (%s,%s,%s) on conflict do nothing returning id",
+        (team_id, name, desc),
     ).fetchone()
     if created is not None:
         return created[0]
@@ -281,7 +301,7 @@ def apply_compilation(
             continue
 
         if action == "add":
-            page_id = _resolve_page(conn, team_id, dec.page_title)
+            page_id = _resolve_page(conn, team_id, dec.page_title, dec.page_description)
             target = conn.execute(
                 "insert into public.memory_entries (team_id, page_id)"
                 " values (%s,%s) returning id",

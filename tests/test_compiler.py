@@ -264,3 +264,28 @@ def test_apply_bad_target_falls_back_to_add(seeded):
     with team_session(Role.PIPELINE, TEAM_A) as conn:
         result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert result["added"] == 1 and result["revised"] == 0
+
+
+def test_a_new_page_gets_its_description_written(seeded):
+    """findings §2.3 + §20.4-1: descriptions feed the LIVE recall index."""
+    candidates = [Candidate(text="We ship on Fridays", excerpt="ship Fridays")]
+    decisions = [
+        Decision(candidate_index=0, action="add", page_title="Release Cadence",
+                 page_description="how and when we ship")
+    ]
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
+        apply_compilation(conn, TEAM_A, candidates, decisions, [None])
+        row = conn.execute(
+            "select description from public.memory_pages"
+            " where team_id=%s and title='Release Cadence'",
+            (TEAM_A,),
+        ).fetchone()
+    assert row[0] == "how and when we ship"
+
+
+def test_validate_normalises_a_blank_description():
+    candidates = [Candidate(text="x")]
+    raw = [Decision(candidate_index=0, action="add", page_title="P",
+                    page_description="   ")]
+    out = validate_decisions(candidates, [], raw)
+    assert out[0].page_description is None

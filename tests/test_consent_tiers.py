@@ -3,9 +3,7 @@ import psycopg
 import pytest
 
 from shared.config import settings
-from shared.consent import (
-    ConsentError, approve_consent, execute_consent, propose_action, resolve_tier,
-)
+from shared.consent import propose_action, resolve_tier
 from tests._seed import A1, A2, TEAM_A, as_user
 
 
@@ -20,6 +18,14 @@ def _admin():
 def test_tier_floors_cannot_be_lowered():
     assert resolve_tier("post_group_message", "T0") == "T2"
     assert resolve_tier("task_create", None) == "T1"
+
+
+def test_tier_can_still_be_raised_above_its_floor():
+    """The surviving half of the old T3 story (§10): a proposal may still ask
+    for a tier above its tool's floor. Below the floor, the floor still wins —
+    this is the one behaviour that justifies keeping the tier column at all."""
+    assert resolve_tier("task_create", "T2") == "T2"
+    assert resolve_tier("task_create", "T0") == "T1"
 
 
 def test_unknown_tool_defaults_conservatively():

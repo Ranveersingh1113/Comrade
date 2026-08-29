@@ -112,11 +112,11 @@ export function ConsentCard({
           <span className="mono" style={{ fontSize: 10, letterSpacing: '0.2em' }}>
             Nº {item.id.slice(0, 4).toUpperCase()} · {item.tool_name}
           </span>
-          {/* After §13 removed team_propose_group_message, every proposal is
-              reversible=true — task_create is the only registered tool and it sets
-              it. The IRREVERSIBLE branch is cosmetically dead until a genuinely
-              irreversible tool is registered. The column stays: the audit trigger
-              reads it (20260719130000:79,:83). */}
+          {/* REVERSIBLE/IRREVERSIBLE is set by the proposing tool, not by tier:
+              team_propose_task sets reversible=true, team_propose_group_message
+              sets reversible=false (agent/tools.py:173,:196) — both are
+              registered today, so both badges are reachable now. The column
+              stays regardless of which tools exist: narrowing beats dropping. */}
           <span
             className="mono"
             style={{

@@ -33,7 +33,9 @@ class ConsentError(Exception):
 _TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2}
 
 # Per-tool FLOORS — a proposal may raise its own tier, never lower it below
-# these. Money / outbound-to-non-members tools must be registered at T3.
+# these. T0-T2 is the whole range now (§10): for code, GitHub branch
+# protection is the real backstop (§16.2); for non-code actions there is no
+# equivalent floor yet — that gap is real and not covered here.
 _TOOL_TIER_FLOORS = {
     "task_create": "T1",           # assignee-confirm is the affected member's key
     "post_group_message": "T2",    # shared, visible, reversible (delete trace)
@@ -44,6 +46,7 @@ DEFAULT_TIER = "T2"
 def resolve_tier(tool_name: str, requested: str | None = None) -> str:
     """The proposal's tier: the requested one, floored per tool."""
     floor = _TOOL_TIER_FLOORS.get(tool_name, DEFAULT_TIER)
+    assert floor in _TIER_ORDER, f"bad floor {floor!r} registered for {tool_name!r}"
     if requested is None or requested not in _TIER_ORDER:
         return floor
     return requested if _TIER_ORDER[requested] >= _TIER_ORDER[floor] else floor

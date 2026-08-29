@@ -9,8 +9,8 @@ from fastapi.testclient import TestClient
 from server.app import app
 from server.auth import current_user_id
 
-USER = "user-1"
-TEAM = "team-1"
+USER = "11111111-1111-1111-1111-111111111111"
+TEAM = "22222222-2222-2222-2222-222222222222"
 
 
 @pytest.fixture
@@ -180,3 +180,25 @@ def test_second_key_not_countersignable_is_404(client, monkeypatch):
     )
     resp = client.post("/consent/c-9/second_key", json={"team_id": TEAM})
     assert resp.status_code == 404
+
+
+def test_suppress_rejects_an_unknown_kind(client):
+    """A kind no producer will ever emit is a typo, not a preference (§2.5)."""
+    resp = client.post(
+        "/observations/00000000-0000-0000-0000-000000000001/suppress",
+        json={"team_id": TEAM, "kind": "not_a_real_kind"},
+    )
+    assert resp.status_code == 422
+
+
+def test_suppress_accepts_the_known_kind(client):
+    """The known kind passes validation; only the DB lookup can reject it.
+
+    404 (no such observation) proves the request body was accepted and the
+    handler ran. A 422 would mean validation wrongly rejected a real kind.
+    """
+    resp = client.post(
+        "/observations/00000000-0000-0000-0000-000000000001/suppress",
+        json={"team_id": TEAM, "kind": "proactive_observation"},
+    )
+    assert resp.status_code != 422

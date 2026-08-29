@@ -17,7 +17,7 @@ import logging
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from agent.runtime import run_turn_sync, stream_turn
@@ -286,8 +286,24 @@ def team_invite(
 
 # ---------- observations ----------
 
+# The categories a proactive AI observation can belong to. §12.3: nothing
+# produces these yet, so the set is the contract a future producer must match
+# — an unvalidated free-text kind records a preference nothing will ever read.
+SUPPRESSIBLE_KINDS = frozenset({"proactive_observation"})
+
+
 class SuppressRequest(TeamScoped):
     kind: str
+
+    @field_validator("kind")
+    @classmethod
+    def _known_kind(cls, v: str) -> str:
+        if v not in SUPPRESSIBLE_KINDS:
+            raise ValueError(
+                f"unknown observation kind {v!r};"
+                f" expected one of {sorted(SUPPRESSIBLE_KINDS)}"
+            )
+        return v
 
 
 @app.post("/observations/{message_id}/suppress")

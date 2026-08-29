@@ -3,8 +3,9 @@
 Pages group facts into topics. This module is pure read/projection:
   - all_active_pages(): pages with their active facts — the compiler's
     consolidation context AND the source for rendering.
-  - page_index(): titles + descriptions only — the future agent-recall index
-    (LLM selector picks pages by description, Claude-Code style).
+  (The recall index is NOT here: agent/agent.py:wiki_section builds the
+  titles+descriptions projection inline and injects it into the system prompt
+  every turn. page_index() was a duplicate of that and was deleted 2026-08-29.)
   - render_team_wiki(): the member-facing markdown "what the AI knows".
 
 All queries run on a caller-provided team_session connection, so RLS confines
@@ -53,14 +54,6 @@ def all_active_pages(conn, team_id: str) -> list[dict]:
             {"page_id": None, "title": ORPHAN_TITLE, "description": "", "facts": orphans}
         )
     return pages
-
-
-def page_index(conn, team_id: str) -> list[dict]:
-    """Titles + descriptions only — the cheap recall index."""
-    return [
-        {"title": p["title"], "description": p["description"]}
-        for p in all_active_pages(conn, team_id)
-    ]
 
 
 def render_team_wiki(conn, team_id: str) -> str:

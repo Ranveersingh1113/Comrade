@@ -1,7 +1,7 @@
 """Wiki projection: page grouping, orphan bucket, index, rendering (no LLM)."""
 import psycopg
 
-from pipeline.wiki import ORPHAN_TITLE, all_active_pages, page_index, render_team_wiki
+from pipeline.wiki import ORPHAN_TITLE, all_active_pages, render_team_wiki
 from shared.config import settings
 from shared.db import Role, team_session
 from tests._seed import TEAM_A, TEAM_B
@@ -61,20 +61,6 @@ def test_pages_scoped_to_team(seeded):
     with team_session(Role.PIPELINE, TEAM_A) as s:
         titles = {p["title"] for p in all_active_pages(s, TEAM_A)}
     assert "B-Page" not in titles
-
-
-def test_page_index_is_titles_and_descriptions(seeded):
-    conn = _admin()
-    try:
-        with conn.cursor() as cur:
-            _seed_page_with_fact(cur, TEAM_A, "Decisions", "We use Postgres",
-                                 description="choices made")
-    finally:
-        conn.close()
-    with team_session(Role.PIPELINE, TEAM_A) as s:
-        idx = page_index(s, TEAM_A)
-    assert {"title": "Decisions", "description": "choices made"} in idx
-    assert all(set(e) == {"title", "description"} for e in idx)
 
 
 def test_render_wiki_markdown(seeded):

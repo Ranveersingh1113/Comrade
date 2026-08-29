@@ -162,26 +162,6 @@ def test_stale_consent_surfaces_as_conflict(client, monkeypatch):
     assert resp.status_code == 409
 
 
-def test_second_key_passes_the_caller(client, monkeypatch):
-    seen = {}
-    monkeypatch.setattr(
-        "server.app.add_second_key",
-        lambda team_id, consent_id, member_id: seen.update(m=member_id)
-        or {"status": "executed", "result": {}},
-    )
-    resp = client.post("/consent/c-9/second_key", json={"team_id": TEAM})
-    assert resp.status_code == 200 and seen["m"] == USER
-
-
-def test_second_key_not_countersignable_is_404(client, monkeypatch):
-    monkeypatch.setattr(
-        "server.app.add_second_key",
-        lambda *a: {"status": "not_found", "reason": "nope"},
-    )
-    resp = client.post("/consent/c-9/second_key", json={"team_id": TEAM})
-    assert resp.status_code == 404
-
-
 def test_suppress_rejects_an_unknown_kind(client):
     """A kind no producer will ever emit is a typo, not a preference (§2.5)."""
     resp = client.post(

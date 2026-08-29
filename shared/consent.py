@@ -24,9 +24,13 @@ class ConsentError(Exception):
     """Raised when an approved action can no longer be safely executed."""
 
 
-# Blast-radius tiers (governance ruling, provisional): T0 read-only, T1
-# affects one member, T2 shared+reversible, T3 external/irreversible/money.
-_TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2, "T3": 3}
+# Blast-radius tiers: T0 read-only, T1 affects one member, T2 shared and
+# reversible. T3 (external/irreversible/money) and its two-key countersign
+# were removed by owner decision 2026-08-12 (findings §10) — for code, GitHub
+# branch protection is a stronger second key than the trigger ever was
+# (§16.2). `tier` survives as an informational label and as the seed for the
+# earned-trust ratchet (§9.3 G4/G5).
+_TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2}
 
 # Per-tool FLOORS — a proposal may raise its own tier, never lower it below
 # these. Money / outbound-to-non-members tools must be registered at T3.
@@ -104,26 +108,16 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
             "update public.consent_queue set status='executed', resolved_at=now()"
             " where id=%s and status in ('approved','edited')"
             " returning tool_name, tool_args, action_hash, requesting_member_id,"
-            " expires_at, tier, second_approver_id",
+            " expires_at",
             (consent_id,),
         ).fetchone()
         if claimed is None:
             return {"status": "noop", "reason": "not approved or already executed"}
 
-        (tool_name, args, action_hash, requester_id, expires_at,
-         tier, second_approver_id) = claimed
+        (tool_name, args, action_hash, requester_id, expires_at) = claimed
 
         if expires_at is not None and expires_at < datetime.now(timezone.utc):
             raise ConsentError(f"consent {consent_id} has expired")
-
-        # T3 hard gate: two keys, and the second is never the initiator (the
-        # DB check constraint backs this; re-checked here so the error is a
-        # clean ConsentError rollback, not a constraint failure).
-        if tier == "T3" and second_approver_id is None:
-            raise ConsentError(
-                f"consent {consent_id} is T3 and needs a second key"
-                " from another member"
-            )
 
         if compute_hash(tool_name, team_id, requester_id, args) != action_hash:
             raise ConsentError(f"consent {consent_id} hash mismatch")
@@ -145,48 +139,20 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
 # is the authorization. execute_consent below never receives the approver id.
 
 def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
-    """Requester approves a pending item; it executes once its keys are in.
+    """Requester approves a pending item; it executes immediately.
 
-    For T0–T2 approval IS the last key. A T3 item without its countersign
-    stays approved-but-waiting rather than erroring — the second key's
-    arrival (add_second_key) completes it.
+    Since §10 removed T3, approval is always the last key. There is no
+    waiting state.
     """
     with user_session(approver_id) as conn:
         row = conn.execute(
             "update public.consent_queue set status='approved'"
-            " where id=%s and status='pending'"
-            " returning tier, second_approver_id",
+            " where id=%s and status='pending' returning id",
             (consent_id,),
         ).fetchone()
     if row is None:
         return {"status": "not_approved", "reason": "not pending or not yours"}
-    tier, second_approver_id = row
-    if tier == "T3" and second_approver_id is None:
-        return {"status": "approved", "awaiting": "second_key"}
     return execute_consent(team_id, consent_id)
-
-
-def add_second_key(team_id: str, consent_id: str, member_id: str) -> dict:
-    """A teammate countersigns a T3 item; executes if already approved.
-
-    Authorization is RLS + the second-key trigger: the write only succeeds if
-    the actor is a team member other than the requester, touches nothing but
-    the second-key columns, and stamps themselves.
-    """
-    with user_session(member_id) as conn:
-        row = conn.execute(
-            "update public.consent_queue set second_approver_id=%s"
-            " where id=%s and tier='T3' and status in ('pending','approved')"
-            " and requesting_member_id <> %s"    # initiator is never a key twice
-            " returning status",
-            (member_id, consent_id, member_id),
-        ).fetchone()
-    if row is None:
-        return {"status": "not_found",
-                "reason": "not a countersignable T3 item in your team"}
-    if row[0] in ("approved", "edited"):
-        return execute_consent(team_id, consent_id)
-    return {"status": "countersigned", "awaiting": "requester_approval"}
 
 
 def reject_consent(team_id: str, consent_id: str, approver_id: str) -> dict:

@@ -26,8 +26,7 @@ from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
 from shared.config import settings
 from shared.consent import (
-    ConsentError, add_second_key, approve_consent, edit_and_approve,
-    reject_consent,
+    ConsentError, approve_consent, edit_and_approve, reject_consent,
 )
 from shared.db import Role, team_session, user_session
 
@@ -245,22 +244,6 @@ def consent_edit_and_approve(
         return _consent_result(
             edit_and_approve(req.team_id, consent_id, user_id, req.args)
         )
-    except ConsentError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-
-
-@app.post("/consent/{consent_id}/second_key")
-def consent_second_key(
-    consent_id: str, req: TeamScoped, user_id: CurrentUserId
-) -> dict:
-    """A teammate countersigns a T3 item (executes if the requester approved).
-
-    The trigger + RLS make this fail for the requester themselves, for
-    non-members, and for any write beyond the second-key columns.
-    """
-    require_membership(user_id, req.team_id)
-    try:
-        return _consent_result(add_second_key(req.team_id, consent_id, user_id))
     except ConsentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
 

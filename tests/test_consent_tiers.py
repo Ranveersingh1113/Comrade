@@ -4,8 +4,7 @@ import pytest
 
 from shared.config import settings
 from shared.consent import (
-    ConsentError, add_second_key, approve_consent, execute_consent,
-    propose_action, resolve_tier,
+    ConsentError, approve_consent, execute_consent, propose_action, resolve_tier,
 )
 from tests._seed import A1, A2, TEAM_A, as_user
 
@@ -16,13 +15,6 @@ def _admin():
     return conn
 
 
-def _propose_t3(body="External post"):
-    return propose_action(
-        TEAM_A, A1, "post_group_message", {"body": body},
-        source_snippet="asked in chat", tier="T3",
-    )["consent_id"]
-
-
 # ---------- tier resolution (pure) ----------
 
 def test_tier_floors_cannot_be_lowered():
@@ -30,138 +22,9 @@ def test_tier_floors_cannot_be_lowered():
     assert resolve_tier("task_create", None) == "T1"
 
 
-def test_tier_can_be_raised():
-    assert resolve_tier("task_create", "T3") == "T3"
-
-
 def test_unknown_tool_defaults_conservatively():
     assert resolve_tier("someday_send_money", None) == "T2"
     assert resolve_tier("someday_send_money", "garbage") == "T2"
-
-
-# ---------- the T3 gate ----------
-
-def test_t3_without_second_key_does_not_execute(seeded):
-    cid = _propose_t3()
-    out = approve_consent(TEAM_A, cid, A1)
-    assert out == {"status": "approved", "awaiting": "second_key"}
-    conn = _admin()
-    try:
-        n = conn.execute(
-            "select count(*) from public.messages where team_id=%s"
-            " and sender_kind='ai' and body='External post'", (TEAM_A,),
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert n == 0
-
-
-def test_t3_executes_once_both_keys_land(seeded):
-    cid = _propose_t3("Two keys turned")
-    approve_consent(TEAM_A, cid, A1)
-    out = add_second_key(TEAM_A, cid, A2)
-    assert out["status"] == "executed"
-
-
-def test_t3_second_key_before_approval_waits(seeded):
-    cid = _propose_t3("Countersigned first")
-    out = add_second_key(TEAM_A, cid, A2)
-    assert out == {"status": "countersigned", "awaiting": "requester_approval"}
-    # requester's approval is now the last key
-    assert approve_consent(TEAM_A, cid, A1)["status"] == "executed"
-
-
-def test_direct_execute_still_blocked_without_second_key(seeded):
-    """The gate lives in execute, not just the approve wrapper."""
-    cid = _propose_t3()
-    conn = _admin()
-    try:
-        conn.execute(
-            "update public.consent_queue set status='approved' where id=%s",
-            (cid,),
-        )
-    finally:
-        conn.close()
-    with pytest.raises(ConsentError, match="second key"):
-        execute_consent(TEAM_A, cid)
-    conn = _admin()
-    try:
-        status = conn.execute(
-            "select status from public.consent_queue where id=%s", (cid,)
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert status == "approved"  # claim rolled back, retryable
-
-
-# ---------- countersign integrity (RLS + trigger) ----------
-
-def test_requester_cannot_countersign_their_own_item(seeded):
-    cid = _propose_t3()
-    out = add_second_key(TEAM_A, cid, A1)
-    assert out["status"] == "not_found"
-
-
-def test_requester_cannot_forge_the_second_key_column(seeded):
-    cid = _propose_t3()
-    with pytest.raises(psycopg.errors.RaiseException, match="cannot set"):
-        with as_user(A1) as conn:
-            conn.execute(
-                "update public.consent_queue set second_approver_id=%s"
-                " where id=%s", (A2, cid),
-            )
-
-
-def test_countersigner_cannot_touch_anything_else(seeded):
-    cid = _propose_t3()
-    with pytest.raises(psycopg.errors.RaiseException, match="only set the second key"):
-        with as_user(A2) as conn:
-            conn.execute(
-                "update public.consent_queue set second_approver_id=%s,"
-                " tool_args=%s::jsonb where id=%s",
-                (A2, '{"body":"swapped payload"}', cid),
-            )
-
-
-def test_editing_args_voids_an_existing_countersign(seeded):
-    """The second key blessed what the teammate SAW, not what it became."""
-    cid = _propose_t3()
-    add_second_key(TEAM_A, cid, A2)
-    with as_user(A1, commit=True) as conn:
-        conn.execute(
-            "update public.consent_queue set tool_args=%s::jsonb,"
-            " action_hash='restamped' where id=%s",
-            ('{"body":"different action"}', cid),
-        )
-    conn = _admin()
-    try:
-        second = conn.execute(
-            "select second_approver_id from public.consent_queue where id=%s",
-            (cid,),
-        ).fetchone()[0]
-    finally:
-        conn.close()
-    assert second is None
-
-
-def test_teammates_can_see_pending_t3_items(seeded):
-    cid = _propose_t3()
-    with as_user(A2) as conn:
-        row = conn.execute(
-            "select tier from public.consent_queue where id=%s", (cid,)
-        ).fetchone()
-    assert row == ("T3",)
-
-
-def test_teammates_still_cannot_see_lower_tier_items(seeded):
-    cid = propose_action(
-        TEAM_A, A1, "post_group_message", {"body": "T2 stays private"},
-    )["consent_id"]
-    with as_user(A2) as conn:
-        row = conn.execute(
-            "select 1 from public.consent_queue where id=%s", (cid,)
-        ).fetchone()
-    assert row is None
 
 
 # ---------- observation suppression + opens summary (DB) ----------
@@ -321,3 +184,21 @@ def test_suppress_still_works_on_a_plain_observation(seeded):
     finally:
         app.dependency_overrides.clear()
     assert resp.status_code == 200
+
+
+def test_tier_cannot_be_t3_any_more(seeded):
+    """§10: T3 is gone. A caller asking for it gets the tool's floor instead."""
+    assert resolve_tier("task_create", "T3") == "T1"
+    cid = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "x", "description": None, "deadline": None},
+        tier="T3",
+    )["consent_id"]
+    conn = _admin()
+    try:
+        row = conn.execute(
+            "select tier from public.consent_queue where id=%s", (cid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == "T1"

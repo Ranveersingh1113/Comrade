@@ -25,7 +25,7 @@ class ConsentError(Exception):
 
 
 # Blast-radius tiers: T0 read-only, T1 affects one member, T2 shared and
-# reversible. T3 (external/irreversible/money) and its two-key countersign
+# reversible. T3 (external/irreversible/money) and its two-key requirement
 # were removed by owner decision 2026-08-12 (findings §10) — for code, GitHub
 # branch protection is a stronger second key than the trigger ever was
 # (§16.2). `tier` survives as an informational label and as the seed for the

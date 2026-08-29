@@ -1,4 +1,4 @@
-"""Blast-radius tiers: floors, the T3 two-key gate, and countersign integrity."""
+"""Blast-radius tiers: floors, and the invariant that T3 no longer resolves."""
 import psycopg
 import pytest
 

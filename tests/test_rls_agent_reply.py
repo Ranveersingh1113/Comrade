@@ -8,30 +8,33 @@ Every HTTP test stubs `_persist_ai_reply`, which is why nothing caught it.
 import psycopg
 import pytest
 
+from server.app import _persist_ai_reply
+from shared.config import settings
 from shared.db import Role, team_session
-from tests._seed import A1, TEAM_A
+from tests._seed import A1, TEAM_A, count
 
 
 def test_agent_can_insert_a_group_reply(seeded):
+    # no RETURNING: that needs SELECT on messages, revoked by §4.1
     with team_session(Role.AGENT, TEAM_A) as conn:
-        row = conn.execute(
+        cur = conn.execute(
             "insert into public.messages (team_id, thread_type, thread_owner_id,"
             " sender_kind, body)"
-            " values (%s,'group',null,'ai','The demo is Friday.') returning id",
+            " values (%s,'group',null,'ai','The demo is Friday.')",
             (TEAM_A,),
-        ).fetchone()
-    assert row is not None
+        )
+    assert cur.rowcount == 1
 
 
 def test_agent_can_still_insert_a_private_nudge(seeded):
     with team_session(Role.AGENT, TEAM_A) as conn:
-        row = conn.execute(
+        cur = conn.execute(
             "insert into public.messages (team_id, thread_type, thread_owner_id,"
             " sender_kind, body)"
-            " values (%s,'private',%s,'ai','Checking in.') returning id",
+            " values (%s,'private',%s,'ai','Checking in.')",
             (TEAM_A, A1),
-        ).fetchone()
-    assert row is not None
+        )
+    assert cur.rowcount == 1
 
 
 def test_agent_cannot_impersonate_a_member(seeded):
@@ -44,3 +47,21 @@ def test_agent_cannot_impersonate_a_member(seeded):
                 " values (%s,'group','user',%s,'not actually me')",
                 (TEAM_A, A1),
             )
+
+
+def test_persist_ai_reply_returns_the_id_it_wrote(seeded):
+    """The real function, unstubbed. §4.1 took SELECT on messages away, so it
+    now supplies the id instead of reading it back with RETURNING — and this
+    file exists because every HTTP test stubs this function out."""
+    message_id = _persist_ai_reply(TEAM_A, "group", None, "The demo is Friday.")
+
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        assert count(
+            conn,
+            "select count(*) from public.messages"
+            " where id = %s and team_id = %s and sender_kind = 'ai'",
+            (message_id, TEAM_A),
+        ) == 1
+    finally:
+        conn.close()

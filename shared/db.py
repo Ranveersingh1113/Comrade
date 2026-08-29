@@ -75,6 +75,11 @@ def user_session(user_id: str) -> Iterator[psycopg.Connection]:
     """Open a connection acting as an end user (role `authenticated`, auth.uid()
     = user_id), so RLS applies exactly as it would for that user in the app.
 
+    This is also how the AGENT reads (findings §4.1): it borrows the requesting
+    member's permissions instead of holding its own. Note that `authenticated`
+    has no current_team() — a member can see EVERY team they belong to — so a
+    query run in here must carry its own explicit team_id filter.
+
     Commits on clean exit, rolls back on error. Connects as the dedicated
     authenticator role (comrade_authenticator: LOGIN + noinherit, may only
     SET ROLE authenticated) when COMRADE_AUTHENTICATOR_DB_URL is set; falls

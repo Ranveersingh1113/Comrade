@@ -11,18 +11,25 @@ from google.adk.tools import ToolContext
 
 from pipeline.wiki import all_active_pages
 from shared.consent import propose_action
-from shared.db import Role, team_session
+from shared.db import user_session
 from shared.nudge import send_nudge
 
 
-def fetch_team_state(team_id: str) -> dict:
-    """Snapshot a team's current coordination state (pure; explicit team_id).
+def fetch_team_state(team_id: str, requester_id: str) -> dict:
+    """Snapshot a team's coordination state, read as the requesting member.
 
-    Returns the team, active members (with roles), all not-done tasks, and any
-    pending consent items.
+    findings §4.1: the agent borrows the requester's permissions rather than
+    holding its own. Every query carries an explicit team_id because
+    `authenticated` can see every team the member belongs to — there is no
+    current_team() to scope by, unlike the worker roles.
+
+    Consequence, and correct: open_consent returns only the caller's OWN
+    pending items, because that is what au_consent_queue_select allows.
     """
-    with team_session(Role.AGENT, team_id) as conn:
-        team = conn.execute("select id, name from public.teams").fetchone()
+    with user_session(requester_id) as conn:
+        team = conn.execute(
+            "select id, name from public.teams where id = %s", (team_id,)
+        ).fetchone()
         if team is None:
             return {"error": "team not found or not accessible"}
 
@@ -30,20 +37,24 @@ def fetch_team_state(team_id: str) -> dict:
             "select m.user_id, p.display_name, m.role"
             " from public.memberships m"
             " join public.profiles p on p.id = m.user_id"
-            " where m.status = 'active'"
-            " order by m.role, p.display_name"
+            " where m.team_id = %s and m.status = 'active'"
+            " order by m.role, p.display_name",
+            (team_id,),
         ).fetchall()
 
         tasks = conn.execute(
             "select id, title, assignee_id, status, deadline"
-            " from public.tasks where status <> 'done'"
-            " order by deadline nulls last"
+            " from public.tasks where team_id = %s and status <> 'done'"
+            " order by deadline nulls last",
+            (team_id,),
         ).fetchall()
 
         consent = conn.execute(
             "select id, tool_name, requesting_member_id"
-            " from public.consent_queue where status = 'pending'"
-            " order by created_at"
+            " from public.consent_queue"
+            " where team_id = %s and status = 'pending'"
+            " order by created_at",
+            (team_id,),
         ).fetchall()
 
     return {
@@ -73,13 +84,13 @@ def fetch_team_state(team_id: str) -> dict:
     }
 
 
-def read_memory_page(team_id: str, title: str) -> dict:
-    """One wiki page's active facts with their citations (pure; explicit team).
+def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
+    """One wiki page's active facts with their citations, read as the member.
 
     Titles match case-insensitively — the model reads them off an index, so a
     capitalisation slip should not read as "no such page".
     """
-    with team_session(Role.AGENT, team_id) as conn:
+    with user_session(requester_id) as conn:
         pages = [p for p in all_active_pages(conn, team_id) if p["facts"]]
         page = next(
             (p for p in pages if p["title"].lower() == title.strip().lower()), None
@@ -124,7 +135,9 @@ def read_memory_page(team_id: str, title: str) -> dict:
 def team_get_state(tool_context: ToolContext) -> dict:
     """Get the current team's state: members, live tasks, and pending consent
     items. Call this before summarising status or referencing who/what exists."""
-    return fetch_team_state(tool_context.state["team_id"])
+    return fetch_team_state(
+        tool_context.state["team_id"], tool_context.state["requester_id"]
+    )
 
 
 def memory_read_page(title: str, tool_context: ToolContext) -> dict:
@@ -137,7 +150,9 @@ def memory_read_page(title: str, tool_context: ToolContext) -> dict:
     Args:
         title: a page title from the wiki index in your instructions.
     """
-    return read_memory_page(tool_context.state["team_id"], title)
+    return read_memory_page(
+        tool_context.state["team_id"], tool_context.state["requester_id"], title
+    )
 
 
 def team_propose_task(

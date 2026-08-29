@@ -3,7 +3,7 @@ import psycopg
 
 from agent.agent import wiki_section
 from shared.config import settings
-from tests._seed import TEAM_A, TEAM_B
+from tests._seed import A1, B1, TEAM_A, TEAM_B
 
 
 def _admin():
@@ -40,7 +40,7 @@ def test_index_lists_page_titles_and_descriptions(seeded):
     finally:
         conn.close()
 
-    section = wiki_section(TEAM_A)
+    section = wiki_section(TEAM_A, A1)
     assert "Deadlines" in section
     assert "key dates" in section
     # the index is titles only — never the facts themselves
@@ -57,19 +57,19 @@ def test_index_omits_pages_with_no_active_facts(seeded):
             )
     finally:
         conn.close()
-    assert "Hollow" not in wiki_section(TEAM_A)
+    assert "Hollow" not in wiki_section(TEAM_A, A1)
 
 
 def test_empty_wiki_says_so(seeded):
     # TEAM_B has no compiled memory; TEAM_A always carries the seed's fact.
-    section = wiki_section(TEAM_B)
+    section = wiki_section(TEAM_B, B1)
     assert "empty" in section.lower()
 
 
 def test_page_less_facts_still_surface(seeded):
     """The seed's fact predates pages, so it lives in the Uncategorized
     bucket — the agent must still be told the wiki has something in it."""
-    section = wiki_section(TEAM_A)
+    section = wiki_section(TEAM_A, A1)
     assert "Uncategorized" in section
     assert "empty" not in section.lower()
 
@@ -81,7 +81,7 @@ def test_index_is_team_scoped(seeded):
             _seed_page(cur, TEAM_B, "OtherTeamSecrets", "not yours")
     finally:
         conn.close()
-    assert "OtherTeamSecrets" not in wiki_section(TEAM_A)
+    assert "OtherTeamSecrets" not in wiki_section(TEAM_A, A1)
 
 
 def test_read_page_returns_facts_with_citations(seeded):
@@ -106,7 +106,7 @@ def test_read_page_returns_facts_with_citations(seeded):
     finally:
         conn.close()
 
-    page = read_memory_page(TEAM_A, "Deadlines")
+    page = read_memory_page(TEAM_A, A1, "Deadlines")
     assert page["title"] == "Deadlines"
     assert page["facts"][0]["fact"] == "Demo is Friday"
     citation = page["facts"][0]["citations"][0]
@@ -123,7 +123,7 @@ def test_read_page_is_case_insensitive(seeded):
             _seed_page(cur, TEAM_A, "Deadlines", "Demo is Friday")
     finally:
         conn.close()
-    assert read_memory_page(TEAM_A, "deadlines")["title"] == "Deadlines"
+    assert read_memory_page(TEAM_A, A1, "deadlines")["title"] == "Deadlines"
 
 
 def test_unknown_page_lists_what_is_available(seeded):
@@ -136,7 +136,7 @@ def test_unknown_page_lists_what_is_available(seeded):
     finally:
         conn.close()
 
-    out = read_memory_page(TEAM_A, "Budget")
+    out = read_memory_page(TEAM_A, A1, "Budget")
     assert out["error"] == "no such page"
     assert "Deadlines" in out["available"]
 
@@ -151,5 +151,5 @@ def test_read_page_cannot_reach_another_team(seeded):
     finally:
         conn.close()
 
-    out = read_memory_page(TEAM_A, "OtherTeamSecrets")
+    out = read_memory_page(TEAM_A, A1, "OtherTeamSecrets")
     assert out["error"] == "no such page"

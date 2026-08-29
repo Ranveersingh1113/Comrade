@@ -13,6 +13,7 @@ attacker — that is what the role split + RLS provide.
 """
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 
 from psycopg.types.json import Json
@@ -76,22 +77,27 @@ def propose_action(
     reversible: bool = True,
     tier: str | None = None,
 ) -> dict:
-    """Write a pending consent item (does NOT perform the action). 7-day backstop."""
+    """Write a pending consent item (does NOT perform the action). 7-day backstop.
+
+    The id is generated here rather than with RETURNING: RETURNING needs SELECT
+    on `consent_queue`, and findings §4.1 left the agent INSERT-only there. A
+    freshly proposed row is 'pending' by definition — that is what proposing is.
+    """
     action_hash = compute_hash(tool_name, team_id, requester_id, args)
     final_tier = resolve_tier(tool_name, tier)
+    consent_id = str(uuid.uuid4())
     with team_session(Role.AGENT, team_id) as conn:
-        row = conn.execute(
-            "insert into public.consent_queue (team_id, requesting_member_id,"
+        conn.execute(
+            "insert into public.consent_queue (id, team_id, requesting_member_id,"
             " tool_name, tool_args, source_snippet, action_hash, reversible,"
             " tier, expires_at)"
-            " values (%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')"
-            " returning id, status",
-            (team_id, requester_id, tool_name, Json(args), source_snippet,
-             action_hash, reversible, final_tier),
-        ).fetchone()
+            " values (%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
+            (consent_id, team_id, requester_id, tool_name, Json(args),
+             source_snippet, action_hash, reversible, final_tier),
+        )
     return {
-        "consent_id": str(row[0]),
-        "status": row[1],
+        "consent_id": consent_id,
+        "status": "pending",
         "tool_name": tool_name,
         "action_hash": action_hash,
         "tier": final_tier,

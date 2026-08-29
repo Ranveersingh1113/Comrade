@@ -13,6 +13,7 @@ model never receives team_id / requester_id as tool arguments.
 import base64
 import json
 import logging
+import uuid
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,14 +93,19 @@ def _persist_user_message(
 def _persist_ai_reply(
     team_id: str, thread_type: str, owner_id: str | None, text: str
 ) -> str:
-    """Insert the reply as the AI itself — never attributed to the requester."""
+    """Insert the reply as the AI itself — never attributed to the requester.
+
+    The id is generated here rather than with RETURNING: RETURNING needs SELECT
+    on `messages`, and findings §4.1 revoked the agent's read of that table.
+    """
+    message_id = str(uuid.uuid4())
     with team_session(Role.AGENT, team_id) as conn:
-        row = conn.execute(
-            "insert into public.messages (team_id, thread_type, thread_owner_id,"
-            " sender_kind, body) values (%s,%s,%s,'ai',%s) returning id",
-            (team_id, thread_type, owner_id, text),
-        ).fetchone()
-    return str(row[0])
+        conn.execute(
+            "insert into public.messages (id, team_id, thread_type,"
+            " thread_owner_id, sender_kind, body) values (%s,%s,%s,%s,'ai',%s)",
+            (message_id, team_id, thread_type, owner_id, text),
+        )
+    return message_id
 
 
 def _check_turn_budget(user_id: str, team_id: str) -> None:

@@ -56,9 +56,12 @@ def test_jobs_invisible_to_users(seeded):
 
 # ---------- worker-role boundaries (real login roles) ----------
 
-def test_agent_reads_memory_but_cannot_write(seeded):
-    with team_session(Role.AGENT, TEAM_A) as conn:
-        assert _count(conn, "select count(*) from public.memory_versions") == 1
+def test_agent_can_neither_read_nor_write_memory(seeded):
+    """findings §4.1: the agent's read of memory moved to user_session(), so
+    the role now has no grant at all — it reads the wiki as the member."""
+    with pytest.raises(errors.InsufficientPrivilege):
+        with team_session(Role.AGENT, TEAM_A) as conn:
+            conn.execute("select count(*) from public.memory_versions")
     with pytest.raises(errors.InsufficientPrivilege):
         with team_session(Role.AGENT, TEAM_A) as conn:
             conn.execute(
@@ -68,9 +71,12 @@ def test_agent_reads_memory_but_cannot_write(seeded):
             )
 
 
-def test_agent_scoped_cannot_see_other_team(seeded):
-    with team_session(Role.AGENT, TEAM_A) as conn:
-        assert _count(conn, "select count(*) from public.teams where id=%s", (TEAM_B,)) == 0
+def test_agent_cannot_see_teams_at_all(seeded):
+    """Was: current_team() scoped the agent to one team. Now there is no read
+    grant to scope — a strictly stronger boundary (§4.1)."""
+    with pytest.raises(errors.InsufficientPrivilege):
+        with team_session(Role.AGENT, TEAM_A) as conn:
+            conn.execute("select count(*) from public.teams")
 
 
 def test_pipeline_can_compile_memory(seeded):

@@ -15,7 +15,7 @@ from agent.tools import (
 )
 from pipeline.wiki import all_active_pages
 from shared.config import settings
-from shared.db import Role, team_session
+from shared.db import user_session
 
 # Use the Gemini Developer API (API key), not Vertex.
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
@@ -55,14 +55,16 @@ Taking action:
   for them and let them send it under their own name.
 """
 
-def wiki_section(team_id: str) -> str:
+def wiki_section(team_id: str, requester_id: str) -> str:
     """The team wiki's page index — titles and descriptions only.
 
     Claude Code's model: the index is always in context, page bodies load on
     demand (memory_read_page). Pages with no active facts are omitted so the
     agent never opens an empty one.
+
+    Read as the requesting member (findings §4.1), not as the agent role.
     """
-    with team_session(Role.AGENT, team_id) as conn:
+    with user_session(requester_id) as conn:
         pages = [p for p in all_active_pages(conn, team_id) if p["facts"]]
     if not pages:
         return (
@@ -87,7 +89,9 @@ def wiki_section(team_id: str) -> str:
 
 def build_instruction(ctx: ReadonlyContext) -> str:
     """Per-turn instruction: static rules + this team's wiki index."""
-    return INSTRUCTION + wiki_section(ctx.state["team_id"])
+    return INSTRUCTION + wiki_section(
+        ctx.state["team_id"], ctx.state["requester_id"]
+    )
 
 
 root_agent = LlmAgent(

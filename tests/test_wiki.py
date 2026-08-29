@@ -84,3 +84,33 @@ def test_render_wiki_markdown(seeded):
     assert "- Demo is Friday" in md
     assert "## Empty" not in md
     assert f"## {ORPHAN_TITLE}" in md  # seed's page-less fact still visible
+
+
+def test_facts_carry_their_date_and_source(seeded):
+    """findings §20.3.1: an undated bullet is the widest measured gap."""
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page_with_fact(cur, TEAM_A, "Deadlines", "Demo is Friday",
+                                 description="key dates")
+    finally:
+        conn.close()
+    with team_session(Role.PIPELINE, TEAM_A) as s:
+        pages = all_active_pages(s, TEAM_A)
+    fact = next(f for p in pages for f in p["facts"] if f["text"] == "Demo is Friday")
+    assert fact["valid_from"] is not None
+    assert "source_kind" in fact
+
+
+def test_render_annotates_facts_with_date_and_source(seeded):
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page_with_fact(cur, TEAM_A, "Deadlines", "Demo is Friday",
+                                 description="key dates")
+    finally:
+        conn.close()
+    with team_session(Role.PIPELINE, TEAM_A) as s:
+        md = render_team_wiki(s, TEAM_A)
+    assert "Demo is Friday" in md
+    assert "as of " in md

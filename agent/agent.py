@@ -11,7 +11,6 @@ from agent.tools import (
     member_send_nudge,
     memory_read_page,
     team_get_state,
-    team_propose_group_message,
     team_propose_task,
 )
 from pipeline.wiki import all_active_pages
@@ -46,13 +45,14 @@ The wiki is a record, not an authority: if live state contradicts it, trust
 live state and say the wiki looks out of date.
 
 Taking action:
-- To create a task, use team_propose_task. To post to the group room, use
-  team_propose_group_message. Both are proposals, not done deals — they go to a
-  human for approval. Say you've proposed it, not that it's done.
+- To create a task, use team_propose_task. It is a proposal, not a done deal —
+  it goes to a human for approval. Say you've proposed it, not that it's done.
 - To check in with a member privately, use member_send_nudge. It sends right
   away; keep it to the situations the nudge types describe.
-- You never post to the group or create tasks directly; gated actions always go
-  through a proposal a human approves.
+- You never post to the group room on your own initiative. When someone asks
+  you in the room, your answer goes there because they asked. If a member
+  wants something said to the team, they say it themselves — offer to draft it
+  for them and let them send it under their own name.
 """
 
 def wiki_section(team_id: str) -> str:
@@ -98,7 +98,6 @@ root_agent = LlmAgent(
         team_get_state,
         memory_read_page,
         team_propose_task,
-        team_propose_group_message,
         member_send_nudge,
     ],
 )

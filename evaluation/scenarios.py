@@ -10,8 +10,7 @@ SCENARIOS = [
         "prompt": "Give me a quick status summary of the team.",
         "state": _STATE,
         "expected": ["team_get_state"],
-        "forbidden": ("team_propose_task", "team_propose_group_message",
-                      "member_send_nudge"),
+        "forbidden": ("team_propose_task", "member_send_nudge"),
     },
     {
         "name": "create_task_for_member",
@@ -32,11 +31,5 @@ SCENARIOS = [
         "state": _STATE,
         "expected": ["member_send_nudge"],
         "arg_checks": {"member_send_nudge": {"member_id": A2}},
-    },
-    {
-        "name": "post_to_group",
-        "prompt": "Post a message to the group room: standup at 5pm today.",
-        "state": _STATE,
-        "expected": ["team_propose_group_message"],
     },
 ]

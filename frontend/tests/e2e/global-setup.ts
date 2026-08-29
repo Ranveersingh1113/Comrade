@@ -58,20 +58,21 @@ export default async function globalSetup(): Promise<void> {
     // shared/consent.compute_hash does.
     const { createHash } = await import('node:crypto');
     // Mirrors shared/consent.compute_hash: json.dumps(sort_keys=True,
-    // separators=(',',':')) — compact JSON with keys in sorted order
-    // (args, requester, team, tool; single-key args needs no inner sort).
+    // separators=(',',':')) — compact JSON with keys in sorted order (args,
+    // requester, team, tool; args' own keys below are already alphabetical:
+    // assignee_id, title).
     const mkHash = (tool: string, team: string, requester: string, args: Record<string, unknown>) =>
       createHash('sha256')
         .update(JSON.stringify({ args, requester, team, tool }))
         .digest('hex');
 
-    const t2Args = { body: 'Reminder: standup moved to 3pm.' };
+    const t2Args = { assignee_id: member.id, title: 'Reminder: standup moved to 3pm.' };
     await sql.query(
       "insert into public.consent_queue (team_id, requesting_member_id, tool_name,"
       + " tool_args, action_hash, tier, expires_at)"
-      + " values ($1, $2, 'post_group_message', $3, $4, 'T2', now() + interval '1 day')",
+      + " values ($1, $2, 'task_create', $3, $4, 'T2', now() + interval '1 day')",
       [teamId, leader.id, JSON.stringify(t2Args),
-       mkHash('post_group_message', teamId, leader.id, t2Args)],
+       mkHash('task_create', teamId, leader.id, t2Args)],
     );
     // an AI observation in the room (journey: suppress)
     await sql.query(

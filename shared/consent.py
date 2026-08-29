@@ -38,7 +38,6 @@ _TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2}
 # equivalent floor yet — that gap is real and not covered here.
 _TOOL_TIER_FLOORS = {
     "task_create": "T1",           # assignee-confirm is the affected member's key
-    "post_group_message": "T2",    # shared, visible, reversible (delete trace)
 }
 DEFAULT_TIER = "T2"
 
@@ -214,31 +213,9 @@ def _exec_task_create(conn, team_id, requester_id, args) -> dict:
     return {"task_id": str(row[0])}
 
 
-def _precheck_post_group_message(conn, team_id, requester_id, args) -> None:
-    ok = conn.execute(
-        "select 1 from public.memberships where team_id=%s and user_id=%s"
-        " and status='active'",
-        (team_id, requester_id),
-    ).fetchone()
-    if ok is None:
-        raise ConsentError("requester is no longer an active team member")
-
-
-def _exec_post_group_message(conn, team_id, requester_id, args) -> dict:
-    # AI posts to the group as itself (not attributed to the requester)
-    row = conn.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, body)"
-        " values (%s,'group','ai',%s) returning id",
-        (team_id, args["body"]),
-    ).fetchone()
-    return {"message_id": str(row[0])}
-
-
 _PRECHECKS = {
     "task_create": _precheck_task_create,
-    "post_group_message": _precheck_post_group_message,
 }
 _EXECUTORS = {
     "task_create": _exec_task_create,
-    "post_group_message": _exec_post_group_message,
 }

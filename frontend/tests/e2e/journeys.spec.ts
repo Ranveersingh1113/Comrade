@@ -83,19 +83,19 @@ test.describe.serial('Comrade journeys', () => {
     await expect(page.getByText('REVERT QUEUED')).toBeVisible({ timeout: 10000 });
   });
 
-  test('5. consent inbox: approving the T2 item executes it into the room', async () => {
+  test('5. consent inbox: approving the T2 item executes it', async () => {
     await page.goto(`/t/${state.teamId}/inbox`);
     const t2Card = page
       .getByTestId('consent-card')
       .filter({ hasText: 'standup moved to 3pm' });
-    await expect(t2Card.getByText('post_group_message').first()).toBeVisible();
+    await expect(t2Card.getByText('task_create').first()).toBeVisible();
     await t2Card.getByRole('button', { name: 'APPROVE' }).click();
     // executed items leave Pending and reappear as a compact History row
     await expect(page.getByText('EXECUTED', { exact: false }).first()).toBeVisible({
       timeout: 15000,
     });
 
-    await page.goto(`/t/${state.teamId}/room`);
+    await page.goto(`/t/${state.teamId}/tasks`);
     await expect(page.getByText('Reminder: standup moved to 3pm.')).toBeVisible({
       timeout: 10000,
     });

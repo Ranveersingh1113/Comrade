@@ -16,7 +16,6 @@ def _admin():
 # ---------- tier resolution (pure) ----------
 
 def test_tier_floors_cannot_be_lowered():
-    assert resolve_tier("post_group_message", "T0") == "T2"
     assert resolve_tier("task_create", None) == "T1"
 
 

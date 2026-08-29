@@ -3,7 +3,7 @@ import { argsPretty, consentPhase } from '../../src/lib/consentModel';
 import type { ConsentItem } from '../../src/lib/types';
 
 const item = (over: Partial<ConsentItem>): ConsentItem => ({
-  id: 'c1', team_id: 't1', requesting_member_id: 'u1', tool_name: 'post_group_message',
+  id: 'c1', team_id: 't1', requesting_member_id: 'u1', tool_name: 'task_create',
   tool_args: { body: 'hi' }, source_snippet: null, action_hash: 'h', status: 'pending',
   reversible: true, expires_at: null, created_at: '1', resolved_at: null,
   tier: 'T2',

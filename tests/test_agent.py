@@ -8,12 +8,9 @@ def test_agent_is_configured():
 
 
 def test_tools_registered():
-    names = [
-        getattr(t, "name", getattr(t, "__name__", "")) for t in root_agent.tools
-    ]
-    assert {
+    assert {t.__name__ for t in root_agent.tools} == {
         "team_get_state",
+        "memory_read_page",
         "team_propose_task",
-        "team_propose_group_message",
         "member_send_nudge",
-    } <= set(names)
+    }

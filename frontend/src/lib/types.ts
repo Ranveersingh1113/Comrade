@@ -185,7 +185,6 @@ export interface ConsentItem {
   status: ConsentStatus;
   reversible: boolean;
   tier: ConsentTier;
-  second_approved_at: string | null;
   expires_at: string | null;
   created_at: string;
   resolved_at: string | null;

@@ -25,7 +25,6 @@ const item = (over: Partial<ConsentItem> = {}): ConsentItem => ({
   status: 'pending',
   reversible: true,
   tier: 'T2',
-  second_approved_at: null,
   expires_at: null,
   created_at: '2026-07-20T10:00:00Z',
   resolved_at: null,

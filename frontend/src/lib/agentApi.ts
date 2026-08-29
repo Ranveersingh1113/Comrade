@@ -89,11 +89,6 @@ export function rejectConsent(consentId: string, teamId: string) {
   return request<{ status: string }>(`/consent/${consentId}/reject`, { team_id: teamId });
 }
 
-/** T3 second key: a teammate (never the requester) countersigns. */
-export function secondKeyConsent(consentId: string, teamId: string) {
-  return request<ConsentActionResult>(`/consent/${consentId}/second_key`, { team_id: teamId });
-}
-
 /** One tap: tombstone a proactive AI observation + record "don't do this again". */
 export function suppressObservation(messageId: string, teamId: string, kind: string) {
   return request<{ suppression_id: string; kind: string }>(

@@ -4,7 +4,6 @@ import {
   approveConsent,
   editAndApproveConsent,
   rejectConsent,
-  secondKeyConsent,
 } from '../lib/agentApi';
 import { consentPhase } from '../lib/consentModel';
 import { countdown, messageTime, shortHash } from '../lib/format';
@@ -38,17 +37,11 @@ export function ConsentCard({
   const badge =
     phase === 'pending'
       ? { text: 'AWAITING YOUR KEY', color: 'var(--peach-pale)' }
-      : phase === 'can_countersign'
-        ? { text: 'T3 · NEEDS YOUR COUNTERSIGN', color: 'var(--peach-pale)' }
-        : phase === 'awaiting_second_key'
-          ? { text: 'T3 · AWAITING SECOND KEY', color: 'var(--lavender)' }
-          : phase === 'countersigned_pending'
-            ? { text: 'T3 · COUNTERSIGNED — AWAITING REQUESTER', color: 'var(--lavender)' }
-            : executed
-              ? { text: 'EXECUTED', color: 'var(--peach)' }
-              : item.status === 'approved' || item.status === 'edited'
-                ? { text: 'EXECUTING…', color: 'var(--lavender)' }
-                : { text: 'VOID', color: '#908B9E' };
+      : executed
+        ? { text: 'EXECUTED', color: 'var(--peach)' }
+        : item.status === 'approved' || item.status === 'edited'
+          ? { text: 'EXECUTING…', color: 'var(--lavender)' }
+          : { text: 'VOID', color: '#908B9E' };
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -119,6 +112,11 @@ export function ConsentCard({
           <span className="mono" style={{ fontSize: 10, letterSpacing: '0.2em' }}>
             Nº {item.id.slice(0, 4).toUpperCase()} · {item.tool_name}
           </span>
+          {/* After §13 removed team_propose_group_message, every proposal is
+              reversible=true — task_create is the only registered tool and it sets
+              it. The IRREVERSIBLE branch is cosmetically dead until a genuinely
+              irreversible tool is registered. The column stays: the audit trigger
+              reads it (20260719130000:79,:83). */}
           <span
             className="mono"
             style={{
@@ -318,30 +316,6 @@ export function ConsentCard({
                   EXPIRES IN {countdown(item.expires_at)}
                 </span>
               )}
-            </div>
-          )}
-          {phase === 'can_countersign' && !stale && (
-            <div style={{ display: 'flex', gap: 9, marginTop: 15, alignItems: 'center' }}>
-              <button
-                className="btn-primary"
-                disabled={busy}
-                onClick={() => void act(() => secondKeyConsent(item.id, item.team_id))}
-              >
-                COUNTERSIGN — SECOND KEY
-              </button>
-              <span style={{ fontSize: 11, color: 'var(--faint)', fontStyle: 'italic' }}>
-                T3 actions need two members. You are not approving your own request.
-              </span>
-            </div>
-          )}
-          {phase === 'awaiting_second_key' && (
-            <div style={{ marginTop: 15, fontSize: 12.5, color: 'var(--muted)' }}>
-              Approved by the requester — waiting on any other member's countersign.
-            </div>
-          )}
-          {phase === 'countersigned_pending' && (
-            <div style={{ marginTop: 15, fontSize: 12.5, color: 'var(--muted)' }}>
-              Countersigned — waiting on the requester's approval.
             </div>
           )}
           {executed && (

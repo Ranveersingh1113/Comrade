@@ -101,36 +101,6 @@ test.describe.serial('Comrade journeys', () => {
     });
   });
 
-  test('6. T3 two-key: leader approves, member countersigns, action executes', async ({
-    browser,
-  }) => {
-    await page.goto(`/t/${state.teamId}/inbox`);
-    const t3Card = page
-      .getByTestId('consent-card')
-      .filter({ hasText: 'pilot results shared externally' });
-    await t3Card.getByRole('button', { name: 'APPROVE' }).click();
-    await expect(t3Card.getByText(/T3 · AWAITING SECOND KEY/)).toBeVisible({
-      timeout: 15000,
-    });
-
-    const member = await memberPage(browser);
-    await member.goto(`/t/${state.teamId}/inbox`);
-    const memberT3 = member
-      .getByTestId('consent-card')
-      .filter({ hasText: 'pilot results shared externally' });
-    await expect(memberT3.getByText(/NEEDS YOUR COUNTERSIGN/)).toBeVisible();
-    await memberT3.getByRole('button', { name: /COUNTERSIGN — SECOND KEY/ }).click();
-    await expect(member.getByText('EXECUTED', { exact: false }).first()).toBeVisible({
-      timeout: 15000,
-    });
-    await member.context().close();
-
-    await page.goto(`/t/${state.teamId}/room`);
-    await expect(
-      page.getByText('Announcement: pilot results shared externally.'),
-    ).toBeVisible({ timeout: 10000 });
-  });
-
   test('7. suppressing an AI observation tombstones it', async () => {
     await page.goto(`/t/${state.teamId}/room`);
     const obs = page.getByText(/the API doc has not moved in a week/);

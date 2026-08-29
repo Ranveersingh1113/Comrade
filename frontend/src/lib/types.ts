@@ -171,8 +171,8 @@ export type ConsentStatus =
   | 'executed'
   | 'rejected';
 
-/** Blast-radius tier (migration 20260719130000): T3 needs a second key. */
-export type ConsentTier = 'T0' | 'T1' | 'T2' | 'T3';
+/** Blast-radius tier — informational since the T3 removal (findings §10). */
+export type ConsentTier = 'T0' | 'T1' | 'T2';
 
 export interface ConsentItem {
   id: string;
@@ -185,7 +185,6 @@ export interface ConsentItem {
   status: ConsentStatus;
   reversible: boolean;
   tier: ConsentTier;
-  second_approver_id: string | null;
   second_approved_at: string | null;
   expires_at: string | null;
   created_at: string;

@@ -14,8 +14,6 @@ export function ConsentInbox() {
 
   const load = useCallback(async () => {
     if (!teamId) return;
-    // RLS scopes this to my own items — plus pending T3 items from
-    // teammates, which arrive here for a countersign.
     const { data, error: err } = await supabase
       .from('consent_queue')
       .select('*')
@@ -30,14 +28,10 @@ export function ConsentInbox() {
   }, [load]);
   useTeamRealtime('consent_queue', teamId, load);
 
-  // A T3 item that is approved but not yet countersigned is still LIVE — it
-  // needs a teammate's key — so it stays with the actionable cards instead of
-  // collapsing into history.
-  const isActionable = (i: ConsentItem) =>
-    i.status === 'pending' ||
-    (i.tier === 'T3' && i.status === 'approved' && i.second_approver_id === null);
-  const pending = items.filter(isActionable);
-  const history = items.filter((i) => !isActionable(i));
+  // Every item needs exactly one key — the requester's (findings §10).
+  const isLive = (i: ConsentItem) => i.status === 'pending';
+  const pending = items.filter(isLive);
+  const history = items.filter((i) => !isLive(i));
 
   return (
     <main style={{ flex: 1, overflowY: 'auto' }}>
@@ -70,9 +64,6 @@ export function ConsentInbox() {
           </span>
           <span style={{ flex: 1, padding: '9px 12px', borderRight: '1px solid rgba(35,33,48,0.1)' }}>
             <b style={{ color: 'var(--terracotta)' }}>T2</b> SHARED · ACT + REVERT
-          </span>
-          <span style={{ flex: 1, padding: '9px 12px' }}>
-            <b style={{ color: 'var(--text)' }}>T3</b> EXTERNAL · TWO KEYS
           </span>
         </div>
 

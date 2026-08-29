@@ -1,13 +1,11 @@
-// Consent-card state machine. Tiers grade by blast radius (T0-T3); T3 needs
-// two keys — the initiator plus any OTHER member (backend enforces; this
-// module only decides what the viewer is shown).
+// Consent-card state machine. Tiers grade by blast radius (T0-T2) and are
+// informational only — every item needs exactly one key, the requester's
+// (findings §10, owner decision 2026-08-12). This module only decides what
+// the viewer is shown; the backend decides what may happen.
 import type { ConsentItem } from './types';
 
 export type ConsentPhase =
-  | 'pending'               // actionable by the requester
-  | 'awaiting_second_key'   // T3: requester approved, no countersign yet
-  | 'countersigned_pending' // T3: countersigned, requester not yet approved
-  | 'can_countersign'       // T3: viewer is a teammate who can add the key
+  | 'pending' // actionable by the requester
   | 'executed'
   | 'rejected'
   | 'cancelled'
@@ -15,26 +13,13 @@ export type ConsentPhase =
 
 export function consentPhase(
   item: ConsentItem,
-  viewerId: string | null,
+  _viewerId: string | null,
   staleFromApi: boolean,
 ): ConsentPhase {
   if (staleFromApi) return 'stale';
   if (item.status === 'executed') return 'executed';
   if (item.status === 'rejected') return 'rejected';
   if (item.status === 'cancelled') return 'cancelled';
-
-  const isRequester = viewerId !== null && item.requesting_member_id === viewerId;
-  if (item.tier === 'T3') {
-    const countersigned = item.second_approver_id !== null;
-    if (!isRequester) {
-      // Teammate's view first: they can countersign a pending OR an
-      // already-approved item — the backend accepts both.
-      return countersigned ? 'countersigned_pending' : 'can_countersign';
-    }
-    if (item.status === 'approved' && !countersigned) return 'awaiting_second_key';
-    // Otherwise the requester's view stays actionable — their key still has
-    // to turn, countersigned or not.
-  }
   return 'pending';
 }
 

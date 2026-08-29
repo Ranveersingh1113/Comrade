@@ -53,7 +53,7 @@ export default async function globalSetup(): Promise<void> {
       + " values ($1, $2, 'Final demo is on Friday', 'revised')",
       [entry.rows[0].id, teamId],
     );
-    // pending consent items for the leader: one T2, one T3 (journeys 5 & 6).
+    // a pending consent item for the leader (journey 5).
     // Hash must be genuine so execute passes: computed exactly as
     // shared/consent.compute_hash does.
     const { createHash } = await import('node:crypto');
@@ -66,20 +66,12 @@ export default async function globalSetup(): Promise<void> {
         .digest('hex');
 
     const t2Args = { body: 'Reminder: standup moved to 3pm.' };
-    const t3Args = { body: 'Announcement: pilot results shared externally.' };
     await sql.query(
       "insert into public.consent_queue (team_id, requesting_member_id, tool_name,"
       + " tool_args, action_hash, tier, expires_at)"
       + " values ($1, $2, 'post_group_message', $3, $4, 'T2', now() + interval '1 day')",
       [teamId, leader.id, JSON.stringify(t2Args),
        mkHash('post_group_message', teamId, leader.id, t2Args)],
-    );
-    await sql.query(
-      "insert into public.consent_queue (team_id, requesting_member_id, tool_name,"
-      + " tool_args, action_hash, tier, expires_at)"
-      + " values ($1, $2, 'post_group_message', $3, $4, 'T3', now() + interval '1 day')",
-      [teamId, leader.id, JSON.stringify(t3Args),
-       mkHash('post_group_message', teamId, leader.id, t3Args)],
     );
     // an AI observation in the room (journey: suppress)
     await sql.query(

@@ -49,6 +49,7 @@ REGISTRY: dict[str, ToolSpec] = {
     "messages_search":   ToolSpec("db", writes=False, needs_human=False),
     "document_read":     ToolSpec("db", writes=False, needs_human=False),
     "task_get":          ToolSpec("db", writes=False, needs_human=False),
+    "member_activity":   ToolSpec("db", writes=False, needs_human=False),
     # Touches no database at all, but "db" is the honest surface for "reads
     # server state" — inventing a fourth surface for one clock tool buys
     # nothing.

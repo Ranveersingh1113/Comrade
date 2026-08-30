@@ -13,6 +13,7 @@ from agent.permission_plugin import ChokepointPlugin
 from agent.tools import (
     document_read,
     member_send_nudge,
+    member_activity,
     memory_read_page,
     messages_search,
     now,
@@ -175,6 +176,7 @@ root_agent = LlmAgent(
     instruction=build_instruction,
     tools=[
         team_get_state,
+        member_activity,
         memory_read_page,
         messages_search,
         document_read,

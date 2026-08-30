@@ -334,6 +334,60 @@ def propose_task_update(
     )
 
 
+def fetch_member_activity(team_id: str, requester_id: str) -> list[dict]:
+    """Per-member recency: when each teammate was last visibly active.
+
+    findings §3.1 lists this as missing and names the consequence — the `idle`
+    nudge type exists, with templates, a cooldown and a suppression path all
+    built, and NOTHING in the product could ever fire it because there was no
+    recency signal to fire on.
+
+    Governance (platform-findings memo, ruling 6) restricts person-to-person
+    comparison. This answers "who might be stuck", not "who is doing least":
+    it returns recency facts in membership order and never a ranking. Do not
+    add a sort by volume — contribution_v already carries counts for the
+    contribution screen, and mixing the two is how a coordination signal turns
+    into a leaderboard.
+
+    last_message_at is GROUP messages only. A private thread with the AI is
+    not evidence of team participation, and counting it would mean a member
+    who talks only to the bot never looks idle — the exact case the nudge
+    exists for.
+    """
+    with user_session(requester_id) as conn:
+        rows = conn.execute(
+            "select c.user_id, p.display_name, c.last_message_at, c.last_task_at,"
+            # Postgres greatest() IGNORES nulls and returns null only when
+            # every argument is null — exactly the semantics wanted here. An
+            # '-infinity' sentinel would work in SQL and then fail on the way
+            # out: psycopg cannot load it into a datetime.
+            #
+            # The age is computed HERE rather than in Python so the comparison
+            # uses one clock. Subtracting a Postgres timestamp from a Python
+            # `datetime.now()` silently depends on the app host and the
+            # database agreeing, which is the kind of assumption that holds
+            # until it is 3am and a container's clock has drifted.
+            " extract(day from now() - greatest(c.last_message_at,"
+            "                                   c.last_task_at))::int"
+            "   as days_since_last_signal"
+            " from public.contribution_v c"
+            " join public.profiles p on p.id = c.user_id"
+            " where c.team_id = %s"
+            " order by p.display_name",
+            (team_id,),
+        ).fetchall()
+    return [
+        {
+            "user_id": str(user_id),
+            "display_name": name,
+            "last_message_at": last_msg.isoformat() if last_msg else None,
+            "last_task_at": last_task.isoformat() if last_task else None,
+            "days_since_last_signal": days,
+        }
+        for user_id, name, last_msg, last_task, days in rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # ADK tools — team_id / requester_id are server-bound from session state.
 # ---------------------------------------------------------------------------
@@ -516,4 +570,17 @@ def member_send_nudge(
     """
     return send_nudge(
         tool_context.state["team_id"], member_id, nudge_type, subject or None
+    )
+
+
+def member_activity(tool_context: ToolContext) -> list[dict]:
+    """When each teammate was last visibly active: their last group message and
+    last task movement, plus how many days ago that was.
+
+    Use this to notice who might be stuck or out of the loop before nudging
+    them. It is a coordination signal, not a performance measure — never rank
+    members by it or compare them out loud.
+    """
+    return fetch_member_activity(
+        tool_context.state["team_id"], tool_context.state["requester_id"]
     )

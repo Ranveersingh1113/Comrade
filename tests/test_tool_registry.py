@@ -30,6 +30,19 @@ def test_read_only_tools_are_declared_as_such():
         assert spec_for(name) == ToolSpec("db", writes=False, needs_human=False)
 
 
+def test_now_and_task_get_are_declared_read_only():
+    # now() touches no database at all, but "db" is the honest surface for
+    # "reads server state" rather than inventing a fourth surface for it.
+    for name in ("now", "task_get"):
+        assert spec_for(name) == ToolSpec("db", writes=False, needs_human=False)
+
+
+def test_task_propose_update_is_a_gated_write_like_task_create():
+    """Proposing is not the thing a human approves — the queued item is — so
+    needs_human=False here, same reasoning as team_propose_task."""
+    assert spec_for("task_propose_update") == ToolSpec("db", writes=True, needs_human=False)
+
+
 def test_the_nudge_is_declared_as_an_outbound_write():
     """member_send_nudge acts immediately and reaches another member's thread.
 

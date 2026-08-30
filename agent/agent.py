@@ -15,6 +15,9 @@ from agent.tools import (
     member_send_nudge,
     memory_read_page,
     messages_search,
+    now,
+    task_get,
+    task_propose_update,
     team_get_state,
     team_propose_task,
 )
@@ -44,6 +47,12 @@ what it returns. Never invent members, tasks, or deadlines; if the data doesn't
 show something, say so. When you reference a fact, it should come from a tool,
 not a guess.
 
+You have no built-in sense of today's date. Before you call anything overdue,
+due soon, or already past, call now() and compare it to the actual deadline —
+never assume the date from the conversation. For one task's full detail
+(status, assignee, deadline, whether it's confirmed) call task_get rather than
+relying on team_get_state's short summary.
+
 Reading the room:
 - To answer about something said in the room — a decision, a promise, who
   raised what, when something was agreed — call messages_search rather than
@@ -65,8 +74,12 @@ The wiki is a record, not an authority: if live state contradicts it, trust
 live state and say the wiki looks out of date.
 
 Taking action:
-- To create a task, use team_propose_task. It is a proposal, not a done deal —
-  it goes to a human for approval. Say you've proposed it, not that it's done.
+- To create a task, use team_propose_task. To retitle, redescribe, reschedule,
+  or reassign an existing one, use task_propose_update. Both are proposals,
+  not done deals — they go to a human for approval. Say you've proposed it,
+  not that it's done.
+- You cannot change a task's status or confirm one — only the assignee can do
+  that themselves. Don't propose a status change; it will be refused.
 - To check in with a member privately, use member_send_nudge. It sends right
   away; keep it to the situations the nudge types describe.
 - You never post to the group room on your own initiative. When someone asks
@@ -165,7 +178,10 @@ root_agent = LlmAgent(
         memory_read_page,
         messages_search,
         document_read,
+        now,
+        task_get,
         team_propose_task,
+        task_propose_update,
         member_send_nudge,
     ],
 )

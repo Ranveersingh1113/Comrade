@@ -6,6 +6,7 @@ the session state (server-set), never from LLM arguments — so the model cannot
 read another team or attribute an action to someone else.
 """
 import uuid
+from datetime import datetime, timezone
 from typing import Literal
 
 from google.adk.tools import ToolContext
@@ -249,6 +250,90 @@ def read_document(team_id: str, requester_id: str, document_id: str) -> dict:
     }
 
 
+def fetch_task(team_id: str, requester_id: str, task_id: str) -> dict:
+    """One task's full detail, read as the requesting member.
+
+    Same reasoning as fetch_team_state: `authenticated` has no current_team(),
+    so the explicit team_id keeps a member of two teams from reaching the
+    other team's task by id (tests/test_task_tools.py proves this
+    non-vacuously: the member can genuinely read the other team's task once
+    scoped to it, and genuinely cannot once misscoped).
+    """
+    try:
+        task_id = str(uuid.UUID(str(task_id)))
+    except ValueError:
+        return {"error": "no such task"}
+    with user_session(requester_id) as conn:
+        row = conn.execute(
+            "select t.title, t.description, t.status, p.display_name,"
+            " t.deadline, t.confirmed_at, t.created_at"
+            " from public.tasks t"
+            " left join public.profiles p on p.id = t.assignee_id"
+            " where t.id = %s and t.team_id = %s",
+            (task_id, team_id),
+        ).fetchone()
+    if row is None:
+        return {"error": "no such task"}
+    title, description, status, assignee, deadline, confirmed_at, created_at = row
+    return {
+        "task_id": task_id,
+        "title": title,
+        "description": description,
+        "status": status,
+        "assignee": assignee,
+        "deadline": deadline.isoformat() if deadline else None,
+        "confirmed_at": confirmed_at.isoformat() if confirmed_at else None,
+        "created_at": created_at.isoformat(),
+    }
+
+
+def propose_task_update(
+    team_id: str,
+    requester_id: str,
+    task_id: str,
+    title: str = "",
+    description: str | None = None,
+    deadline: str | None = None,
+    assignee_id: str = "",
+    source: str | None = None,
+) -> dict:
+    """Propose amending an existing task. Pure, unit-testable half of
+    task_propose_update.
+
+    Only title/description/deadline/assignee_id may ever change — never
+    status or confirmed_at (trg_tasks_confirm_guard: only the assignee may
+    confirm their own task, and the executor's auth.uid() is NULL, so that
+    must stay a human-only transition; shared/consent.py's _exec_task_update
+    refuses a proposal that reaches for either). Reassignment is allowed —
+    the trigger itself voids any prior confirmation when assignee_id changes.
+
+    "Not mentioned" vs "explicitly cleared": title/assignee_id follow
+    team_propose_task's own convention — "" means not mentioned, because a
+    task cannot be retitled to blank or unassigned through this tool.
+    description/deadline are genuinely optional to CHANGE, so they get a
+    third state: the Python default None (the caller omitted the argument)
+    leaves the column alone; "" clears it to null; anything else is the new
+    value.
+    """
+    args: dict = {"task_id": task_id}
+    if title:
+        args["title"] = title
+    if assignee_id:
+        args["assignee_id"] = assignee_id
+    if description is not None:
+        args["description"] = description or None
+    if deadline is not None:
+        args["deadline"] = deadline or None
+    return propose_action(
+        team_id=team_id,
+        requester_id=requester_id,
+        tool_name="task_update",
+        args=args,
+        source_snippet=source or None,
+        reversible=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ADK tools — team_id / requester_id are server-bound from session state.
 # ---------------------------------------------------------------------------
@@ -258,6 +343,31 @@ def team_get_state(tool_context: ToolContext) -> dict:
     items. Call this before summarising status or referencing who/what exists."""
     return fetch_team_state(
         tool_context.state["team_id"], tool_context.state["requester_id"]
+    )
+
+
+def now(tool_context: ToolContext) -> dict:
+    """The current UTC time, ISO-8601. Takes no arguments.
+
+    Call this before judging any deadline as overdue, due soon, or already
+    passed — never assume today's date from context or from the conversation.
+    """
+    return {"now": datetime.now(timezone.utc).isoformat()}
+
+
+def task_get(task_id: str, tool_context: ToolContext) -> dict:
+    """Read one task's full detail: title, description, status, assignee,
+    deadline, confirmation time, and when it was created.
+
+    Use this to check a specific task rather than relying on team_get_state's
+    short summary. Call now() first if you need to judge whether its deadline
+    has passed. Returns an error if the task does not belong to this team.
+
+    Args:
+        task_id: the task's id, e.g. from team_get_state's task list.
+    """
+    return fetch_task(
+        tool_context.state["team_id"], tool_context.state["requester_id"], task_id
     )
 
 
@@ -345,6 +455,47 @@ def team_propose_task(
         args=args,
         source_snippet=source or None,
         reversible=True,
+    )
+
+
+def task_propose_update(
+    task_id: str,
+    tool_context: ToolContext,
+    title: str = "",
+    description: str | None = None,
+    deadline: str | None = None,
+    assignee_id: str = "",
+    source: str = "",
+) -> dict:
+    """Propose amending an existing task: retitle it, redescribe it,
+    reschedule its deadline, or reassign it. This is GATED: nothing changes
+    now — it goes to the requester for approval and only happens if they
+    approve. Say you've proposed it, not that it's done.
+
+    You can never change a task's status or confirm it on someone's behalf —
+    only the assignee can do that themselves.
+
+    Leave a parameter out to leave that field alone. For description and
+    deadline, pass "" to clear it rather than change it. title and
+    assignee_id cannot be cleared this way — pass "" to leave them alone too.
+
+    Args:
+        task_id: the task to amend (from team_get_state or task_get).
+        title: new title, or "" to leave it alone.
+        description: new description, "" to clear it, or omit to leave it alone.
+        deadline: new ISO datetime, "" to clear it, or omit to leave it alone.
+        assignee_id: new assignee's user id (must be an active member), or "".
+        source: short note on what prompted this (shown on the consent card).
+    """
+    return propose_task_update(
+        tool_context.state["team_id"],
+        tool_context.state["requester_id"],
+        task_id,
+        title=title,
+        description=description,
+        deadline=deadline,
+        assignee_id=assignee_id,
+        source=source or None,
     )
 
 

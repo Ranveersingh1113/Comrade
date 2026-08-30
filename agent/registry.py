@@ -48,11 +48,17 @@ REGISTRY: dict[str, ToolSpec] = {
     "memory_read_page":  ToolSpec("db", writes=False, needs_human=False),
     "messages_search":   ToolSpec("db", writes=False, needs_human=False),
     "document_read":     ToolSpec("db", writes=False, needs_human=False),
+    "task_get":          ToolSpec("db", writes=False, needs_human=False),
+    # Touches no database at all, but "db" is the honest surface for "reads
+    # server state" — inventing a fourth surface for one clock tool buys
+    # nothing.
+    "now":               ToolSpec("db", writes=False, needs_human=False),
     # Proposes into the consent queue. The write it describes is gated by the
     # queue itself, so the TOOL call is not the thing a human approves —
     # needs_human here would deadlock the tool whose whole job is to CREATE
     # the approval request.
-    "team_propose_task": ToolSpec("db", writes=True, needs_human=False),
+    "team_propose_task":    ToolSpec("db", writes=True, needs_human=False),
+    "task_propose_update":  ToolSpec("db", writes=True, needs_human=False),
     # Sends immediately into another member's private thread, with no consent
     # gate — the agent's one ungated write (findings §9, exception recorded in
     # §13.7). Declared outbound so the asymmetry is visible in the table

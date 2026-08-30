@@ -13,6 +13,9 @@ def test_tools_registered():
         "memory_read_page",
         "messages_search",
         "document_read",
+        "now",
+        "task_get",
         "team_propose_task",
+        "task_propose_update",
         "member_send_nudge",
     }

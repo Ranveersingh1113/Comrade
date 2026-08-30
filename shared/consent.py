@@ -40,6 +40,7 @@ _TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2}
 # equivalent floor yet — that gap is real and not covered here.
 _TOOL_TIER_FLOORS = {
     "task_create": "T1",           # assignee-confirm is the affected member's key
+    "task_update": "T1",           # ditto -- reassignment moves the same key
 }
 DEFAULT_TIER = "T2"
 
@@ -257,9 +258,59 @@ def _exec_task_create(conn, team_id, requester_id, args) -> dict:
     return {"task_id": str(row[0])}
 
 
+def _precheck_task_update(conn, team_id, requester_id, args) -> None:
+    ok = conn.execute(
+        "select 1 from public.tasks where id=%s and team_id=%s",
+        (args.get("task_id"), team_id),
+    ).fetchone()
+    if ok is None:
+        raise ConsentError("task no longer exists in this team")
+    if "assignee_id" in args:
+        ok = conn.execute(
+            "select 1 from public.memberships where team_id=%s and user_id=%s"
+            " and status='active'",
+            (team_id, args["assignee_id"]),
+        ).fetchone()
+        if ok is None:
+            raise ConsentError("assignee is no longer an active team member")
+
+
+# The ONLY columns an AI-proposed update may ever touch. Never status, never
+# confirmed_at: trg_tasks_confirm_guard (20260612101500_triggers.sql) lets only
+# the assignee themselves move a task out of 'proposed' or set confirmed_at,
+# and it checks auth.uid() -- which is NULL for comrade_executor. That is
+# correct and must not be worked around here.
+_TASK_UPDATE_COLUMNS = ("title", "description", "deadline", "assignee_id")
+
+
+def _exec_task_update(conn, team_id, requester_id, args) -> dict:
+    # Refuse the WHOLE proposal if it reaches for a column outside the
+    # permitted four (in particular status/confirmed_at) -- silently applying
+    # the rest and dropping only the disallowed key would mean the card a
+    # human approved shows something different from what actually happened.
+    bad = set(args) - {"task_id", *_TASK_UPDATE_COLUMNS}
+    if bad:
+        raise ConsentError(
+            f"task_update may only set {_TASK_UPDATE_COLUMNS}, got {sorted(bad)}"
+        )
+    fields = {col: args[col] for col in _TASK_UPDATE_COLUMNS if col in args}
+    if not fields:
+        raise ConsentError("task_update proposal changes nothing")
+    set_sql = ", ".join(f"{col}=%s" for col in fields)
+    row = conn.execute(
+        f"update public.tasks set {set_sql} where id=%s and team_id=%s returning id",
+        (*fields.values(), args["task_id"], team_id),
+    ).fetchone()
+    if row is None:
+        raise ConsentError("task no longer exists in this team")
+    return {"task_id": str(row[0])}
+
+
 _PRECHECKS = {
     "task_create": _precheck_task_create,
+    "task_update": _precheck_task_update,
 }
 _EXECUTORS = {
     "task_create": _exec_task_create,
+    "task_update": _exec_task_update,
 }

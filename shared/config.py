@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # Per-team hourly cap on agent turns — the lid on LLM spend and the
     # simplest abuse brake. 0 disables the cap entirely.
     agent_turns_per_hour: int = 60
+    # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
+    # default is 500; a Comrade turn is one plan + a handful of tool calls, so
+    # 20 is generous headroom that still stops a tool loop from spending the
+    # team's budget on one question.
+    agent_max_llm_calls: int = 20
+    # How many prior messages of the thread are replayed into the model's
+    # context. Unbounded history is an unbounded bill; ~10 exchanges is enough
+    # for "are you sure?" to mean something.
+    agent_history_turns: int = 20
 
     @property
     def cors_origin_list(self) -> list[str]:

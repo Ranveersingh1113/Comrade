@@ -1,19 +1,25 @@
 """Run a single agent turn and record it to agent_runs.
 
 Conversation history is the messages table's job (source of truth); each turn
-uses a fresh, stateless ADK runner seeded with the server-bound team/requester.
+uses a fresh ADK runner whose in-memory session is REPLAYED from that table
+(agent/history.py) before the new message lands, so the agent remembers the
+thread it is standing in without a second session store.
 The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
 from typing import Any, AsyncIterator
 
+from google.adk.agents.run_config import RunConfig
+from google.adk.events import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from starlette.concurrency import run_in_threadpool
 
 from agent.agent import APP_NAME, app
+from agent.history import recent_turns
 from shared.agent_runs import append_step, finish_run, start_run
+from shared.config import settings
 
 
 def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
@@ -54,12 +60,22 @@ def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
 
 
 async def stream_turn(
-    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+    team_id: str,
+    requester_id: str,
+    user_text: str,
+    trigger_type: str = "user",
+    thread_type: str = "private",
+    exclude_message_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run one turn, yielding each step as it happens and recording it.
 
     team_id / requester_id are SERVER-BOUND here and injected into ADK session
     state — the model receives them via state, never as tool arguments.
+
+    thread_type says WHICH conversation this is; history is thread-scoped, and
+    a private turn must never be shown the room (or vice versa).
+    exclude_message_id is the member's just-persisted message: the server
+    writes it before calling us, so without this the model gets it twice.
 
     Yields {"type": "run", ...} first, then one dict per step, then
     {"type": "final", ...}. run_turn() below consumes this, so the
@@ -70,8 +86,9 @@ async def stream_turn(
 
     # Runner(app=...), not InMemoryRunner: the App is what carries the
     # chokepoint plugin, and InMemoryRunner is ADK's dev-mode helper (§1).
-    # The session service stays in-memory and per-turn — conversation history
-    # is the messages table's job, not ADK's.
+    # The session service stays in-memory and per-turn; it is FILLED from
+    # `messages` rather than replaced by ADK's DatabaseSessionService, whose
+    # unqualified tables would sit in `public` with no RLS (agent/history.py).
     runner = Runner(app=app, session_service=InMemorySessionService())
     session = await runner.session_service.create_session(
         app_name=APP_NAME, user_id=requester_id,
@@ -79,9 +96,28 @@ async def stream_turn(
     )
     message = types.Content(role="user", parts=[types.Part(text=user_text)])
     all_steps: list[dict[str, Any]] = []
+    # Inside the try: a failed history read must close the run row too, not
+    # leave it 'running' forever.
     try:
+        history = await run_in_threadpool(
+            recent_turns, team_id, requester_id, thread_type,
+            settings.agent_history_turns, exclude_message_id,
+        )
+        for content in history:
+            # A model-role event must be authored by this agent, or ADK
+            # relabels it as another agent's reply and rewrites it into a
+            # "For context:" note.
+            await runner.session_service.append_event(
+                session,
+                Event(
+                    author="user" if content.role == "user"
+                    else app.root_agent.name,
+                    content=content,
+                ),
+            )
         async for event in runner.run_async(
-            user_id=requester_id, session_id=session.id, new_message=message
+            user_id=requester_id, session_id=session.id, new_message=message,
+            run_config=RunConfig(max_llm_calls=settings.agent_max_llm_calls),
         ):
             for step in _steps_from_event(event, len(all_steps)):
                 await run_in_threadpool(append_step, team_id, run_id, step)
@@ -99,12 +135,20 @@ async def stream_turn(
 
 
 async def run_turn(
-    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+    team_id: str,
+    requester_id: str,
+    user_text: str,
+    trigger_type: str = "user",
+    thread_type: str = "private",
+    exclude_message_id: str | None = None,
 ) -> dict[str, Any]:
     """Batch form of stream_turn: drain it and return the collected result."""
     steps: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
-    async for item in stream_turn(team_id, requester_id, user_text, trigger_type):
+    async for item in stream_turn(
+        team_id, requester_id, user_text, trigger_type,
+        thread_type, exclude_message_id,
+    ):
         if item.get("type") == "run":
             continue
         if item.get("type") == "final":
@@ -115,11 +159,19 @@ async def run_turn(
 
 
 def run_turn_sync(
-    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+    team_id: str,
+    requester_id: str,
+    user_text: str,
+    trigger_type: str = "user",
+    thread_type: str = "private",
+    exclude_message_id: str | None = None,
 ) -> dict[str, Any]:
     """Blocking wrapper around run_turn for sync callers (the HTTP handler).
 
     Must not be called from within a running event loop — asyncio.run() creates
     a new loop and raises if one is already running.
     """
-    return asyncio.run(run_turn(team_id, requester_id, user_text, trigger_type))
+    return asyncio.run(run_turn(
+        team_id, requester_id, user_text, trigger_type,
+        thread_type, exclude_message_id,
+    ))

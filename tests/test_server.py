@@ -47,7 +47,7 @@ def test_health_ok():
 
 
 def test_agent_turn_returns_reply(client, monkeypatch):
-    def _stub(team_id, requester_id, user_text, trigger_type="user"):
+    def _stub(team_id, requester_id, user_text, trigger_type="user", **kw):
         assert (team_id, requester_id, user_text) == (TEAM, USER, "status?")
         return {"run_id": "run-1", "reply": "All caught up.", "steps": []}
 
@@ -68,7 +68,7 @@ def test_turn_identity_comes_from_the_token_not_the_body(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         "server.app.run_turn_sync",
-        lambda team_id, requester_id, text, trigger_type="user": seen.update(
+        lambda team_id, requester_id, text, trigger_type="user", **kw: seen.update(
             requester=requester_id
         ) or {"run_id": "r", "reply": "ok", "steps": []},
     )
@@ -79,6 +79,24 @@ def test_turn_identity_comes_from_the_token_not_the_body(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert seen["requester"] == USER
+
+
+def test_runtime_is_told_the_thread_and_the_message_to_skip(client, monkeypatch):
+    """History is thread-scoped, and the member's message is persisted BEFORE
+    the turn runs — the runtime needs both facts or it replays the wrong
+    conversation, or the current question twice."""
+    seen = {}
+    monkeypatch.setattr(
+        "server.app.run_turn_sync",
+        lambda *a, **kw: seen.update(kw) or
+        {"run_id": "r", "reply": "ok", "steps": []},
+    )
+    _stub_persistence(monkeypatch)
+    client.post(
+        "/agent/turn",
+        json={"team_id": TEAM, "text": "hi", "thread_type": "group"},
+    )
+    assert seen == {"thread_type": "group", "exclude_message_id": "msg-user"}
 
 
 def test_private_turn_is_owned_by_the_requester(client, monkeypatch):

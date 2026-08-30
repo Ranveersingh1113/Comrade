@@ -158,7 +158,10 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     user_message_id = _persist_user_message(
         user_id, req.team_id, req.thread_type, req.text
     )
-    result = run_turn_sync(req.team_id, user_id, req.text)
+    result = run_turn_sync(
+        req.team_id, user_id, req.text,
+        thread_type=req.thread_type, exclude_message_id=user_message_id,
+    )
     reply = result["reply"]
     reply_message_id = None
     if reply:
@@ -196,7 +199,10 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     async def frames():
         reply = ""
         try:
-            async for item in stream_turn(req.team_id, user_id, req.text):
+            async for item in stream_turn(
+                req.team_id, user_id, req.text,
+                thread_type=req.thread_type, exclude_message_id=user_message_id,
+            ):
                 if item.get("type") == "final":
                     reply = item["reply"]
                     continue

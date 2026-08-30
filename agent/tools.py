@@ -13,7 +13,7 @@ from google.adk.tools import ToolContext
 
 from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
-from shared.consent import propose_action
+from shared.consent import propose_action, propose_batch
 from shared.db import user_session
 from shared.nudge import send_nudge
 
@@ -509,6 +509,40 @@ def team_propose_task(
         args=args,
         source_snippet=source or None,
         reversible=True,
+    )
+
+
+def team_propose_batch(items: list[dict], tool_context: ToolContext) -> dict:
+    """Propose several related actions together as ONE reviewable group,
+    instead of separate unrelated-looking cards. Use this when multiple
+    actions belong to a single piece of work the member asked for — e.g.
+    creating three tasks for one project kickoff — so the inbox shows them
+    together with progress ("2 of 3 approved") instead of scattering them.
+
+    This changes only how the proposals are DISPLAYED. Each one is still
+    approved or rejected on its own — there is no batch-wide approve/reject,
+    and approving some of them never approves or cancels the rest. Say
+    you've proposed them, not that they're done.
+
+    Args:
+        items: one dict per proposal, each {"tool_name": "task_create" or
+            "task_update", "args": {...}, "source": "..."}. `args` follows
+            the same shape team_propose_task / task_propose_update build —
+            task_create needs assignee_id/title/description/deadline,
+            task_update needs task_id plus whichever fields are changing.
+            `source` is the optional note shown on that item's card.
+    """
+    return propose_batch(
+        tool_context.state["team_id"],
+        tool_context.state["requester_id"],
+        [
+            {
+                "tool_name": item.get("tool_name"),
+                "args": item.get("args") or {},
+                "source_snippet": item.get("source") or None,
+            }
+            for item in items
+        ],
     )
 
 

@@ -18,5 +18,6 @@ def test_tools_registered():
         "task_get",
         "team_propose_task",
         "task_propose_update",
+        "team_propose_batch",
         "member_send_nudge",
     }

@@ -60,6 +60,10 @@ REGISTRY: dict[str, ToolSpec] = {
     # the approval request.
     "team_propose_task":    ToolSpec("db", writes=True, needs_human=False),
     "task_propose_update":  ToolSpec("db", writes=True, needs_human=False),
+    # Same reasoning as team_propose_task: this call only WRITES the pending
+    # rows a human then reviews one by one — the batch grouping is display
+    # only (task 6), so the tool call itself is not the thing being approved.
+    "team_propose_batch":   ToolSpec("db", writes=True, needs_human=False),
     # Sends immediately into another member's private thread, with no consent
     # gate — the agent's one ungated write (findings §9, exception recorded in
     # §13.7). Declared outbound so the asymmetry is visible in the table

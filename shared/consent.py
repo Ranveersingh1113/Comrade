@@ -78,12 +78,19 @@ def propose_action(
     source_snippet: str | None = None,
     reversible: bool = True,
     tier: str | None = None,
+    batch_id: str | None = None,
 ) -> dict:
     """Write a pending consent item (does NOT perform the action). 7-day backstop.
 
     The id is generated here rather than with RETURNING: RETURNING needs SELECT
     on `consent_queue`, and findings §4.1 left the agent INSERT-only there. A
     freshly proposed row is 'pending' by definition — that is what proposing is.
+
+    batch_id is a display grouping ONLY (task 6): it ties several proposals
+    into one card group in the inbox. It must never become an approval gate —
+    every row stays individually approvable/rejectable regardless of what it
+    shares a batch with. None (the default) is a lone proposal, unchanged from
+    before this parameter existed; propose_batch below is what sets it.
     """
     # §13.5: a proposal naming a tool with no executor can never execute, and
     # today that is discovered only when a human approves it — the worst
@@ -103,10 +110,10 @@ def propose_action(
             conn.execute(
                 "insert into public.consent_queue (id, team_id,"
                 " requesting_member_id, tool_name, tool_args, source_snippet,"
-                " action_hash, reversible, tier, expires_at)"
-                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
+                " action_hash, reversible, tier, batch_id, expires_at)"
+                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
                 (consent_id, team_id, requester_id, tool_name, Json(args),
-                 source_snippet, action_hash, reversible, final_tier),
+                 source_snippet, action_hash, reversible, final_tier, batch_id),
             )
     except psycopg.errors.UniqueViolation:
         # The same proposal is already pending. That is uq_consent_pending_hash
@@ -135,6 +142,68 @@ def propose_action(
         "action_hash": action_hash,
         "tier": final_tier,
     }
+
+
+def propose_batch(team_id: str, requester_id: str, items: list[dict]) -> dict:
+    """Propose several actions as one card GROUP, not one approval.
+
+    findings §5 / task 6: multi-step work produced five separate,
+    unrelated-looking consent cards with no way to see they belonged together.
+    This writes one generated batch_id across every row so the inbox can
+    display them under one heading — nothing more. It is NOT a gate: each row
+    stays individually approvable and individually rejectable, same as if
+    propose_action had been called on it directly. Approving four of five
+    must work and must leave the fifth pending; rejecting one must never
+    touch its siblings. Do not add a batch-level approve/reject on top of
+    this — that would let one contentious item ride through bundled with four
+    obvious ones, which is exactly the consent-fatigue failure batching exists
+    to avoid, not to enable.
+
+    items: one dict per proposal, each shaped like propose_action's own
+    keyword arguments minus team_id/requester_id (which are shared by the
+    whole batch) — {"tool_name": str, "args": dict, "source_snippet": str |
+    None, "reversible": bool, "tier": str | None}. Only tool_name and args are
+    required per item.
+
+    Partial failure is BEST-EFFORT, not atomic: each item is proposed
+    independently, so one item naming a tool with no executor fails only that
+    item (status "failed", with an "error" message, no consent_id) while the
+    rest of the batch still queues and still shares the batch_id. Rationale:
+    (1) the only synchronous validation propose_action performs is the
+    tool_name check, so a real cross-item transaction would buy atomicity
+    against just that one failure mode and nothing else — not worth the
+    complexity for a partial guarantee; (2) comrade_agent has INSERT/UPDATE
+    but no DELETE grant on consent_queue (findings §4.1's propose-only role),
+    so a compensating rollback of already-inserted rows is not even available
+    without a privilege change; (3) most importantly, discarding four valid,
+    unrelated-to-the-bug proposals because a fifth was malformed would punish
+    the member for the agent's mistake and reintroduce all-or-nothing thinking
+    at the write layer — the same failure shape this task forbids at the
+    approval layer, just moved one step earlier.
+    """
+    if not items:
+        raise ValueError("propose_batch needs at least one item")
+    batch_id = str(uuid.uuid4())
+    results = []
+    for item in items:
+        try:
+            results.append(
+                propose_action(
+                    team_id=team_id,
+                    requester_id=requester_id,
+                    tool_name=item["tool_name"],
+                    args=item["args"],
+                    source_snippet=item.get("source_snippet"),
+                    reversible=item.get("reversible", True),
+                    tier=item.get("tier"),
+                    batch_id=batch_id,
+                )
+            )
+        except ConsentError as e:
+            results.append(
+                {"status": "failed", "tool_name": item.get("tool_name"), "error": str(e)}
+            )
+    return {"batch_id": batch_id, "items": results}
 
 
 def execute_consent(team_id: str, consent_id: str) -> dict:

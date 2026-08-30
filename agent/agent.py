@@ -20,6 +20,7 @@ from agent.tools import (
     task_get,
     task_propose_update,
     team_get_state,
+    team_propose_batch,
     team_propose_task,
 )
 from pipeline.parsers import SPACE_MARK
@@ -79,6 +80,11 @@ Taking action:
   or reassign an existing one, use task_propose_update. Both are proposals,
   not done deals — they go to a human for approval. Say you've proposed it,
   not that it's done.
+- If one request naturally produces several of these proposals at once (e.g.
+  a handful of tasks for the same kickoff), use team_propose_batch instead of
+  calling the single-item tools repeatedly, so the member sees them grouped
+  with progress instead of as unrelated cards. Each one is still approved or
+  rejected individually — batching only changes how they're shown.
 - You cannot change a task's status or confirm one — only the assignee can do
   that themselves. Don't propose a status change; it will be refused.
 - To check in with a member privately, use member_send_nudge. It sends right
@@ -184,6 +190,7 @@ root_agent = LlmAgent(
         task_get,
         team_propose_task,
         task_propose_update,
+        team_propose_batch,
         member_send_nudge,
     ],
 )

@@ -43,6 +43,13 @@ def test_task_propose_update_is_a_gated_write_like_task_create():
     assert spec_for("task_propose_update") == ToolSpec("db", writes=True, needs_human=False)
 
 
+def test_team_propose_batch_is_a_gated_write_like_team_propose_task():
+    """Same reasoning as team_propose_task: the call only writes pending rows
+    for a human to review one by one, so the call itself needs no human gate —
+    the batch grouping (task 6) is display only, never an approval gate."""
+    assert spec_for("team_propose_batch") == ToolSpec("db", writes=True, needs_human=False)
+
+
 def test_the_nudge_is_declared_as_an_outbound_write():
     """member_send_nudge acts immediately and reaches another member's thread.
 

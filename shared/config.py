@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_secret_key: str = ""
     github_pat: str = ""
+    # Shared secret GitHub signs webhook deliveries with. EMPTY REFUSES EVERY
+    # DELIVERY — server/webhooks.py fails closed rather than accepting unsigned
+    # input, so a deployment that forgets this variable ingests nothing instead
+    # of ingesting anything (findings §16.6).
+    github_webhook_secret: str = ""
 
     # HTTP surface. The JWT secret verifies Supabase-issued user tokens; without
     # it the API refuses to authenticate anyone rather than trusting the caller.

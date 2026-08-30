@@ -108,18 +108,25 @@ def _persist_ai_reply(
     return message_id
 
 
-def _check_turn_budget(user_id: str, team_id: str) -> None:
+def _check_turn_budget(team_id: str) -> None:
     """Refuse the turn when the team is at its hourly cap.
 
     agent_runs already records every turn (team_id, created_at), so the limit
     is a count over a table that exists: no new store, correct across API
-    instances, and it survives a restart. idx_agent_runs_team covers the
-    query. Runs as the member, so RLS scopes the count to their own team.
+    instances, and it survives a restart. idx_agent_runs_team covers the query.
+
+    Runs as the AGENT role, not as the member. Members have no read on
+    agent_runs at all — the table holds every private-thread prompt verbatim in
+    `input_summary` and every tool result in `steps`, and a team-scoped policy
+    over it leaked one member's private turn to their teammates
+    (20260830090000_close_agent_runs_leak.sql). The agent role is team-scoped
+    by current_team(), and this returns a COUNT to the server, never rows to a
+    member — so the cap stays a team cap without reopening the read.
     """
     cap = settings.agent_turns_per_hour
     if cap <= 0:
         return
-    with user_session(user_id) as conn:
+    with team_session(Role.AGENT, team_id) as conn:
         used = conn.execute(
             "select count(*) from public.agent_runs"
             " where team_id=%s and created_at > now() - interval '1 hour'",
@@ -143,7 +150,7 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     through propose_action -> the consent queue.
     """
     require_membership(user_id, req.team_id)
-    _check_turn_budget(user_id, req.team_id)
+    _check_turn_budget(req.team_id)
     user_message_id = _persist_user_message(
         user_id, req.team_id, req.thread_type, req.text
     )
@@ -176,7 +183,7 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     frame is an apology.
     """
     require_membership(user_id, req.team_id)
-    _check_turn_budget(user_id, req.team_id)
+    _check_turn_budget(req.team_id)
     owner = None if req.thread_type == "group" else user_id
     user_message_id = await run_in_threadpool(
         _persist_user_message, user_id, req.team_id, req.thread_type, req.text

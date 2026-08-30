@@ -44,7 +44,7 @@ Every worker connects under one of four RLS-bound roles — `agent`, `executor`,
 
 | Path | Purpose |
 |------|---------|
-| `agent/` | Google ADK `LlmAgent`, its five function tools, and the turn runtime |
+| `agent/` | Google ADK `LlmAgent`, its four function tools, and the turn runtime |
 | `server/` | FastAPI service — agent turns, consent resolution, invites, document ingest |
 | `pipeline/` | Job worker, document parsers, and the two-stage memory compiler |
 | `shared/` | Config, RLS-bound DB sessions, consent mechanism, nudges, run logging |

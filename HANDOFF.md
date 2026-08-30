@@ -121,8 +121,9 @@ arrangement) — owner never settled it; you have latitude, confirm big choices 
 0. **Invites only reach existing profiles** — RLS hides `profiles` you don't share a team with, so
    inviting a brand-new user by email needs a backend endpoint. The UI surfaces this rather than
    failing silently.
-0b. **No tier / second-key columns on `consent_queue`** — so the prototype's T3 two-key card and the
-   "remove + don't do this again" observation-suppression affordance are not built. Both need schema.
+0b. ~~**No tier / second-key columns on `consent_queue`**~~ — RESOLVED, then partly reversed. The
+   `tier` column shipped 2026-07-19 and the observation-suppression affordance is built. The T3
+   two-key card was removed entirely on 2026-08-12 (findings §10): see §7 below.
 0c. **`document_opens` is per-viewer by RLS** — "opened by 3 of 4" is impossible client-side; the UI
    shows "opened by you / not opened yet". Needs an aggregate view if the fuller signal is wanted.
 
@@ -153,11 +154,21 @@ arrangement) — owner never settled it; you have latitude, confirm big choices 
 
 Tiers by blast radius, not rank: **T0** read-only → runs instantly; **T1** affects one member →
 *that member* consents (assignee-confirm generalized); **T2** shared + reversible → act + visible
-card + one-tap revert (memory writes live here); **T3** external/irreversible/money → **two keys:
-initiator + any other member** (the person affected must be a key if the action is about them).
-Anyone can start tasks; anyone can stop/revert; the AI never arbitrates between peers.
-Hard floors: money + outbound-to-non-members never drop below T3. An "Agent Inbox" (batched
-approvals) is the intended long-term consent UX. Full detail: memory + `docs/comrade-platform-findings.md`.
+card + one-tap revert (memory writes live here). Anyone can start tasks; anyone can stop/revert;
+the AI never arbitrates between peers. An "Agent Inbox" (batched approvals) is the intended
+long-term consent UX.
+
+**T3 and the two-key countersign were REMOVED 2026-08-12** (findings §10, executed 2026-08-29).
+The consent queue now holds exactly one shape: needs the requester's key. `tier` survives as an
+informational label, narrowed to T0–T2, seeding the earned-trust ratchet.
+
+The removal's reason is narrower than "two-key was overhead": for **code**, GitHub branch
+protection is a stronger second key than the trigger ever was, enforced by the system that owns
+the resource (findings §16.2). **For non-code actions nothing replaces it** — after this change
+there is no forced second pair of eyes on a non-code action, and nothing currently plans one
+(findings §24.1). Recorded deliberately rather than left to be rediscovered.
+
+Full detail: memory + `docs/comrade-platform-findings.md`.
 
 ## 8. Running the stack locally
 

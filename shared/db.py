@@ -95,6 +95,50 @@ def connect(role: Role) -> Iterator[psycopg.Connection]:
 
 
 @contextmanager
+def room_lock(team_id: str) -> Iterator[bool]:
+    """Hold a group room's turn lock for the duration of the block.
+
+    findings §4.3: two simultaneous agent runs in one room means two agents
+    that cannot see each other — duplicated work, contradictory answers, and a
+    race on the consent queue. It stops reading as one teammate. Private
+    threads are deliberately NOT serialised: they share no surface, so making
+    members wait on each other would buy nothing.
+
+    Yields True if this caller holds the room, False if someone else does. The
+    caller decides what to say — decision Q6 is that a queued member gets an
+    honest line, not a spinner.
+
+    Session-scoped (`pg_try_advisory_lock`), not transaction-scoped: a turn
+    spans several LLM calls, and holding a transaction across them would break
+    the project-wide "no LLM call inside a transaction" rule. That means the
+    lock lives on one borrowed connection for the whole turn, and the `finally`
+    is what makes it safe — an unreleased advisory lock would wedge the room
+    until the connection was recycled.
+
+    ponytail: one held connection per ACTIVE GROUP TURN, and the pool caps at
+    10 per role. Fine at pilot scale — group turns are already serialised per
+    team, so the ceiling is concurrent teams, not concurrent members. Revisit
+    if that count approaches the pool size.
+    """
+    # hashtextextended gives a 64-bit key, so distinct teams collide far less
+    # often than with the 32-bit hashtext. A collision would only cause two
+    # unrelated rooms to serialise — harmless, but confusing to debug.
+    with _pool(_URLS[Role.AGENT]).connection() as conn:
+        conn.execute("select set_config('app.actor_kind', 'ai', false)")
+        acquired = conn.execute(
+            "select pg_try_advisory_lock(hashtextextended(%s, 0))", (str(team_id),)
+        ).fetchone()[0]
+        try:
+            yield bool(acquired)
+        finally:
+            if acquired:
+                conn.execute(
+                    "select pg_advisory_unlock(hashtextextended(%s, 0))",
+                    (str(team_id),),
+                )
+
+
+@contextmanager
 def team_session(role: Role, team_id: str) -> Iterator[psycopg.Connection]:
     """Open a worker connection scoped to one team for one transaction.
 
@@ -127,11 +171,21 @@ def user_session(user_id: str) -> Iterator[psycopg.Connection]:
 
     Commits on clean exit, rolls back on error. Connects as the dedicated
     authenticator role (comrade_authenticator: LOGIN + noinherit, may only
-    SET ROLE authenticated) when COMRADE_AUTHENTICATOR_DB_URL is set; falls
-    back to the admin URL for dev environments that predate the role. Either
+    SET ROLE authenticated). Raises if COMRADE_AUTHENTICATOR_DB_URL is unset —
+    it does NOT fall back to the admin connection, which bypasses RLS. Either
     way, once the role is switched RLS is enforced.
     """
-    url = settings.comrade_authenticator_db_url or _URLS[Role.ADMIN]
+    # No fallback. ADMIN is the table owner and BYPASSRLS, so falling back to
+    # it would run every member query with NO row security — silently, and
+    # since the pool landed, sharing a pool with the control plane too. A
+    # missing variable must stop the process, not quietly disable RLS.
+    # (Phase 0 whole-branch review.)
+    url = settings.comrade_authenticator_db_url
+    if not url:
+        raise RuntimeError(
+            "COMRADE_AUTHENTICATOR_DB_URL is not set. user_session() will not"
+            " fall back to the admin connection, which bypasses RLS."
+        )
     with _pool(url).connection() as conn:
         with conn.transaction():
             conn.execute("set local role authenticated")

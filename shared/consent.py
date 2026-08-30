@@ -16,6 +16,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+import psycopg
 from psycopg.types.json import Json
 
 from shared.db import Role, team_session, user_session
@@ -83,18 +84,49 @@ def propose_action(
     on `consent_queue`, and findings §4.1 left the agent INSERT-only there. A
     freshly proposed row is 'pending' by definition — that is what proposing is.
     """
+    # §13.5: a proposal naming a tool with no executor can never execute, and
+    # today that is discovered only when a human approves it — the worst
+    # possible moment. Refuse to queue it. This is also what would have turned
+    # Phase 0's post_group_message removal into a red suite, not a green one.
+    if tool_name not in _EXECUTORS:
+        raise ConsentError(
+            f"no executor registered for {tool_name} — refusing to queue a"
+            " proposal that could never execute"
+        )
+
     action_hash = compute_hash(tool_name, team_id, requester_id, args)
     final_tier = resolve_tier(tool_name, tier)
     consent_id = str(uuid.uuid4())
-    with team_session(Role.AGENT, team_id) as conn:
-        conn.execute(
-            "insert into public.consent_queue (id, team_id, requesting_member_id,"
-            " tool_name, tool_args, source_snippet, action_hash, reversible,"
-            " tier, expires_at)"
-            " values (%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
-            (consent_id, team_id, requester_id, tool_name, Json(args),
-             source_snippet, action_hash, reversible, final_tier),
-        )
+    try:
+        with team_session(Role.AGENT, team_id) as conn:
+            conn.execute(
+                "insert into public.consent_queue (id, team_id,"
+                " requesting_member_id, tool_name, tool_args, source_snippet,"
+                " action_hash, reversible, tier, expires_at)"
+                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
+                (consent_id, team_id, requester_id, tool_name, Json(args),
+                 source_snippet, action_hash, reversible, final_tier),
+            )
+    except psycopg.errors.UniqueViolation:
+        # The same proposal is already pending. That is uq_consent_pending_hash
+        # doing its job (findings §2.2), not a failure — a retried turn is
+        # asking for exactly the idempotency the index exists to provide, and
+        # raising here killed the whole turn instead. Hand back the card that
+        # already exists.
+        #
+        # Read as the requester, not as the agent: §4.1 left comrade_agent
+        # INSERT-only on consent_queue, and au_consent_queue_select lets a
+        # member see their own items. Safe because action_hash binds the
+        # requester — a duplicate hash is always this requester's own row.
+        with user_session(requester_id) as conn:
+            row = conn.execute(
+                "select id, tier from public.consent_queue"
+                " where team_id=%s and action_hash=%s and status='pending'",
+                (team_id, action_hash),
+            ).fetchone()
+        if row is None:
+            raise  # resolved between the insert and the read — not idempotency
+        consent_id, final_tier = str(row[0]), row[1]
     return {
         "consent_id": consent_id,
         "status": "pending",
@@ -163,13 +195,19 @@ def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
     return execute_consent(team_id, consent_id)
 
 
-def reject_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
-    """Requester rejects a pending item (it will never execute)."""
+def reject_consent(
+    team_id: str, consent_id: str, approver_id: str, reason: str | None = None
+) -> dict:
+    """Requester rejects a pending item (it will never execute).
+
+    `reason` is written to resolution_reason so the agent can read WHY on its
+    next turn (§9.3 G3) instead of just THAT, and stop re-proposing it blind.
+    """
     with user_session(approver_id) as conn:
         row = conn.execute(
-            "update public.consent_queue set status='rejected', resolved_at=now()"
-            " where id=%s and status='pending' returning id",
-            (consent_id,),
+            "update public.consent_queue set status='rejected', resolved_at=now(),"
+            " resolution_reason=%s where id=%s and status='pending' returning id",
+            (reason, consent_id),
         ).fetchone()
     return {"status": "rejected" if row is not None else "not_found"}
 

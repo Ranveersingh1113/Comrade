@@ -68,6 +68,10 @@ class EditApproveRequest(TeamScoped):
     args: dict
 
 
+class RejectRequest(TeamScoped):
+    reason: str | None = None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -154,7 +158,15 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     user_message_id = _persist_user_message(
         user_id, req.team_id, req.thread_type, req.text
     )
-    result = run_turn_sync(req.team_id, user_id, req.text)
+    result = run_turn_sync(
+        req.team_id, user_id, req.text,
+        thread_type=req.thread_type, exclude_message_id=user_message_id,
+    )
+    if result.get("busy"):
+        # §4.3 + decision Q6: another member's turn holds this room. Say so
+        # plainly — a 200 with an empty reply would read as the agent
+        # ignoring them, which is worse than being told to wait.
+        raise HTTPException(status.HTTP_409_CONFLICT, result["busy"])
     reply = result["reply"]
     reply_message_id = None
     if reply:
@@ -192,7 +204,10 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     async def frames():
         reply = ""
         try:
-            async for item in stream_turn(req.team_id, user_id, req.text):
+            async for item in stream_turn(
+                req.team_id, user_id, req.text,
+                thread_type=req.thread_type, exclude_message_id=user_message_id,
+            ):
                 if item.get("type") == "final":
                     reply = item["reply"]
                     continue
@@ -242,10 +257,12 @@ def consent_approve(
 
 @app.post("/consent/{consent_id}/reject")
 def consent_reject(
-    consent_id: str, req: TeamScoped, user_id: CurrentUserId
+    consent_id: str, req: RejectRequest, user_id: CurrentUserId
 ) -> dict:
     require_membership(user_id, req.team_id)
-    return _consent_result(reject_consent(req.team_id, consent_id, user_id))
+    return _consent_result(
+        reject_consent(req.team_id, consent_id, user_id, req.reason)
+    )
 
 
 @app.post("/consent/{consent_id}/edit_and_approve")

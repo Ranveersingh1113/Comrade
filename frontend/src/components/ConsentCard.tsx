@@ -25,6 +25,7 @@ export function ConsentCard({
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [argsDraft, setArgsDraft] = useState('');
+  const [rejectReason, setRejectReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
@@ -274,6 +275,27 @@ export function ConsentCard({
             </div>
           )}
 
+          {pending && !stale && !editing && (
+            <input
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="Reason for rejecting (optional)"
+              className="mono"
+              style={{
+                display: 'block',
+                width: '100%',
+                boxSizing: 'border-box',
+                marginTop: 15,
+                border: '1px solid var(--border-strong)',
+                borderRadius: 3,
+                padding: '7px 10px',
+                fontSize: 11,
+                color: 'var(--text)',
+                outline: 'none',
+                background: '#fff',
+              }}
+            />
+          )}
           {pending && !stale && (
             <div style={{ display: 'flex', gap: 9, marginTop: 15, alignItems: 'center' }}>
               {editing ? (
@@ -304,7 +326,11 @@ export function ConsentCard({
                   <button
                     className="btn-ghost"
                     disabled={busy}
-                    onClick={() => void act(() => rejectConsent(item.id, item.team_id))}
+                    onClick={() =>
+                      void act(() =>
+                        rejectConsent(item.id, item.team_id, rejectReason.trim() || undefined),
+                      )
+                    }
                   >
                     Reject
                   </button>

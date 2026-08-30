@@ -10,7 +10,7 @@ from shared.config import settings
 from tests._seed import A1, B1, TEAM_A
 
 
-async def _fake_stream(team_id, requester_id, user_text, trigger_type="user"):
+async def _fake_stream(team_id, requester_id, user_text, trigger_type="user", **kw):
     yield {"type": "run", "run_id": "run-1"}
     yield {"seq": 0, "type": "tool_call", "tool": "team_get_state", "args": {}}
     yield {"seq": 1, "type": "text", "text": "The demo is Friday."}
@@ -44,6 +44,23 @@ def test_stream_emits_run_steps_then_final(seeded, as_a1):
     assert done["type"] == "done"
     assert done["user_message_id"] == "msg-user"
     assert done["reply_message_id"] == "msg-ai"
+
+
+def test_stream_tells_the_runtime_the_thread_and_the_message_to_skip(
+    seeded, as_a1, monkeypatch
+):
+    seen = {}
+
+    async def _record(team_id, requester_id, user_text, trigger_type="user", **kw):
+        seen.update(kw)
+        yield {"type": "final", "run_id": "r", "reply": ""}
+
+    monkeypatch.setattr("server.app.stream_turn", _record)
+    as_a1.post(
+        "/agent/turn/stream",
+        json={"team_id": TEAM_A, "text": "hi", "thread_type": "group"},
+    )
+    assert seen == {"thread_type": "group", "exclude_message_id": "msg-user"}
 
 
 def test_final_frame_never_reaches_the_wire(seeded, as_a1):
@@ -84,7 +101,7 @@ def test_over_budget_gets_429_not_a_stream(seeded, as_a1, monkeypatch):
 
 
 def test_empty_reply_persists_no_ai_message(seeded, as_a1, monkeypatch):
-    async def _silent(team_id, requester_id, user_text, trigger_type="user"):
+    async def _silent(team_id, requester_id, user_text, trigger_type="user", **kw):
         yield {"type": "run", "run_id": "run-2"}
         yield {"type": "final", "run_id": "run-2", "reply": ""}
 
@@ -94,7 +111,7 @@ def test_empty_reply_persists_no_ai_message(seeded, as_a1, monkeypatch):
 
 
 def test_a_failed_turn_streams_an_error_frame(seeded, as_a1, monkeypatch):
-    async def _boom(team_id, requester_id, user_text, trigger_type="user"):
+    async def _boom(team_id, requester_id, user_text, trigger_type="user", **kw):
         yield {"type": "run", "run_id": "run-3"}
         raise RuntimeError("gemini exploded")
 

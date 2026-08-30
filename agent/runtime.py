@@ -1,20 +1,27 @@
 """Run a single agent turn and record it to agent_runs.
 
 Conversation history is the messages table's job (source of truth); each turn
-uses a fresh, stateless ADK runner seeded with the server-bound team/requester.
+uses a fresh ADK runner whose in-memory session is REPLAYED from that table
+(agent/history.py) before the new message lands, so the agent remembers the
+thread it is standing in without a second session store.
 The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
+from contextlib import ExitStack
 from typing import Any, AsyncIterator
 
-from google.adk.runners import InMemoryRunner
+from google.adk.agents.run_config import RunConfig
+from google.adk.events import Event
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from starlette.concurrency import run_in_threadpool
 
-from agent.agent import root_agent
+from agent.agent import APP_NAME, app
+from agent.history import recent_turns
 from shared.agent_runs import append_step, finish_run, start_run
-
-_APP_NAME = "comrade"
+from shared.db import room_lock
+from shared.config import settings
 
 
 def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
@@ -55,68 +62,152 @@ def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
 
 
 async def stream_turn(
-    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+    team_id: str,
+    requester_id: str,
+    user_text: str,
+    trigger_type: str = "user",
+    thread_type: str = "private",
+    exclude_message_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run one turn, yielding each step as it happens and recording it.
 
     team_id / requester_id are SERVER-BOUND here and injected into ADK session
     state — the model receives them via state, never as tool arguments.
 
+    thread_type says WHICH conversation this is; history is thread-scoped, and
+    a private turn must never be shown the room (or vice versa).
+    exclude_message_id is the member's just-persisted message: the server
+    writes it before calling us, so without this the model gets it twice.
+
     Yields {"type": "run", ...} first, then one dict per step, then
     {"type": "final", ...}. run_turn() below consumes this, so the
     orchestration exists once rather than twice.
     """
-    run_id = await run_in_threadpool(start_run, team_id, trigger_type, user_text[:200])
-    yield {"type": "run", "run_id": run_id}
+    # findings §4.3: one agent turn at a time per ROOM. Two runs in one group
+    # room are two agents that cannot see each other — duplicated work,
+    # contradictory answers, and a race on the consent queue. Private threads
+    # share no surface, so they stay parallel and take no lock at all.
+    #
+    # ExitStack because the lock's lifetime is the whole turn but only SOME
+    # turns take one; a plain `with` would need the body duplicated.
+    with ExitStack() as stack:
+        if thread_type == "group":
+            if not stack.enter_context(room_lock(team_id)):
+                # Decision Q6: say what is actually happening. A spinner here
+                # reads as a hang, and the member has no way to tell the
+                # difference between "thinking" and "stuck".
+                yield {
+                    "type": "busy",
+                    "detail": (
+                        "Comrade is working on someone else's question in this"
+                        " room. Yours is next — send it again in a moment."
+                    ),
+                }
+                return
 
-    runner = InMemoryRunner(agent=root_agent, app_name=_APP_NAME)
-    session = await runner.session_service.create_session(
-        app_name=_APP_NAME, user_id=requester_id,
-        state={"team_id": team_id, "requester_id": requester_id},
-    )
-    message = types.Content(role="user", parts=[types.Part(text=user_text)])
-    all_steps: list[dict[str, Any]] = []
-    try:
-        async for event in runner.run_async(
-            user_id=requester_id, session_id=session.id, new_message=message
-        ):
-            for step in _steps_from_event(event, len(all_steps)):
-                await run_in_threadpool(append_step, team_id, run_id, step)
-                all_steps.append(step)
-                yield step
-    except Exception:
-        await run_in_threadpool(finish_run, team_id, run_id, "failed")
-        raise
-    await run_in_threadpool(finish_run, team_id, run_id, "done")
-    yield {
-        "type": "final",
-        "run_id": run_id,
-        "reply": _reply_from_steps(all_steps),
-    }
+        run_id = await run_in_threadpool(
+            start_run, team_id, trigger_type, user_text[:200]
+        )
+        yield {"type": "run", "run_id": run_id}
+
+        # Runner(app=...), not InMemoryRunner: the App is what carries the
+        # chokepoint plugin, and InMemoryRunner is ADK's dev-mode helper (§1).
+        # The session service stays in-memory and per-turn; it is FILLED from
+        # `messages` rather than replaced by ADK's DatabaseSessionService, whose
+        # unqualified tables would sit in `public` with no RLS (agent/history.py).
+        runner = Runner(app=app, session_service=InMemorySessionService())
+        session = await runner.session_service.create_session(
+            app_name=APP_NAME, user_id=requester_id,
+            state={"team_id": team_id, "requester_id": requester_id},
+        )
+        message = types.Content(role="user", parts=[types.Part(text=user_text)])
+        all_steps: list[dict[str, Any]] = []
+        # Inside the try: a failed history read must close the run row too, not
+        # leave it 'running' forever.
+        try:
+            history = await run_in_threadpool(
+                recent_turns, team_id, requester_id, thread_type,
+                settings.agent_history_turns, exclude_message_id,
+            )
+            for content in history:
+                # A model-role event must be authored by this agent, or ADK
+                # relabels it as another agent's reply and rewrites it into a
+                # "For context:" note.
+                await runner.session_service.append_event(
+                    session,
+                    Event(
+                        author="user" if content.role == "user"
+                        else app.root_agent.name,
+                        content=content,
+                    ),
+                )
+            async for event in runner.run_async(
+                user_id=requester_id, session_id=session.id, new_message=message,
+                run_config=RunConfig(max_llm_calls=settings.agent_max_llm_calls),
+            ):
+                for step in _steps_from_event(event, len(all_steps)):
+                    await run_in_threadpool(append_step, team_id, run_id, step)
+                    all_steps.append(step)
+                    yield step
+        except Exception:
+            await run_in_threadpool(finish_run, team_id, run_id, "failed")
+            raise
+        await run_in_threadpool(finish_run, team_id, run_id, "done")
+        yield {
+            "type": "final",
+            "run_id": run_id,
+            "reply": _reply_from_steps(all_steps),
+        }
 
 
 async def run_turn(
-    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+    team_id: str,
+    requester_id: str,
+    user_text: str,
+    trigger_type: str = "user",
+    thread_type: str = "private",
+    exclude_message_id: str | None = None,
 ) -> dict[str, Any]:
     """Batch form of stream_turn: drain it and return the collected result."""
     steps: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
-    async for item in stream_turn(team_id, requester_id, user_text, trigger_type):
+    async for item in stream_turn(
+        team_id, requester_id, user_text, trigger_type,
+        thread_type, exclude_message_id,
+    ):
         if item.get("type") == "run":
             continue
         if item.get("type") == "final":
             final = item
             continue
+        if item.get("type") == "busy":
+            # The room lock refused this turn (§4.3). There is no run row and
+            # no reply — surface it as itself rather than KeyError-ing on a
+            # `final` frame that will never arrive.
+            return {
+                "run_id": None,
+                "reply": "",
+                "steps": [],
+                "busy": item["detail"],
+            }
         steps.append(item)
     return {"run_id": final["run_id"], "reply": final["reply"], "steps": steps}
 
 
 def run_turn_sync(
-    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+    team_id: str,
+    requester_id: str,
+    user_text: str,
+    trigger_type: str = "user",
+    thread_type: str = "private",
+    exclude_message_id: str | None = None,
 ) -> dict[str, Any]:
     """Blocking wrapper around run_turn for sync callers (the HTTP handler).
 
     Must not be called from within a running event loop — asyncio.run() creates
     a new loop and raises if one is already running.
     """
-    return asyncio.run(run_turn(team_id, requester_id, user_text, trigger_type))
+    return asyncio.run(run_turn(
+        team_id, requester_id, user_text, trigger_type,
+        thread_type, exclude_message_id,
+    ))

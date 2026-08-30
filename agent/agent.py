@@ -2,11 +2,14 @@
 platform function tools. Voice follows the AI voice guide (warm, concise,
 fact-based, no filler/emojis).
 """
+import json
 import os
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.apps import App
 
+from agent.permission_plugin import ChokepointPlugin
 from agent.tools import (
     member_send_nudge,
     memory_read_page,
@@ -87,10 +90,52 @@ def wiki_section(team_id: str, requester_id: str) -> str:
     )
 
 
+_REJECTION_WINDOW_DAYS = 7  # same TTL propose_action gives a live proposal
+_REJECTION_CAP = 5          # a handful for the prompt, not a rejection log
+
+
+def recent_rejections(team_id: str, requester_id: str) -> str:
+    """Proposals this member rejected recently, so the agent doesn't propose
+    the same thing again inside the same session (§9.3 G3).
+
+    Read as the requesting member, same reasoning as wiki_section:
+    comrade_agent has no SELECT on consent_queue at all (findings §4.1) --
+    it is INSERT-only there. `authenticated` has no current_team() and a
+    member can belong to several teams, so this carries its own explicit
+    team_id filter -- au_consent_queue_select alone would return this
+    member's rejections from EVERY team they're in, not just this one.
+    """
+    with user_session(requester_id) as conn:
+        rows = conn.execute(
+            "select tool_name, tool_args, resolution_reason"
+            " from public.consent_queue where team_id=%s and status='rejected'"
+            " and resolved_at > now() - make_interval(days => %s)"
+            " order by resolved_at desc limit %s",
+            (team_id, _REJECTION_WINDOW_DAYS, _REJECTION_CAP),
+        ).fetchall()
+    if not rows:
+        return ""
+    lines = "\n".join(
+        f"- {tool_name} {json.dumps({k: v for k, v in args.items() if v is not None})}"
+        + (f' — rejected: "{reason}"' if reason else " — rejected (no reason given)")
+        for tool_name, args, reason in rows
+    )
+    return (
+        "\n## Recently rejected\n"
+        "These proposals were rejected recently, with the member's reason."
+        " Don't re-propose them unless something has changed.\n\n"
+        f"{lines}\n"
+    )
+
+
 def build_instruction(ctx: ReadonlyContext) -> str:
-    """Per-turn instruction: static rules + this team's wiki index."""
-    return INSTRUCTION + wiki_section(
-        ctx.state["team_id"], ctx.state["requester_id"]
+    """Per-turn instruction: static rules + this team's wiki index + any
+    proposals this member recently rejected."""
+    team_id, requester_id = ctx.state["team_id"], ctx.state["requester_id"]
+    return (
+        INSTRUCTION
+        + wiki_section(team_id, requester_id)
+        + recent_rejections(team_id, requester_id)
     )
 
 
@@ -105,3 +150,9 @@ root_agent = LlmAgent(
         member_send_nudge,
     ],
 )
+
+# The app is what actually runs: the agent plus the one gate every tool call
+# passes through (findings §15.4). root_agent stays exported because the
+# evaluation harness and the wiring tests address the agent itself.
+APP_NAME = "comrade"
+app = App(name=APP_NAME, root_agent=root_agent, plugins=[ChokepointPlugin()])

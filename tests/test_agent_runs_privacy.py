@@ -53,6 +53,30 @@ def test_a_teammate_cannot_read_another_members_agent_run(seeded):
         conn.close()
 
 
+def test_a_teammate_cannot_read_agent_steps(seeded):
+    """agent_steps (20260830120000_agent_steps.sql) holds exactly the content
+    this file's docstring describes — tool args and results from a private
+    turn — moved out of agent_runs.steps into its own table. Same leak, new
+    table, if comrade_agent weren't the only grantee: no grant, no policy,
+    for `authenticated` at all.
+    """
+    run_id = start_run(TEAM_A, "user", "A1 private: my appointment is Tuesday")
+    append_step(
+        TEAM_A, run_id,
+        {"seq": 0, "type": "tool_result", "tool": "x",
+         "response": {"secret": "A1 private thread content"}},
+    )
+    conn = _as(A2)
+    try:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(
+                "select args, response from public.agent_steps where team_id=%s",
+                (TEAM_A,),
+            ).fetchall()
+    finally:
+        conn.close()
+
+
 def test_a_member_cannot_read_even_their_own_agent_runs(seeded):
     """Deletion, not narrowing: nothing member-facing reads this table.
 

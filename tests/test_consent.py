@@ -172,12 +172,40 @@ def test_edited_executes_with_new_args(seeded):
         conn.close()
 
 
-def test_identical_pending_proposal_is_rejected(seeded):
-    """A retried turn must not produce two identical consent cards (§2.2)."""
-    import psycopg
+def test_identical_pending_proposal_returns_the_existing_one(seeded):
+    """A retried turn must not produce two cards — nor kill the turn (§2.2).
 
+    uq_consent_pending_hash exists to make the retry idempotent. Letting its
+    UniqueViolation escape turned that guarantee into a 500 on the whole turn,
+    which is the opposite of what the index is for.
+    """
     args = {"assignee_id": A1, "title": "write the report",
             "description": None, "deadline": None}
-    propose_action(TEAM_A, A1, "task_create", args)
-    with pytest.raises(psycopg.errors.UniqueViolation):
-        propose_action(TEAM_A, A1, "task_create", args)
+    first = propose_action(TEAM_A, A1, "task_create", args)
+    second = propose_action(TEAM_A, A1, "task_create", args)
+
+    assert second["consent_id"] == first["consent_id"]
+    assert second["status"] == "pending"
+    assert second["tier"] == first["tier"]
+    conn = _admin()
+    try:
+        rows = conn.execute(
+            "select count(*) from public.consent_queue where team_id=%s"
+            " and action_hash=%s",
+            (TEAM_A, first["action_hash"]),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert rows == 1
+
+
+def test_proposing_a_tool_with_no_executor_is_refused_at_propose_time():
+    """§13.5: a proposal naming an unexecutable tool must never be queued.
+
+    Today it is written happily and fails only when a human approves it — the
+    worst possible moment to discover it. This is also what would have turned
+    Phase 0's post_group_message removal into a red suite instead of a green
+    one.
+    """
+    with pytest.raises(ConsentError, match="no executor"):
+        propose_action(TEAM_A, A1, "post_group_message", {"text": "hi"})

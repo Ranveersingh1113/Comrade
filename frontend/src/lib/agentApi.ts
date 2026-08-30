@@ -85,8 +85,11 @@ export function approveConsent(consentId: string, teamId: string) {
   return request<ConsentActionResult>(`/consent/${consentId}/approve`, { team_id: teamId });
 }
 
-export function rejectConsent(consentId: string, teamId: string) {
-  return request<{ status: string }>(`/consent/${consentId}/reject`, { team_id: teamId });
+export function rejectConsent(consentId: string, teamId: string, reason?: string) {
+  return request<{ status: string }>(`/consent/${consentId}/reject`, {
+    team_id: teamId,
+    reason,
+  });
 }
 
 /** One tap: tombstone a proactive AI observation + record "don't do this again". */

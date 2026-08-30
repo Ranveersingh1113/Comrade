@@ -47,7 +47,7 @@ def test_health_ok():
 
 
 def test_agent_turn_returns_reply(client, monkeypatch):
-    def _stub(team_id, requester_id, user_text, trigger_type="user"):
+    def _stub(team_id, requester_id, user_text, trigger_type="user", **kw):
         assert (team_id, requester_id, user_text) == (TEAM, USER, "status?")
         return {"run_id": "run-1", "reply": "All caught up.", "steps": []}
 
@@ -68,7 +68,7 @@ def test_turn_identity_comes_from_the_token_not_the_body(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         "server.app.run_turn_sync",
-        lambda team_id, requester_id, text, trigger_type="user": seen.update(
+        lambda team_id, requester_id, text, trigger_type="user", **kw: seen.update(
             requester=requester_id
         ) or {"run_id": "r", "reply": "ok", "steps": []},
     )
@@ -79,6 +79,24 @@ def test_turn_identity_comes_from_the_token_not_the_body(client, monkeypatch):
     )
     assert resp.status_code == 200
     assert seen["requester"] == USER
+
+
+def test_runtime_is_told_the_thread_and_the_message_to_skip(client, monkeypatch):
+    """History is thread-scoped, and the member's message is persisted BEFORE
+    the turn runs — the runtime needs both facts or it replays the wrong
+    conversation, or the current question twice."""
+    seen = {}
+    monkeypatch.setattr(
+        "server.app.run_turn_sync",
+        lambda *a, **kw: seen.update(kw) or
+        {"run_id": "r", "reply": "ok", "steps": []},
+    )
+    _stub_persistence(monkeypatch)
+    client.post(
+        "/agent/turn",
+        json={"team_id": TEAM, "text": "hi", "thread_type": "group"},
+    )
+    assert seen == {"thread_type": "group", "exclude_message_id": "msg-user"}
 
 
 def test_private_turn_is_owned_by_the_requester(client, monkeypatch):
@@ -149,6 +167,43 @@ def test_consent_not_yours_is_404(client, monkeypatch):
     )
     resp = client.post("/consent/c-1/approve", json={"team_id": TEAM})
     assert resp.status_code == 404
+
+
+def test_consent_reject_passes_the_optional_reason_through(client, monkeypatch):
+    seen = {}
+
+    def _reject(team_id, consent_id, approver_id, reason):
+        seen.update(
+            team_id=team_id, consent=consent_id, approver=approver_id, reason=reason
+        )
+        return {"status": "rejected"}
+
+    monkeypatch.setattr("server.app.reject_consent", _reject)
+    resp = client.post(
+        "/consent/c-1/reject",
+        json={"team_id": TEAM, "reason": "we already decided this in standup"},
+    )
+    assert resp.status_code == 200
+    assert seen == {
+        "team_id": TEAM,
+        "consent": "c-1",
+        "approver": USER,
+        "reason": "we already decided this in standup",
+    }
+
+
+def test_consent_reject_defaults_the_reason_to_none(client, monkeypatch):
+    """An existing caller that never sends `reason` must keep working."""
+    seen = {}
+
+    def _reject(team_id, consent_id, approver_id, reason):
+        seen["reason"] = reason
+        return {"status": "rejected"}
+
+    monkeypatch.setattr("server.app.reject_consent", _reject)
+    resp = client.post("/consent/c-1/reject", json={"team_id": TEAM})
+    assert resp.status_code == 200
+    assert seen == {"reason": None}
 
 
 def test_stale_consent_surfaces_as_conflict(client, monkeypatch):

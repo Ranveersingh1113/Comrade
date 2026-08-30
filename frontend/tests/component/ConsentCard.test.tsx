@@ -75,9 +75,11 @@ describe('approve / reject call the backend as specified', () => {
 
   test('Reject posts to /consent/{id}/reject', async () => {
     let called = false;
+    let seenBody: unknown = null;
     server.use(
-      http.post(`${BASE}/consent/:id/reject`, () => {
+      http.post(`${BASE}/consent/:id/reject`, async ({ request }) => {
         called = true;
+        seenBody = await request.json();
         return HttpResponse.json({ status: 'rejected' });
       }),
     );
@@ -85,6 +87,31 @@ describe('approve / reject call the backend as specified', () => {
     renderInApp(<ConsentCard item={item()} onResolved={() => {}} viewerId="u1" />);
     await user.click(screen.getByRole('button', { name: 'Reject' }));
     await waitFor(() => expect(called).toBe(true));
+    // no reason typed -> the field is left out, not sent as an empty string
+    expect(seenBody).toEqual({ team_id: 'team-1' });
+  });
+
+  test('Reject sends the optional one-line reason when the member types one', async () => {
+    let seenBody: unknown = null;
+    server.use(
+      http.post(`${BASE}/consent/:id/reject`, async ({ request }) => {
+        seenBody = await request.json();
+        return HttpResponse.json({ status: 'rejected' });
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConsentCard item={item()} onResolved={() => {}} viewerId="u1" />);
+    await user.type(
+      screen.getByPlaceholderText('Reason for rejecting (optional)'),
+      'we already decided this in standup',
+    );
+    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await waitFor(() =>
+      expect(seenBody).toEqual({
+        team_id: 'team-1',
+        reason: 'we already decided this in standup',
+      }),
+    );
   });
 });
 

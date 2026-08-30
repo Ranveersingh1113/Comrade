@@ -195,13 +195,19 @@ def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
     return execute_consent(team_id, consent_id)
 
 
-def reject_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
-    """Requester rejects a pending item (it will never execute)."""
+def reject_consent(
+    team_id: str, consent_id: str, approver_id: str, reason: str | None = None
+) -> dict:
+    """Requester rejects a pending item (it will never execute).
+
+    `reason` is written to resolution_reason so the agent can read WHY on its
+    next turn (§9.3 G3) instead of just THAT, and stop re-proposing it blind.
+    """
     with user_session(approver_id) as conn:
         row = conn.execute(
-            "update public.consent_queue set status='rejected', resolved_at=now()"
-            " where id=%s and status='pending' returning id",
-            (consent_id,),
+            "update public.consent_queue set status='rejected', resolved_at=now(),"
+            " resolution_reason=%s where id=%s and status='pending' returning id",
+            (reason, consent_id),
         ).fetchone()
     return {"status": "rejected" if row is not None else "not_found"}
 

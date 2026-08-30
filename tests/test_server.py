@@ -151,6 +151,43 @@ def test_consent_not_yours_is_404(client, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_consent_reject_passes_the_optional_reason_through(client, monkeypatch):
+    seen = {}
+
+    def _reject(team_id, consent_id, approver_id, reason):
+        seen.update(
+            team_id=team_id, consent=consent_id, approver=approver_id, reason=reason
+        )
+        return {"status": "rejected"}
+
+    monkeypatch.setattr("server.app.reject_consent", _reject)
+    resp = client.post(
+        "/consent/c-1/reject",
+        json={"team_id": TEAM, "reason": "we already decided this in standup"},
+    )
+    assert resp.status_code == 200
+    assert seen == {
+        "team_id": TEAM,
+        "consent": "c-1",
+        "approver": USER,
+        "reason": "we already decided this in standup",
+    }
+
+
+def test_consent_reject_defaults_the_reason_to_none(client, monkeypatch):
+    """An existing caller that never sends `reason` must keep working."""
+    seen = {}
+
+    def _reject(team_id, consent_id, approver_id, reason):
+        seen["reason"] = reason
+        return {"status": "rejected"}
+
+    monkeypatch.setattr("server.app.reject_consent", _reject)
+    resp = client.post("/consent/c-1/reject", json={"team_id": TEAM})
+    assert resp.status_code == 200
+    assert seen == {"reason": None}
+
+
 def test_stale_consent_surfaces_as_conflict(client, monkeypatch):
     from shared.consent import ConsentError
 

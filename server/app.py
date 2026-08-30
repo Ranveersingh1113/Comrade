@@ -68,6 +68,10 @@ class EditApproveRequest(TeamScoped):
     args: dict
 
 
+class RejectRequest(TeamScoped):
+    reason: str | None = None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -242,10 +246,12 @@ def consent_approve(
 
 @app.post("/consent/{consent_id}/reject")
 def consent_reject(
-    consent_id: str, req: TeamScoped, user_id: CurrentUserId
+    consent_id: str, req: RejectRequest, user_id: CurrentUserId
 ) -> dict:
     require_membership(user_id, req.team_id)
-    return _consent_result(reject_consent(req.team_id, consent_id, user_id))
+    return _consent_result(
+        reject_consent(req.team_id, consent_id, user_id, req.reason)
+    )
 
 
 @app.post("/consent/{consent_id}/edit_and_approve")

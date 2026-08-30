@@ -15,7 +15,9 @@ import json
 import logging
 import uuid
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import (
+    Depends, FastAPI, File, HTTPException, Request, UploadFile, status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -23,8 +25,10 @@ from starlette.concurrency import run_in_threadpool
 
 from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
+from pipeline.github import enqueue_github_event, resolve_team_for_repo
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
+from server.webhooks import verify_signature
 from shared.config import settings
 from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, reject_consent,
@@ -359,6 +363,62 @@ def observation_suppress(
             (message_id, req.team_id),
         )
     return {"suppression_id": str(row[0]), "kind": req.kind}
+
+
+# ---------- webhooks ----------
+# THE FIRST UNAUTHENTICATED ROUTE IN THIS CODEBASE (findings §16.6).
+#
+# Every other endpoint sits behind a verified Supabase JWT. GitHub will not
+# present one; its only credential is an HMAC-SHA256 signature over the raw
+# request body, so server/webhooks.py is the entire authentication boundary
+# here and it fails closed when no secret is configured.
+
+@app.post("/webhooks/github")
+async def github_webhook(request: Request) -> dict:
+    """Ingest one verified GitHub delivery.
+
+    Read the RAW body and verify BEFORE parsing: parse-then-verify would hand
+    the JSON parser unsigned attacker input, which is the whole attack.
+
+    An unregistered repo is accepted and dropped rather than 404'd. Two
+    reasons: GitHub retries anything that is not 2xx, so a 404 would earn an
+    endless redelivery loop for a repo nobody asked us to watch; and a
+    distinguishable response would turn this endpoint into a registration
+    oracle, letting anyone holding the secret enumerate which repos a team has
+    connected.
+    """
+    raw = await request.body()
+    if not verify_signature(
+        settings.github_webhook_secret,
+        raw,
+        request.headers.get("X-Hub-Signature-256"),
+    ):
+        # No detail in the body: a stranger learns nothing from a refusal.
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad signature")
+
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        # Signed but unparseable. Not worth a retry, so answer 2xx and drop.
+        logger.warning("github webhook: signed body was not JSON")
+        return {"status": "ignored", "reason": "unparseable"}
+
+    full_name = (body.get("repository") or {}).get("full_name")
+    if not full_name:
+        return {"status": "ignored", "reason": "no repository"}
+
+    team_id = await run_in_threadpool(resolve_team_for_repo, full_name)
+    if team_id is None:
+        return {"status": "ignored"}
+
+    job_id = await run_in_threadpool(
+        enqueue_github_event,
+        team_id,
+        request.headers.get("X-GitHub-Event", ""),
+        request.headers.get("X-GitHub-Delivery"),
+        body,
+    )
+    return {"status": "queued", "job_id": job_id}
 
 
 # ---------- documents ----------

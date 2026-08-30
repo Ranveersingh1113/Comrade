@@ -388,6 +388,58 @@ def fetch_member_activity(team_id: str, requester_id: str) -> list[dict]:
     ]
 
 
+REPO_LIMIT_DEFAULT = 15
+REPO_SUMMARY_CHARS = 600
+
+
+def fetch_repo_activity(
+    team_id: str,
+    requester_id: str,
+    limit: int = REPO_LIMIT_DEFAULT,
+) -> list[dict]:
+    """What has happened in this team's repositories, newest first.
+
+    findings §14: connecting a repository is a core feature, not an
+    integration. §16.1's comment on the schema says it outright — "AI queries
+    this, not the raw repo". This reads the compiled event record, never
+    GitHub's API, so it holds no token and cannot be made to fetch anything.
+
+    Read as the requesting member (§4.1): the agent role has no grant on
+    github_activity at all. The explicit team_id is the scoping — a member of
+    two teams would otherwise see both repositories at once, and
+    au_github_activity_select alone would allow it.
+    """
+    with user_session(requester_id) as conn:
+        rows = conn.execute(
+            "select a.node_type, a.author_github, a.occurred_at, a.payload,"
+            " r.repo_full_name"
+            " from public.github_activity a"
+            " join public.github_repos r on r.id = a.repo_id"
+            " where a.team_id = %s"
+            " order by a.occurred_at desc nulls last, a.created_at desc"
+            " limit %s",
+            (team_id, max(1, min(limit, 50))),
+        ).fetchall()
+
+    out = []
+    for node_type, author, occurred_at, payload, repo in rows:
+        payload = payload or {}
+        # Title first, then body: a reader wants the headline, and a PR body
+        # can run to thousands of characters that would flood the turn.
+        parts = [payload.get("title") or "", payload.get("body") or ""]
+        full = "\n".join(p for p in parts if p).strip()
+        out.append({
+            "repo": repo,
+            "node_type": node_type,
+            "author": author,
+            "occurred_at": occurred_at.isoformat() if occurred_at else None,
+            "url": payload.get("url"),
+            "summary": full[:REPO_SUMMARY_CHARS],
+            "truncated": len(full) > REPO_SUMMARY_CHARS,
+        })
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ADK tools — team_id / requester_id are server-bound from session state.
 # ---------------------------------------------------------------------------
@@ -616,5 +668,18 @@ def member_activity(tool_context: ToolContext) -> list[dict]:
     members by it or compare them out loud.
     """
     return fetch_member_activity(
+        tool_context.state["team_id"], tool_context.state["requester_id"]
+    )
+
+
+def repo_activity(tool_context: ToolContext) -> list[dict]:
+    """Recent activity in this team's repositories: merges, reviews, issues and
+    comments, newest first.
+
+    Use this to answer what changed in the repo, who worked on what, and when.
+    It reads the recorded event history, not the code — for what a change does,
+    ask the person who made it rather than guessing from a title.
+    """
+    return fetch_repo_activity(
         tool_context.state["team_id"], tool_context.state["requester_id"]
     )

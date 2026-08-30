@@ -130,14 +130,33 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
     """
     with connect(Role.ADMIN) as conn:
         rows = conn.execute(
-            "select m.team_id from public.messages m"
-            " where m.thread_type='group' and m.sender_kind='user'"
-            " and m.deleted_scope is null"
-            " and m.created_at > coalesce(("
-            "   select max(c.chat_through) from public.memory_compilations c"
-            "   where c.team_id = m.team_id and c.chat_through is not null"
-            "   and c.status='done'), '-infinity'::timestamptz)"
-            " group by m.team_id having count(*) >= %s",
+            # findings §3.2 calls the original "the worst query in the
+            # codebase": a cross-team Seq Scan of `messages` with a CORRELATED
+            # SUBQUERY in the filter, so the watermark lookup ran once per
+            # candidate ROW. Measured on 6k messages: 6001 subplan executions,
+            # 12,101 buffers, 22.9 ms — every 5 seconds, forever.
+            #
+            # Driving from `teams` instead inverts it. Teams are few, so the
+            # watermark subquery runs once per TEAM; and because the inner
+            # count carries a literal t.id, the partial index
+            # idx_messages_group_human can serve it as a range scan. In the
+            # steady state the tick actually sees — everything already swept —
+            # that is a Bitmap Index Scan returning nothing.
+            #
+            # Same corpus, steady state: 0.097 ms. The CTE form I tried first
+            # removed the subplan but still Seq Scanned, because a predicate
+            # that depends on a joined row cannot become an index condition.
+            "select t.id from public.teams t"
+            " cross join lateral ("
+            "   select count(*) as n from public.messages m"
+            "    where m.team_id = t.id and m.thread_type='group'"
+            "      and m.sender_kind='user' and m.deleted_scope is null"
+            "      and m.created_at > coalesce(("
+            "            select max(c.chat_through)"
+            "              from public.memory_compilations c"
+            "             where c.team_id = t.id and c.chat_through is not null"
+            "               and c.status='done'), '-infinity'::timestamptz)"
+            " ) s where s.n >= %s",
             (min_messages,),
         ).fetchall()
     jobs = []

@@ -8,7 +8,7 @@ from pipeline.chat import (
 from pipeline.compiler import Candidate, Decision, apply_compilation
 from shared.config import settings
 from shared.db import Role, team_session
-from tests._seed import A1, A2, TEAM_A
+from tests._seed import A1, A2, B2, TEAM_A, TEAM_B
 
 
 def _admin():
@@ -247,3 +247,44 @@ def test_sweep_quiet_when_no_new_messages(seeded):
     finally:
         conn.close()
     assert sweep_chat_compiles() == []
+
+
+def test_the_sweep_ignores_a_team_below_the_threshold(seeded):
+    from pipeline.chat import sweep_chat_compiles
+
+    """One team over the bar must not drag another team's short room in.
+
+    The sweep drives from `teams` now (findings §3.2), so a team with too few
+    unswept messages has to fall out on its own count, not on a shared scan.
+    """
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            # TEAM_A well over the threshold, TEAM_B just under it.
+            cur.executemany(
+                "insert into public.messages (team_id, thread_type, sender_kind,"
+                " sender_id, body) values (%s,'group','user',%s,%s)",
+                [(TEAM_A, A2, f"a{i}") for i in range(8)],
+            )
+            cur.executemany(
+                "insert into public.messages (team_id, thread_type, sender_kind,"
+                " sender_id, body) values (%s,'group','user',%s,%s)",
+                [(TEAM_B, B2, f"b{i}") for i in range(2)],
+            )
+    finally:
+        conn.close()
+
+    sweep_chat_compiles(min_messages=5)
+
+    conn = _admin()
+    try:
+        swept = {
+            str(r[0])
+            for r in conn.execute(
+                "select team_id from public.jobs where job_type='compile_memory'"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    assert TEAM_A in swept
+    assert TEAM_B not in swept

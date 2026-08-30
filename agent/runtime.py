@@ -7,14 +7,13 @@ The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 import asyncio
 from typing import Any, AsyncIterator
 
-from google.adk.runners import InMemoryRunner
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from starlette.concurrency import run_in_threadpool
 
-from agent.agent import root_agent
+from agent.agent import APP_NAME, app
 from shared.agent_runs import append_step, finish_run, start_run
-
-_APP_NAME = "comrade"
 
 
 def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
@@ -69,9 +68,13 @@ async def stream_turn(
     run_id = await run_in_threadpool(start_run, team_id, trigger_type, user_text[:200])
     yield {"type": "run", "run_id": run_id}
 
-    runner = InMemoryRunner(agent=root_agent, app_name=_APP_NAME)
+    # Runner(app=...), not InMemoryRunner: the App is what carries the
+    # chokepoint plugin, and InMemoryRunner is ADK's dev-mode helper (§1).
+    # The session service stays in-memory and per-turn — conversation history
+    # is the messages table's job, not ADK's.
+    runner = Runner(app=app, session_service=InMemorySessionService())
     session = await runner.session_service.create_session(
-        app_name=_APP_NAME, user_id=requester_id,
+        app_name=APP_NAME, user_id=requester_id,
         state={"team_id": team_id, "requester_id": requester_id},
     )
     message = types.Content(role="user", parts=[types.Part(text=user_text)])

@@ -6,7 +6,9 @@ import os
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.readonly_context import ReadonlyContext
+from google.adk.apps import App
 
+from agent.permission_plugin import ChokepointPlugin
 from agent.tools import (
     member_send_nudge,
     memory_read_page,
@@ -105,3 +107,9 @@ root_agent = LlmAgent(
         member_send_nudge,
     ],
 )
+
+# The app is what actually runs: the agent plus the one gate every tool call
+# passes through (findings §15.4). root_agent stays exported because the
+# evaluation harness and the wiring tests address the agent itself.
+APP_NAME = "comrade"
+app = App(name=APP_NAME, root_agent=root_agent, plugins=[ChokepointPlugin()])

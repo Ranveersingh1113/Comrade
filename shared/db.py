@@ -127,11 +127,21 @@ def user_session(user_id: str) -> Iterator[psycopg.Connection]:
 
     Commits on clean exit, rolls back on error. Connects as the dedicated
     authenticator role (comrade_authenticator: LOGIN + noinherit, may only
-    SET ROLE authenticated) when COMRADE_AUTHENTICATOR_DB_URL is set; falls
-    back to the admin URL for dev environments that predate the role. Either
+    SET ROLE authenticated). Raises if COMRADE_AUTHENTICATOR_DB_URL is unset —
+    it does NOT fall back to the admin connection, which bypasses RLS. Either
     way, once the role is switched RLS is enforced.
     """
-    url = settings.comrade_authenticator_db_url or _URLS[Role.ADMIN]
+    # No fallback. ADMIN is the table owner and BYPASSRLS, so falling back to
+    # it would run every member query with NO row security — silently, and
+    # since the pool landed, sharing a pool with the control plane too. A
+    # missing variable must stop the process, not quietly disable RLS.
+    # (Phase 0 whole-branch review.)
+    url = settings.comrade_authenticator_db_url
+    if not url:
+        raise RuntimeError(
+            "COMRADE_AUTHENTICATOR_DB_URL is not set. user_session() will not"
+            " fall back to the admin connection, which bypasses RLS."
+        )
     with _pool(url).connection() as conn:
         with conn.transaction():
             conn.execute("set local role authenticated")

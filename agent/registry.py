@@ -46,6 +46,8 @@ REGISTRY: dict[str, ToolSpec] = {
     # RLS is already the gate — nothing to add.
     "team_get_state":    ToolSpec("db", writes=False, needs_human=False),
     "memory_read_page":  ToolSpec("db", writes=False, needs_human=False),
+    "messages_search":   ToolSpec("db", writes=False, needs_human=False),
+    "document_read":     ToolSpec("db", writes=False, needs_human=False),
     # Proposes into the consent queue. The write it describes is gated by the
     # queue itself, so the TOOL call is not the thing a human approves —
     # needs_human here would deadlock the tool whose whole job is to CREATE

@@ -5,14 +5,27 @@ The ADK-facing tools are thin wrappers that bind team_id / requester_id from
 the session state (server-set), never from LLM arguments — so the model cannot
 read another team or attribute an action to someone else.
 """
+import uuid
 from typing import Literal
 
 from google.adk.tools import ToolContext
 
+from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
 from shared.consent import propose_action
 from shared.db import user_session
 from shared.nudge import send_nudge
+
+# Payload caps. Every result of these two tools is pasted into the next LLM
+# call, so an uncapped read is an unbounded bill on every turn that makes one.
+# Chat messages are short — 400 chars returns the great majority whole, and a
+# full page of 8 costs ~800 tokens. 6000 chars of document is a couple of
+# pages: enough to answer from, far short of a 200-page PDF's parsed_text.
+# Both truncations set a `truncated` flag so the model can say it saw only part.
+SEARCH_LIMIT_DEFAULT = 8
+SEARCH_LIMIT_MAX = 20
+MESSAGE_BODY_CHARS = 400
+DOC_CHARS = 6000
 
 
 def fetch_team_state(team_id: str, requester_id: str) -> dict:
@@ -128,6 +141,114 @@ def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
     }
 
 
+# Ranked full-text search over one team's messages, read as the member.
+#
+# `to_tsvector('english', m.body)` is repeated VERBATIM from the definition of
+# idx_messages_fts (a GIN over the expression, not a stored column); any other
+# spelling and the planner cannot match the index at all. See the report for
+# the measured caveat: under `authenticated` the RLS quals sit below this one,
+# and because ts_match_vq is not LEAKPROOF PostgreSQL refuses to promote `@@`
+# into an index condition, so the FTS index is reachable only without RLS. The
+# leakproof `team_id = %s` IS promotable, and idx_messages_team_thread is what
+# bounds the scan to one team in practice.
+#
+# ponytail: one team's messages scanned per search. Fine at pilot scale
+# (~100ms over 24k rows measured). If a room outgrows it, the fix is a
+# LEAKPROOF `@@` (superuser, unavailable on Supabase) or narrowing by date.
+_SEARCH_SQL = (
+    "select m.id, m.body, m.thread_type, m.created_at, m.sender_kind,"
+    " p.display_name"
+    " from public.messages m"
+    " left join public.profiles p on p.id = m.sender_id"
+    " where m.team_id = %(team_id)s and m.deleted_scope is null"
+    " and to_tsvector('english', m.body) @@ plainto_tsquery('english', %(q)s)"
+    " order by ts_rank_cd(to_tsvector('english', m.body),"
+    " plainto_tsquery('english', %(q)s)) desc, m.created_at desc"
+    " limit %(limit)s"
+)
+
+
+def search_messages(
+    team_id: str,
+    requester_id: str,
+    query: str,
+    limit: int = SEARCH_LIMIT_DEFAULT,
+) -> list[dict]:
+    """Ranked matches from this team's chat, read as the requesting member.
+
+    findings §2.1/§4.1: comrade_agent has no SELECT on `messages` at all, so
+    this runs under the member's own RLS and au_messages_select — is_team_member
+    AND (group OR thread_owner_id = auth.uid()) — is what keeps another
+    member's private thread out of the results. The explicit team_id is not
+    optional: `authenticated` has no current_team(), and a member of two teams
+    would otherwise search both at once.
+
+    Tombstoned messages (deleted_scope set) are excluded — a message someone
+    retracted must not come back through search.
+    """
+    with user_session(requester_id) as conn:
+        rows = conn.execute(
+            _SEARCH_SQL,
+            {
+                "team_id": team_id,
+                "q": query.strip(),
+                "limit": max(1, min(limit, SEARCH_LIMIT_MAX)),
+            },
+        ).fetchall()
+    return [
+        {
+            "message_id": str(message_id),
+            "sender": "Comrade" if kind == "ai" else (name or "a former member"),
+            "thread": thread_type,
+            "created_at": created_at.isoformat(),
+            "body": body[:MESSAGE_BODY_CHARS],
+            "truncated": len(body) > MESSAGE_BODY_CHARS,
+        }
+        for message_id, body, thread_type, created_at, kind, name in rows
+    ]
+
+
+def read_document(team_id: str, requester_id: str, document_id: str) -> dict:
+    """One document's extracted text, read as the requesting member.
+
+    au_documents_select gates it (any member of the team may read a team
+    document); the explicit team_id keeps a member of two teams from reaching
+    the other team's upload by id. Soft-deleted documents are gone for good.
+
+    The text is SPOTLIGHTED on the way out. parsed_text is stored unmarked
+    because it is source text, not a prompt — but it is attacker-controlled
+    (anyone may upload a PDF that says "ignore your instructions"), so the
+    datamarking the compile path applies before its LLM call has to be applied
+    here too. The agent's instruction declares the marker, as _EXTRACT_SYSTEM
+    does for the compiler.
+    """
+    try:
+        document_id = str(uuid.UUID(str(document_id)))
+    except ValueError:
+        # The model can invent an id; that is a miss, not a crashed turn.
+        return {"error": "no such document"}
+    with user_session(requester_id) as conn:
+        row = conn.execute(
+            "select filename, kind, status, created_at, parsed_text"
+            " from public.documents"
+            " where id = %s and team_id = %s and deleted_at is null",
+            (document_id, team_id),
+        ).fetchone()
+    if row is None:
+        return {"error": "no such document"}
+    filename, kind, status, created_at, text = row
+    text = text or ""
+    return {
+        "document_id": document_id,
+        "filename": filename,
+        "kind": kind,
+        "status": status,
+        "created_at": created_at.isoformat(),
+        "truncated": len(text) > DOC_CHARS,
+        "text": spotlight(text[:DOC_CHARS]),
+    }
+
+
 # ---------------------------------------------------------------------------
 # ADK tools — team_id / requester_id are server-bound from session state.
 # ---------------------------------------------------------------------------
@@ -152,6 +273,44 @@ def memory_read_page(title: str, tool_context: ToolContext) -> dict:
     """
     return read_memory_page(
         tool_context.state["team_id"], tool_context.state["requester_id"], title
+    )
+
+
+def messages_search(query: str, tool_context: ToolContext) -> list[dict]:
+    """Search what has actually been said in this team's chat.
+
+    Use this whenever the question is about something said, agreed, asked or
+    promised in conversation — search for it rather than guessing. It covers
+    the group room and your private thread with the person asking; you cannot
+    see anyone else's private thread, so say so rather than speculating.
+    Each result gives the sender, the thread, when it was sent, and the text —
+    quote who said it and when. `truncated` means the body was cut short.
+    An empty list means nothing matched; say that instead of inventing a quote.
+
+    Args:
+        query: the words to look for, e.g. "demo deadline" or "who owns the
+            slides". Content words only — it matches on words, not phrases.
+    """
+    return search_messages(
+        tool_context.state["team_id"], tool_context.state["requester_id"], query
+    )
+
+
+def document_read(document_id: str, tool_context: ToolContext) -> dict:
+    """Open one of the team's uploaded documents and read its text.
+
+    Use this when a wiki citation points at a document (source_kind
+    "document") and you need more than the excerpt, or when someone asks what
+    a document says. Returns filename, kind, when it was uploaded, and the
+    text; `truncated` true means you were given only the start of it, so say
+    so rather than implying you read the whole thing. Returns an error if the
+    document does not belong to this team or has been deleted.
+
+    Args:
+        document_id: the document's id, e.g. from a wiki citation's source_id.
+    """
+    return read_document(
+        tool_context.state["team_id"], tool_context.state["requester_id"], document_id
     )
 
 

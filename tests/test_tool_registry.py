@@ -5,7 +5,7 @@ isConcurrencySafe -> false: forgetting to declare gets you the DANGEROUS
 assumption. That inversion is the whole point — a registry whose default is
 permissive is a registry that only protects the tools someone remembered.
 """
-from agent.registry import REGISTRY, spec_for
+from agent.registry import REGISTRY, ToolSpec, spec_for
 
 
 def test_every_registered_tool_is_declared():
@@ -25,6 +25,9 @@ def test_an_unknown_tool_fails_closed():
 def test_read_only_tools_are_declared_as_such():
     assert spec_for("team_get_state").writes is False
     assert spec_for("memory_read_page").writes is False
+    # the two reading tools: RLS is already the gate, so no human in the loop
+    for name in ("messages_search", "document_read"):
+        assert spec_for(name) == ToolSpec("db", writes=False, needs_human=False)
 
 
 def test_the_nudge_is_declared_as_an_outbound_write():

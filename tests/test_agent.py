@@ -11,6 +11,8 @@ def test_tools_registered():
     assert {t.__name__ for t in root_agent.tools} == {
         "team_get_state",
         "memory_read_page",
+        "messages_search",
+        "document_read",
         "team_propose_task",
         "member_send_nudge",
     }

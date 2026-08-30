@@ -7,6 +7,7 @@ thread it is standing in without a second session store.
 The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
+from contextlib import ExitStack
 from typing import Any, AsyncIterator
 
 from google.adk.agents.run_config import RunConfig
@@ -19,6 +20,7 @@ from starlette.concurrency import run_in_threadpool
 from agent.agent import APP_NAME, app
 from agent.history import recent_turns
 from shared.agent_runs import append_step, finish_run, start_run
+from shared.db import room_lock
 from shared.config import settings
 
 
@@ -81,57 +83,81 @@ async def stream_turn(
     {"type": "final", ...}. run_turn() below consumes this, so the
     orchestration exists once rather than twice.
     """
-    run_id = await run_in_threadpool(start_run, team_id, trigger_type, user_text[:200])
-    yield {"type": "run", "run_id": run_id}
+    # findings §4.3: one agent turn at a time per ROOM. Two runs in one group
+    # room are two agents that cannot see each other — duplicated work,
+    # contradictory answers, and a race on the consent queue. Private threads
+    # share no surface, so they stay parallel and take no lock at all.
+    #
+    # ExitStack because the lock's lifetime is the whole turn but only SOME
+    # turns take one; a plain `with` would need the body duplicated.
+    with ExitStack() as stack:
+        if thread_type == "group":
+            if not stack.enter_context(room_lock(team_id)):
+                # Decision Q6: say what is actually happening. A spinner here
+                # reads as a hang, and the member has no way to tell the
+                # difference between "thinking" and "stuck".
+                yield {
+                    "type": "busy",
+                    "detail": (
+                        "Comrade is working on someone else's question in this"
+                        " room. Yours is next — send it again in a moment."
+                    ),
+                }
+                return
 
-    # Runner(app=...), not InMemoryRunner: the App is what carries the
-    # chokepoint plugin, and InMemoryRunner is ADK's dev-mode helper (§1).
-    # The session service stays in-memory and per-turn; it is FILLED from
-    # `messages` rather than replaced by ADK's DatabaseSessionService, whose
-    # unqualified tables would sit in `public` with no RLS (agent/history.py).
-    runner = Runner(app=app, session_service=InMemorySessionService())
-    session = await runner.session_service.create_session(
-        app_name=APP_NAME, user_id=requester_id,
-        state={"team_id": team_id, "requester_id": requester_id},
-    )
-    message = types.Content(role="user", parts=[types.Part(text=user_text)])
-    all_steps: list[dict[str, Any]] = []
-    # Inside the try: a failed history read must close the run row too, not
-    # leave it 'running' forever.
-    try:
-        history = await run_in_threadpool(
-            recent_turns, team_id, requester_id, thread_type,
-            settings.agent_history_turns, exclude_message_id,
+        run_id = await run_in_threadpool(
+            start_run, team_id, trigger_type, user_text[:200]
         )
-        for content in history:
-            # A model-role event must be authored by this agent, or ADK
-            # relabels it as another agent's reply and rewrites it into a
-            # "For context:" note.
-            await runner.session_service.append_event(
-                session,
-                Event(
-                    author="user" if content.role == "user"
-                    else app.root_agent.name,
-                    content=content,
-                ),
+        yield {"type": "run", "run_id": run_id}
+
+        # Runner(app=...), not InMemoryRunner: the App is what carries the
+        # chokepoint plugin, and InMemoryRunner is ADK's dev-mode helper (§1).
+        # The session service stays in-memory and per-turn; it is FILLED from
+        # `messages` rather than replaced by ADK's DatabaseSessionService, whose
+        # unqualified tables would sit in `public` with no RLS (agent/history.py).
+        runner = Runner(app=app, session_service=InMemorySessionService())
+        session = await runner.session_service.create_session(
+            app_name=APP_NAME, user_id=requester_id,
+            state={"team_id": team_id, "requester_id": requester_id},
+        )
+        message = types.Content(role="user", parts=[types.Part(text=user_text)])
+        all_steps: list[dict[str, Any]] = []
+        # Inside the try: a failed history read must close the run row too, not
+        # leave it 'running' forever.
+        try:
+            history = await run_in_threadpool(
+                recent_turns, team_id, requester_id, thread_type,
+                settings.agent_history_turns, exclude_message_id,
             )
-        async for event in runner.run_async(
-            user_id=requester_id, session_id=session.id, new_message=message,
-            run_config=RunConfig(max_llm_calls=settings.agent_max_llm_calls),
-        ):
-            for step in _steps_from_event(event, len(all_steps)):
-                await run_in_threadpool(append_step, team_id, run_id, step)
-                all_steps.append(step)
-                yield step
-    except Exception:
-        await run_in_threadpool(finish_run, team_id, run_id, "failed")
-        raise
-    await run_in_threadpool(finish_run, team_id, run_id, "done")
-    yield {
-        "type": "final",
-        "run_id": run_id,
-        "reply": _reply_from_steps(all_steps),
-    }
+            for content in history:
+                # A model-role event must be authored by this agent, or ADK
+                # relabels it as another agent's reply and rewrites it into a
+                # "For context:" note.
+                await runner.session_service.append_event(
+                    session,
+                    Event(
+                        author="user" if content.role == "user"
+                        else app.root_agent.name,
+                        content=content,
+                    ),
+                )
+            async for event in runner.run_async(
+                user_id=requester_id, session_id=session.id, new_message=message,
+                run_config=RunConfig(max_llm_calls=settings.agent_max_llm_calls),
+            ):
+                for step in _steps_from_event(event, len(all_steps)):
+                    await run_in_threadpool(append_step, team_id, run_id, step)
+                    all_steps.append(step)
+                    yield step
+        except Exception:
+            await run_in_threadpool(finish_run, team_id, run_id, "failed")
+            raise
+        await run_in_threadpool(finish_run, team_id, run_id, "done")
+        yield {
+            "type": "final",
+            "run_id": run_id,
+            "reply": _reply_from_steps(all_steps),
+        }
 
 
 async def run_turn(
@@ -154,6 +180,16 @@ async def run_turn(
         if item.get("type") == "final":
             final = item
             continue
+        if item.get("type") == "busy":
+            # The room lock refused this turn (§4.3). There is no run row and
+            # no reply — surface it as itself rather than KeyError-ing on a
+            # `final` frame that will never arrive.
+            return {
+                "run_id": None,
+                "reply": "",
+                "steps": [],
+                "busy": item["detail"],
+            }
         steps.append(item)
     return {"run_id": final["run_id"], "reply": final["reply"], "steps": steps}
 

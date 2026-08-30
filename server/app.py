@@ -162,6 +162,11 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
         req.team_id, user_id, req.text,
         thread_type=req.thread_type, exclude_message_id=user_message_id,
     )
+    if result.get("busy"):
+        # §4.3 + decision Q6: another member's turn holds this room. Say so
+        # plainly — a 200 with an empty reply would read as the agent
+        # ignoring them, which is worse than being told to wait.
+        raise HTTPException(status.HTTP_409_CONFLICT, result["busy"])
     reply = result["reply"]
     reply_message_id = None
     if reply:

@@ -37,12 +37,22 @@ def _turn(text: str, thread_type: str = "private") -> str:
 
 
 def test_the_second_turn_remembers_the_first(seeded):
-    first = _turn(
+    """Turn 2 can only answer if turn 1 is in its context.
+
+    Turn 1's REPLY is deliberately not asserted on. Measured across three
+    identical runs it came back as "Understood.", "Okay, Falcon Ridge." and
+    "" — the voice guide tells the agent to be concise and the prompt tells it
+    there is nothing to do, so saying nothing is a legitimate answer. What
+    matters is that the member's MESSAGE is persisted (the caller does that
+    before the turn runs, exactly as server/app.py does) and therefore reaches
+    turn 2 as history. Asserting on turn 1's text made this test flaky for a
+    reason that has nothing to do with memory.
+    """
+    _turn(
         f"Just noting something down: we are calling this release {CODENAME}."
         " Nothing to do about it."
     )
-    assert first
     second = _turn(
         "What name did I just give the release? Reply with the name only."
     )
-    assert "falcon" in second.lower(), f"turn 1: {first!r}\nturn 2: {second!r}"
+    assert "falcon" in second.lower(), f"turn 2: {second!r}"

@@ -4,12 +4,14 @@ Every worker connects under an RLS-enforced role (never service_role) and scopes
 itself to a single team per transaction via SET LOCAL app.current_team_id. The
 policies in 0002_rls.sql then constrain every row the worker can see or write.
 """
+import atexit
 import json
 from contextlib import contextmanager
 from enum import Enum
 from typing import Iterator
 
 import psycopg
+from psycopg_pool import ConnectionPool
 
 from .config import settings
 
@@ -36,14 +38,60 @@ _ACTOR_KIND: dict[Role, str] = {
 }
 
 
+# One pool per distinct URL, opened on first use. findings §3.2: the rule is
+# "never open a connection per request" and this codebase opened one per
+# OPERATION — a 20-step agent turn cost 20 connect/close cycles in
+# append_step alone, and long-running turns are coming.
+#
+# Pooling is safe here only because every scoping statement below is
+# TRANSACTION-scoped (SET LOCAL / set_config(..., true)). The scope dies with
+# the transaction, so a recycled connection cannot hand the next borrower the
+# previous borrower's team or identity. Changing any of them to session scope
+# would be a silent cross-tenant leak — tests/test_db_pool.py guards this by
+# borrowing a bare connection after a scoped one and asserting it is clean.
+#
+# ponytail: fixed size, no per-role tuning. Size from measurement if a role
+# starts queueing.
+_POOL_MIN, _POOL_MAX = 1, 10
+_pools: dict[str, ConnectionPool] = {}
+
+
+def _reset(conn: psycopg.Connection) -> None:
+    """Normalise a connection on its way back to the pool.
+
+    pipeline/worker.py borrows via connect() and sets autocommit itself, so a
+    returned connection can carry autocommit=True. Clearing it here keeps that
+    caller's choice from becoming the next borrower's default.
+    """
+    conn.rollback()
+    conn.autocommit = False
+
+
+def _pool(url: str) -> ConnectionPool:
+    pool = _pools.get(url)
+    if pool is None:
+        pool = ConnectionPool(
+            url, min_size=_POOL_MIN, max_size=_POOL_MAX, reset=_reset, open=True
+        )
+        _pools[url] = pool
+    return pool
+
+
+def close_pools() -> None:
+    """Close every pool. For clean shutdown and test teardown."""
+    for pool in _pools.values():
+        pool.close()
+    _pools.clear()
+
+
+atexit.register(close_pools)
+
+
 @contextmanager
 def connect(role: Role) -> Iterator[psycopg.Connection]:
-    """Open a raw connection as the given role. Caller manages transactions."""
-    conn = psycopg.connect(_URLS[role])
-    try:
+    """Borrow a connection as the given role. Caller manages transactions."""
+    with _pool(_URLS[role]).connection() as conn:
         yield conn
-    finally:
-        conn.close()
 
 
 @contextmanager
@@ -56,8 +104,7 @@ def team_session(role: Role, team_id: str) -> Iterator[psycopg.Connection]:
     """
     if role is Role.ADMIN:
         raise ValueError("team_session is for worker roles, not ADMIN")
-    conn = psycopg.connect(_URLS[role])
-    try:
+    with _pool(_URLS[role]).connection() as conn:
         with conn.transaction():
             conn.execute(
                 "select set_config('app.current_team_id', %s, true)", (str(team_id),)
@@ -66,8 +113,6 @@ def team_session(role: Role, team_id: str) -> Iterator[psycopg.Connection]:
                 "select set_config('app.actor_kind', %s, true)", (_ACTOR_KIND[role],)
             )
             yield conn
-    finally:
-        conn.close()
 
 
 @contextmanager
@@ -87,8 +132,7 @@ def user_session(user_id: str) -> Iterator[psycopg.Connection]:
     way, once the role is switched RLS is enforced.
     """
     url = settings.comrade_authenticator_db_url or _URLS[Role.ADMIN]
-    conn = psycopg.connect(url)
-    try:
+    with _pool(url).connection() as conn:
         with conn.transaction():
             conn.execute("set local role authenticated")
             conn.execute(
@@ -96,5 +140,3 @@ def user_session(user_id: str) -> Iterator[psycopg.Connection]:
                 (json.dumps({"sub": str(user_id), "role": "authenticated"}),),
             )
             yield conn
-    finally:
-        conn.close()

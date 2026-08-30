@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { messageTime } from '../lib/format';
+import { pendingQueueRows } from '../lib/consentModel';
 import type { ConsentItem } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { useTeamRealtime } from '../hooks/useRealtime';
@@ -82,9 +83,42 @@ export function ConsentInbox() {
             Queue clear — nothing awaiting your key.
           </div>
         )}
-        {pending.map((item) => (
-          <ConsentCard key={item.id} item={item} onResolved={load} viewerId={myUserId} />
-        ))}
+        {pendingQueueRows(items, pending).map((row) =>
+          row.kind === 'single' ? (
+            <ConsentCard key={row.item.id} item={row.item} onResolved={load} viewerId={myUserId} />
+          ) : (
+            <div
+              key={row.batchId}
+              data-testid="consent-batch"
+              style={{
+                border: '1px solid var(--border)',
+                borderRadius: 3,
+                padding: '14px 14px 4px',
+                marginBottom: 18,
+                background: 'rgba(35,33,48,0.02)',
+              }}
+            >
+              <div
+                className="mono"
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  marginBottom: 12,
+                  fontSize: 10,
+                  letterSpacing: '0.1em',
+                  color: 'var(--muted)',
+                }}
+              >
+                <span>ONE PIECE OF WORK · {row.totalCount} RELATED ACTIONS</span>
+                <span style={{ color: 'var(--text-soft)' }}>{row.progressLabel.toUpperCase()}</span>
+              </div>
+              {row.items.map((item) => (
+                <ConsentCard key={item.id} item={item} onResolved={load} viewerId={myUserId} />
+              ))}
+            </div>
+          ),
+        )}
 
         {history.length > 0 && (
           <>

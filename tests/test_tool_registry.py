@@ -5,7 +5,7 @@ isConcurrencySafe -> false: forgetting to declare gets you the DANGEROUS
 assumption. That inversion is the whole point — a registry whose default is
 permissive is a registry that only protects the tools someone remembered.
 """
-from agent.registry import REGISTRY, spec_for
+from agent.registry import REGISTRY, ToolSpec, spec_for
 
 
 def test_every_registered_tool_is_declared():
@@ -25,6 +25,29 @@ def test_an_unknown_tool_fails_closed():
 def test_read_only_tools_are_declared_as_such():
     assert spec_for("team_get_state").writes is False
     assert spec_for("memory_read_page").writes is False
+    # the two reading tools: RLS is already the gate, so no human in the loop
+    for name in ("messages_search", "document_read"):
+        assert spec_for(name) == ToolSpec("db", writes=False, needs_human=False)
+
+
+def test_now_and_task_get_are_declared_read_only():
+    # now() touches no database at all, but "db" is the honest surface for
+    # "reads server state" rather than inventing a fourth surface for it.
+    for name in ("now", "task_get"):
+        assert spec_for(name) == ToolSpec("db", writes=False, needs_human=False)
+
+
+def test_task_propose_update_is_a_gated_write_like_task_create():
+    """Proposing is not the thing a human approves — the queued item is — so
+    needs_human=False here, same reasoning as team_propose_task."""
+    assert spec_for("task_propose_update") == ToolSpec("db", writes=True, needs_human=False)
+
+
+def test_team_propose_batch_is_a_gated_write_like_team_propose_task():
+    """Same reasoning as team_propose_task: the call only writes pending rows
+    for a human to review one by one, so the call itself needs no human gate —
+    the batch grouping (task 6) is display only, never an approval gate."""
+    assert spec_for("team_propose_batch") == ToolSpec("db", writes=True, needs_human=False)
 
 
 def test_the_nudge_is_declared_as_an_outbound_write():

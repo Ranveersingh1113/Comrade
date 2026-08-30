@@ -52,7 +52,19 @@ def test_the_second_turn_remembers_the_first(seeded):
         f"Just noting something down: we are calling this release {CODENAME}."
         " Nothing to do about it."
     )
-    second = _turn(
-        "What name did I just give the release? Reply with the name only."
-    )
-    assert "falcon" in second.lower(), f"turn 2: {second!r}"
+    # Two attempts, because this asserts on the output of a stochastic system.
+    # A single sample occasionally comes back as a clarifying question or a
+    # decline; measured at roughly one full-suite run in five. Retrying is not
+    # hiding the flake — a genuinely broken history feature fails BOTH attempts,
+    # since the fact exists nowhere else in the team's state or wiki. What the
+    # retry removes is a red suite caused by sampling noise, which is worse
+    # than useless: it trains people to ignore red.
+    attempts = []
+    for _ in range(2):
+        answer = _turn(
+            "What name did I just give the release? Reply with the name only."
+        )
+        attempts.append(answer)
+        if "falcon" in answer.lower():
+            return
+    raise AssertionError(f"neither attempt recalled the codename: {attempts!r}")

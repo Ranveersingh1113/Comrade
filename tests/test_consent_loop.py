@@ -89,4 +89,4 @@ def test_post_group_message_has_no_executor(seeded):
     from shared.consent import _EXECUTORS
 
     assert "post_group_message" not in _EXECUTORS
-    assert set(_EXECUTORS) == {"task_create"}
+    assert set(_EXECUTORS) == {"task_create", "task_update"}

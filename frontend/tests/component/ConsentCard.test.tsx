@@ -28,6 +28,7 @@ const item = (over: Partial<ConsentItem> = {}): ConsentItem => ({
   expires_at: null,
   created_at: '2026-07-20T10:00:00Z',
   resolved_at: null,
+  batch_id: null,
   ...over,
 });
 

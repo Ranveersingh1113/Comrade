@@ -425,8 +425,14 @@ def handle_document_job(team_id: str, payload: dict) -> None:
         )
     compile_document(team_id, document_id, spotlight(text))
     with team_session(Role.PIPELINE, team_id) as conn:
+        # parsed_text is stored UNMARKED. spotlight() is a presentation-time
+        # defence applied on the way into an LLM call, not a storage format —
+        # document_read must re-spotlight when it hands this to the model, and
+        # storing the marked form would corrupt the text for every other reader.
         conn.execute(
-            "update public.documents set status='ready' where id=%s", (document_id,)
+            "update public.documents set status='ready', parsed_text=%s"
+            " where id=%s",
+            (text, document_id),
         )
 
 

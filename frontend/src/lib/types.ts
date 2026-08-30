@@ -188,6 +188,9 @@ export interface ConsentItem {
   expires_at: string | null;
   created_at: string;
   resolved_at: string | null;
+  /** Display grouping only (task 6) — never an approval gate. Several items
+   * proposed together (propose_batch) share one id; a lone proposal is null. */
+  batch_id: string | null;
 }
 
 export interface ContributionRow {

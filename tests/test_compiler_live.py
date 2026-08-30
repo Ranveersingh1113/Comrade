@@ -128,6 +128,99 @@ def test_chat_correction_supersedes_and_cites_message(seeded):
     assert watermark == 1, "chat compilation did not record its watermark"
 
 
+def test_repo_activity_compiles_and_provenance_holds_against_a_real_model(
+    seeded, capsys
+):
+    """A live repo compile, with the two artifacts §22.3 forbids sitting right
+    next to the eligible ones: a Dependabot issue and an UNMERGED PR proposing
+    a database switch that never happened. If either reached the model, the
+    wiki would carry a machine's claim or an unverified proposal as a team
+    decision — so this asserts on the compiled facts, not just on a return
+    value."""
+    from pipeline.chat import chat_watermark
+    from pipeline.github import compile_github_activity, fetch_new_activity
+    from shared.db import Role, team_session
+    from tests.test_github_compile import _activity, _admin, _repo
+
+    admin = _admin()
+    try:
+        repo = _repo(admin)
+        _activity(
+            admin, repo, "merge", author="maya", merged=True, number=41,
+            title="Pool connections per role",
+            body="Every agent turn opened one connection per operation."
+                 " Each role now shares a pooled connection, fixed at 10.",
+        )
+        _activity(
+            admin, repo, "review", author="arjun", number=41, state="approved",
+            title="Pool connections per role",
+            body="Checked that every scoping statement is transaction-scoped,"
+                 " so a recycled connection cannot leak the previous team.",
+        )
+        _activity(
+            admin, repo, "issue", author="maya", number=42,
+            title="Consent tier T3 is unused",
+            body="T3 is gone from the consent model. The tiers are T0 to T2.",
+        )
+        # forbidden: a machine's own account
+        _activity(
+            admin, repo, "issue", author="dependabot[bot]", bot=True, number=44,
+            title="Bump pymupdf from 1.27.2 to 1.28.0",
+            body="Bumps pymupdf to 1.28.0. Dependabot will resolve conflicts.",
+        )
+        # forbidden: nobody merged this, so nobody verified it
+        _activity(
+            admin, repo, "pr", author="maya", merged=False, state="open", number=43,
+            title="Switch the wiki store to Neo4j",
+            body="Replaces Postgres with Neo4j for the whole wiki.",
+        )
+    finally:
+        admin.close()
+
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
+        rows = fetch_new_activity(conn, TEAM_A, None)
+    assert len(rows) == 3, f"eligibility let the wrong rows through: {rows}"
+
+    result = compile_github_activity(
+        TEAM_A, rows, max(r["created_at"] for r in rows)
+    )
+    assert result["added"] >= 1
+
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
+        facts = [r[0] for r in conn.execute(
+            "select v.fact from public.memory_versions v"
+            " where v.team_id=%s and v.is_active", (TEAM_A,),
+        ).fetchall()]
+        cited = conn.execute(
+            "select c.source_kind, c.excerpt from public.memory_citations c"
+            " join public.memory_versions v on v.id = c.version_id"
+            " where v.team_id=%s and c.source_kind='github'", (TEAM_A,),
+        ).fetchall()
+    finally:
+        conn.close()
+    with capsys.disabled():
+        print("\n--- live repo compile ---")
+        print(f"result: {result}")
+        for f in facts:
+            print(f"  fact: {f}")
+        for kind, excerpt in cited:
+            print(f"  cite[{kind}]: {excerpt}")
+
+    assert cited, "repo compile produced no github citations"
+    blob = " ".join(facts).lower()
+    assert "neo4j" not in blob, "an UNMERGED PR's proposal became a team fact"
+    assert "dependabot" not in blob and "pymupdf" not in blob, (
+        "a bot-authored issue became a team fact"
+    )
+
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
+        assert chat_watermark(conn, TEAM_A) is None, (
+            "a repo compile advanced the chat watermark"
+        )
+
+
 def test_compiled_facts_land_on_pages(seeded):
     compile_document(
         TEAM_A, DOC1,

@@ -129,6 +129,7 @@ def main() -> None:
     # Handlers register at import time.
     import pipeline.chat  # noqa: F401
     import pipeline.compiler  # noqa: F401
+    import pipeline.github  # noqa: F401
 
     logger.info("worker up: polling every %.0fs", POLL_SECONDS)
     while True:

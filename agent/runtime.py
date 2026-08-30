@@ -5,10 +5,11 @@ uses a fresh, stateless ADK runner seeded with the server-bound team/requester.
 The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
-from typing import Any
+from typing import Any, AsyncIterator
 
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+from starlette.concurrency import run_in_threadpool
 
 from agent.agent import root_agent
 from shared.agent_runs import append_step, finish_run, start_run
@@ -53,15 +54,21 @@ def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
     return "".join(s["text"] for s in steps if s["type"] == "text").strip()
 
 
-async def run_turn(
+async def stream_turn(
     team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
-) -> dict[str, Any]:
-    """Run one agent turn; record every step to agent_runs. Returns the result.
+) -> AsyncIterator[dict[str, Any]]:
+    """Run one turn, yielding each step as it happens and recording it.
 
     team_id / requester_id are SERVER-BOUND here and injected into ADK session
     state — the model receives them via state, never as tool arguments.
+
+    Yields {"type": "run", ...} first, then one dict per step, then
+    {"type": "final", ...}. run_turn() below consumes this, so the
+    orchestration exists once rather than twice.
     """
-    run_id = start_run(team_id, trigger_type, user_text[:200])
+    run_id = await run_in_threadpool(start_run, team_id, trigger_type, user_text[:200])
+    yield {"type": "run", "run_id": run_id}
+
     runner = InMemoryRunner(agent=root_agent, app_name=_APP_NAME)
     session = await runner.session_service.create_session(
         app_name=_APP_NAME, user_id=requester_id,
@@ -74,17 +81,34 @@ async def run_turn(
             user_id=requester_id, session_id=session.id, new_message=message
         ):
             for step in _steps_from_event(event, len(all_steps)):
-                append_step(team_id, run_id, step)
+                await run_in_threadpool(append_step, team_id, run_id, step)
                 all_steps.append(step)
+                yield step
     except Exception:
-        finish_run(team_id, run_id, "failed")
+        await run_in_threadpool(finish_run, team_id, run_id, "failed")
         raise
-    finish_run(team_id, run_id, "done")
-    return {
+    await run_in_threadpool(finish_run, team_id, run_id, "done")
+    yield {
+        "type": "final",
         "run_id": run_id,
         "reply": _reply_from_steps(all_steps),
-        "steps": all_steps,
     }
+
+
+async def run_turn(
+    team_id: str, requester_id: str, user_text: str, trigger_type: str = "user"
+) -> dict[str, Any]:
+    """Batch form of stream_turn: drain it and return the collected result."""
+    steps: list[dict[str, Any]] = []
+    final: dict[str, Any] = {}
+    async for item in stream_turn(team_id, requester_id, user_text, trigger_type):
+        if item.get("type") == "run":
+            continue
+        if item.get("type") == "final":
+            final = item
+            continue
+        steps.append(item)
+    return {"run_id": final["run_id"], "reply": final["reply"], "steps": steps}
 
 
 def run_turn_sync(

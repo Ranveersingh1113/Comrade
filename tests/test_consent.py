@@ -170,3 +170,14 @@ def test_edited_executes_with_new_args(seeded):
         assert _task_count(conn, "Old title") == 0
     finally:
         conn.close()
+
+
+def test_identical_pending_proposal_is_rejected(seeded):
+    """A retried turn must not produce two identical consent cards (§2.2)."""
+    import psycopg
+
+    args = {"assignee_id": A1, "title": "write the report",
+            "description": None, "deadline": None}
+    propose_action(TEAM_A, A1, "task_create", args)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        propose_action(TEAM_A, A1, "task_create", args)

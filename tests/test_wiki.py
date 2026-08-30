@@ -1,7 +1,7 @@
 """Wiki projection: page grouping, orphan bucket, index, rendering (no LLM)."""
 import psycopg
 
-from pipeline.wiki import ORPHAN_TITLE, all_active_pages, page_index, render_team_wiki
+from pipeline.wiki import ORPHAN_TITLE, all_active_pages, render_team_wiki
 from shared.config import settings
 from shared.db import Role, team_session
 from tests._seed import TEAM_A, TEAM_B
@@ -63,20 +63,6 @@ def test_pages_scoped_to_team(seeded):
     assert "B-Page" not in titles
 
 
-def test_page_index_is_titles_and_descriptions(seeded):
-    conn = _admin()
-    try:
-        with conn.cursor() as cur:
-            _seed_page_with_fact(cur, TEAM_A, "Decisions", "We use Postgres",
-                                 description="choices made")
-    finally:
-        conn.close()
-    with team_session(Role.PIPELINE, TEAM_A) as s:
-        idx = page_index(s, TEAM_A)
-    assert {"title": "Decisions", "description": "choices made"} in idx
-    assert all(set(e) == {"title", "description"} for e in idx)
-
-
 def test_render_wiki_markdown(seeded):
     conn = _admin()
     try:
@@ -98,3 +84,33 @@ def test_render_wiki_markdown(seeded):
     assert "- Demo is Friday" in md
     assert "## Empty" not in md
     assert f"## {ORPHAN_TITLE}" in md  # seed's page-less fact still visible
+
+
+def test_facts_carry_their_date_and_source(seeded):
+    """findings §20.3.1: an undated bullet is the widest measured gap."""
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page_with_fact(cur, TEAM_A, "Deadlines", "Demo is Friday",
+                                 description="key dates")
+    finally:
+        conn.close()
+    with team_session(Role.PIPELINE, TEAM_A) as s:
+        pages = all_active_pages(s, TEAM_A)
+    fact = next(f for p in pages for f in p["facts"] if f["text"] == "Demo is Friday")
+    assert fact["valid_from"] is not None
+    assert "source_kind" in fact
+
+
+def test_render_annotates_facts_with_date_and_source(seeded):
+    conn = _admin()
+    try:
+        with conn.cursor() as cur:
+            _seed_page_with_fact(cur, TEAM_A, "Deadlines", "Demo is Friday",
+                                 description="key dates")
+    finally:
+        conn.close()
+    with team_session(Role.PIPELINE, TEAM_A) as s:
+        md = render_team_wiki(s, TEAM_A)
+    assert "Demo is Friday" in md
+    assert "as of " in md

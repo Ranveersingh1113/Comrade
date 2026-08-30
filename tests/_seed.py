@@ -32,7 +32,9 @@ def seed(cur):
             (uid, email),
         )
     cur.executemany(
-        "insert into public.profiles (id, display_name) values (%s, %s)",
+        # the auth.users trigger may have created the profile already — upsert
+        "insert into public.profiles (id, display_name) values (%s, %s)"
+        " on conflict (id) do update set display_name = excluded.display_name",
         [(A1, "A1"), (A2, "A2"), (B1, "B1"), (B2, "B2")],
     )
     cur.executemany(

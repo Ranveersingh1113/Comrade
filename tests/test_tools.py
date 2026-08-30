@@ -3,7 +3,7 @@ import psycopg
 
 from agent.tools import fetch_team_state
 from shared.config import settings
-from tests._seed import A1, A2, TEAM_A, TEAM_B
+from tests._seed import A1, A2, B1, TEAM_A, TEAM_B
 
 
 def _admin():
@@ -31,7 +31,7 @@ def test_team_get_state_returns_full_snapshot(seeded):
     finally:
         conn.close()
 
-    state = fetch_team_state(TEAM_A)
+    state = fetch_team_state(TEAM_A, A1)
 
     assert state["team"]["name"] == "Team A"
     assert {m["display_name"] for m in state["members"]} == {"A1", "A2"}
@@ -42,10 +42,10 @@ def test_team_get_state_returns_full_snapshot(seeded):
 
 def test_team_get_state_scopes_to_the_requested_team(seeded):
     # team B exists but is a different team; A's snapshot must not include it
-    state_a = fetch_team_state(TEAM_A)
+    state_a = fetch_team_state(TEAM_A, A1)
     assert state_a["team"]["id"] == TEAM_A
     # B's members (B1/B2) must not leak into A's snapshot
     assert {m["display_name"] for m in state_a["members"]}.isdisjoint({"B1", "B2"})
 
-    state_b = fetch_team_state(TEAM_B)
+    state_b = fetch_team_state(TEAM_B, B1)
     assert state_b["team"]["name"] == "Team B"

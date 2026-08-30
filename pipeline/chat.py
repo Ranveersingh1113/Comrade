@@ -15,9 +15,8 @@ Hard invariants:
   - Debounce: enqueue_chat_compile only fires at >= min_messages new group
     messages since the last chat compilation's watermark (chat_through).
 
-Trigger wiring (cron / agent capture tool) arrives with the event-bus slice;
-until then enqueue_chat_compile is called explicitly (tests, smoke, future
-runtime).
+Trigger: the worker loop calls sweep_chat_compiles() between queue drains, so
+capture is ambient — nobody asks for it, it just keeps up with the room.
 """
 from psycopg.types.json import Json
 
@@ -101,15 +100,52 @@ def enqueue_chat_compile(
         "message_ids": [m["id"] for m in messages],
         "through": max(m["created_at"] for m in messages).isoformat(),
     }
+    dedupe_key = f"chat:{payload['through']}"
+    with team_session(Role.PIPELINE, team_id) as conn:
+        row = conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
+            " values (%s,'compile_memory',%s,%s)"
+            " on conflict (team_id, job_type, dedupe_key)"
+            " where dedupe_key is not null and status in ('pending','processing')"
+            " do nothing returning id",
+            (team_id, Json(payload), dedupe_key),
+        ).fetchone()
+        if row is None:
+            row = conn.execute(
+                "select id from public.jobs where team_id=%s and job_type='compile_memory'"
+                " and dedupe_key=%s",
+                (team_id, dedupe_key),
+            ).fetchone()
+    return str(row[0])
+
+
+def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
+    """Enqueue a chat compile for every team with enough unswept group chatter.
+
+    The scan crosses teams, so it is control-plane (admin), like the job claim.
+    It is only a prefilter — enqueue_chat_compile re-checks the watermark and
+    threshold authoritatively under the PIPELINE role, and its dedupe key makes
+    a repeat sweep return the same job rather than a duplicate. Returns the job
+    ids touched this pass.
+    """
     with connect(Role.ADMIN) as conn:
-        conn.autocommit = True
-        return str(
-            conn.execute(
-                "insert into public.jobs (team_id, job_type, payload)"
-                " values (%s,'compile_memory',%s) returning id",
-                (team_id, Json(payload)),
-            ).fetchone()[0]
-        )
+        rows = conn.execute(
+            "select m.team_id from public.messages m"
+            " where m.thread_type='group' and m.sender_kind='user'"
+            " and m.deleted_scope is null"
+            " and m.created_at > coalesce(("
+            "   select max(c.chat_through) from public.memory_compilations c"
+            "   where c.team_id = m.team_id and c.chat_through is not null"
+            "   and c.status='done'), '-infinity'::timestamptz)"
+            " group by m.team_id having count(*) >= %s",
+            (min_messages,),
+        ).fetchall()
+    jobs = []
+    for (team_id,) in rows:
+        job_id = enqueue_chat_compile(str(team_id), min_messages)
+        if job_id is not None:
+            jobs.append(job_id)
+    return jobs
 
 
 def compile_messages(team_id: str, messages: list[dict], through) -> dict:

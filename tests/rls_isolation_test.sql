@@ -29,7 +29,8 @@ insert into public.profiles (id, display_name) values
   ('a1a1a1a1-0000-0000-0000-000000000001','A1'),
   ('a2a2a2a2-0000-0000-0000-000000000002','A2'),
   ('b1b1b1b1-0000-0000-0000-000000000001','B1'),
-  ('b2b2b2b2-0000-0000-0000-000000000002','B2');
+  ('b2b2b2b2-0000-0000-0000-000000000002','B2')
+on conflict (id) do update set display_name = excluded.display_name;
 
 insert into public.teams (id, name, created_by) values
   ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','Team A','a1a1a1a1-0000-0000-0000-000000000001'),

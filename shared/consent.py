@@ -13,6 +13,7 @@ attacker — that is what the role split + RLS provide.
 """
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 
 from psycopg.types.json import Json
@@ -22,6 +23,33 @@ from shared.db import Role, team_session, user_session
 
 class ConsentError(Exception):
     """Raised when an approved action can no longer be safely executed."""
+
+
+# Blast-radius tiers: T0 read-only, T1 affects one member, T2 shared and
+# reversible. T3 (external/irreversible/money) and its two-key requirement
+# were removed by owner decision 2026-08-12 (findings §10) — for code, GitHub
+# branch protection is a stronger second key than the trigger ever was
+# (§16.2). `tier` survives as an informational label and as the seed for the
+# earned-trust ratchet (§9.3 G4/G5).
+_TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2}
+
+# Per-tool FLOORS — a proposal may raise its own tier, never lower it below
+# these. T0-T2 is the whole range now (§10): for code, GitHub branch
+# protection is the real backstop (§16.2); for non-code actions there is no
+# equivalent floor yet — that gap is real and not covered here.
+_TOOL_TIER_FLOORS = {
+    "task_create": "T1",           # assignee-confirm is the affected member's key
+}
+DEFAULT_TIER = "T2"
+
+
+def resolve_tier(tool_name: str, requested: str | None = None) -> str:
+    """The proposal's tier: the requested one, floored per tool."""
+    floor = _TOOL_TIER_FLOORS.get(tool_name, DEFAULT_TIER)
+    assert floor in _TIER_ORDER, f"bad floor {floor!r} registered for {tool_name!r}"
+    if requested is None or requested not in _TIER_ORDER:
+        return floor
+    return requested if _TIER_ORDER[requested] >= _TIER_ORDER[floor] else floor
 
 
 def compute_hash(tool_name: str, team_id: str, requester_id: str, args: dict) -> str:
@@ -47,23 +75,32 @@ def propose_action(
     args: dict,
     source_snippet: str | None = None,
     reversible: bool = True,
+    tier: str | None = None,
 ) -> dict:
-    """Write a pending consent item (does NOT perform the action). 7-day backstop."""
+    """Write a pending consent item (does NOT perform the action). 7-day backstop.
+
+    The id is generated here rather than with RETURNING: RETURNING needs SELECT
+    on `consent_queue`, and findings §4.1 left the agent INSERT-only there. A
+    freshly proposed row is 'pending' by definition — that is what proposing is.
+    """
     action_hash = compute_hash(tool_name, team_id, requester_id, args)
+    final_tier = resolve_tier(tool_name, tier)
+    consent_id = str(uuid.uuid4())
     with team_session(Role.AGENT, team_id) as conn:
-        row = conn.execute(
-            "insert into public.consent_queue (team_id, requesting_member_id,"
+        conn.execute(
+            "insert into public.consent_queue (id, team_id, requesting_member_id,"
             " tool_name, tool_args, source_snippet, action_hash, reversible,"
-            " expires_at) values (%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')"
-            " returning id, status",
-            (team_id, requester_id, tool_name, Json(args), source_snippet,
-             action_hash, reversible),
-        ).fetchone()
+            " tier, expires_at)"
+            " values (%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
+            (consent_id, team_id, requester_id, tool_name, Json(args),
+             source_snippet, action_hash, reversible, final_tier),
+        )
     return {
-        "consent_id": str(row[0]),
-        "status": row[1],
+        "consent_id": consent_id,
+        "status": "pending",
         "tool_name": tool_name,
         "action_hash": action_hash,
+        "tier": final_tier,
     }
 
 
@@ -85,7 +122,7 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
         if claimed is None:
             return {"status": "noop", "reason": "not approved or already executed"}
 
-        tool_name, args, action_hash, requester_id, expires_at = claimed
+        (tool_name, args, action_hash, requester_id, expires_at) = claimed
 
         if expires_at is not None and expires_at < datetime.now(timezone.utc):
             raise ConsentError(f"consent {consent_id} has expired")
@@ -110,7 +147,11 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
 # is the authorization. execute_consent below never receives the approver id.
 
 def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
-    """Requester approves a pending item, then it executes."""
+    """Requester approves a pending item; it executes immediately.
+
+    Since §10 removed T3, approval is always the last key. There is no
+    waiting state.
+    """
     with user_session(approver_id) as conn:
         row = conn.execute(
             "update public.consent_queue set status='approved'"
@@ -178,31 +219,9 @@ def _exec_task_create(conn, team_id, requester_id, args) -> dict:
     return {"task_id": str(row[0])}
 
 
-def _precheck_post_group_message(conn, team_id, requester_id, args) -> None:
-    ok = conn.execute(
-        "select 1 from public.memberships where team_id=%s and user_id=%s"
-        " and status='active'",
-        (team_id, requester_id),
-    ).fetchone()
-    if ok is None:
-        raise ConsentError("requester is no longer an active team member")
-
-
-def _exec_post_group_message(conn, team_id, requester_id, args) -> dict:
-    # AI posts to the group as itself (not attributed to the requester)
-    row = conn.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, body)"
-        " values (%s,'group','ai',%s) returning id",
-        (team_id, args["body"]),
-    ).fetchone()
-    return {"message_id": str(row[0])}
-
-
 _PRECHECKS = {
     "task_create": _precheck_task_create,
-    "post_group_message": _precheck_post_group_message,
 }
 _EXECUTORS = {
     "task_create": _exec_task_create,
-    "post_group_message": _exec_post_group_message,
 }

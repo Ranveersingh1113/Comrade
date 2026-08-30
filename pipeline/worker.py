@@ -7,21 +7,36 @@ handler, team-scoped under team_session(PIPELINE, team_id) — that is where RLS
 enforces the data boundary.
 
 Handlers are registered by job_type and receive (team_id, payload).
+
+Run it: `uv run python -m pipeline.worker` — drains the queue, then sweeps
+chat->memory (ambient capture), then sleeps and repeats.
 """
+import logging
+import time
 from typing import Callable
 
 from shared.db import Role, connect
+
+logger = logging.getLogger(__name__)
 
 Handler = Callable[[str, dict], None]
 
 _HANDLERS: dict[str, Handler] = {}
 MAX_ATTEMPTS = 3
+LEASE_INTERVAL = "30 minutes"
+
+
+class PermanentJobError(ValueError):
+    """A job failure that cannot succeed by retrying the same payload."""
 
 # Atomic claim: pick the oldest pending job, skipping rows another worker holds.
 _CLAIM_SQL = (
     "update public.jobs set status='processing', attempts=attempts+1,"
-    " picked_at=now() where id = ("
-    "  select id from public.jobs where status='pending'"
+    f" picked_at=now(), lease_expires_at=now() + interval '{LEASE_INTERVAL}',"
+    " finished_at=null where id = ("
+    "  select id from public.jobs"
+    "  where (status='pending' or (status='processing' and lease_expires_at < now()))"
+    f"    and attempts < {MAX_ATTEMPTS}"
     "  order by created_at for update skip locked limit 1"
     ") returning id, team_id, job_type, payload, attempts"
 )
@@ -37,14 +52,30 @@ def _finish(job_id, status: str, error: str | None = None) -> None:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status=%s, last_error=%s,"
+            " lease_expires_at=null,"
             " finished_at = case when %s then now() else null end where id=%s",
             (status, error, terminal, job_id),
+        )
+
+
+def _fail_expired_leases() -> None:
+    """Terminally fail work abandoned after its final lease expires."""
+    with connect(Role.ADMIN) as conn:
+        conn.autocommit = True
+        conn.execute(
+            "update public.jobs set status='failed', finished_at=now(),"
+            " lease_expires_at=null,"
+            " last_error=coalesce(last_error, 'worker lease expired')"
+            " where status='processing' and lease_expires_at < now()"
+            " and attempts >= %s",
+            (MAX_ATTEMPTS,),
         )
 
 
 def run_once(handlers: dict[str, Handler] | None = None) -> bool:
     """Claim and process one pending job. Returns False if the queue was empty."""
     handlers = _HANDLERS if handlers is None else handlers
+    _fail_expired_leases()
     with connect(Role.ADMIN) as conn:
         conn.autocommit = True
         job = conn.execute(_CLAIM_SQL).fetchone()
@@ -58,7 +89,52 @@ def run_once(handlers: dict[str, Handler] | None = None) -> bool:
             raise ValueError(f"no handler registered for job_type: {job_type}")
         handler(str(team_id), payload or {})
         _finish(job_id, "done")
-    except Exception as exc:  # noqa: BLE001 - record any failure on the job
+    except PermanentJobError as exc:
+        _finish(job_id, "failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - record any transient failure on the job
         retry = attempts < MAX_ATTEMPTS
         _finish(job_id, "pending" if retry else "failed", error=str(exc))
     return True
+
+
+POLL_SECONDS = 5.0
+
+
+def tick() -> int:
+    """One worker iteration: drain the queue, then sweep chat->memory.
+
+    The sweep runs after the drain so a batch enqueued this tick is picked up
+    on the next — keeping each tick short and each job claim fair across
+    workers. Returns how many jobs were processed. Sweep failures are logged,
+    not fatal: a broken sweep must not stop document jobs from draining.
+    """
+    # Imported here: chat.py registers its handler via this module, so a
+    # module-level import would be circular.
+    from pipeline.chat import sweep_chat_compiles
+
+    processed = 0
+    while run_once():
+        processed += 1
+    try:
+        swept = sweep_chat_compiles()
+        if swept:
+            logger.info("chat sweep enqueued %d compile job(s)", len(swept))
+    except Exception:  # noqa: BLE001 - sweep is best-effort by design
+        logger.exception("chat sweep failed; queue drain unaffected")
+    return processed
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO)
+    # Handlers register at import time.
+    import pipeline.chat  # noqa: F401
+    import pipeline.compiler  # noqa: F401
+
+    logger.info("worker up: polling every %.0fs", POLL_SECONDS)
+    while True:
+        if tick() == 0:
+            time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    main()

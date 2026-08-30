@@ -1,31 +1,59 @@
 # Comrade
 
-An AI companion for student group projects. It sits in a shared team room as a silent
-member — reading chat, documents, deadlines, and GitHub activity — and helps the team
-coordinate by monitoring communication, surfacing accountability gaps, engaging with
-documents, and taking action (with consent for anything visible to others).
+An AI teammate for engineering teams that run without a manager. It sits in a shared
+team room as a silent member — reading chat, documents, deadlines, and repository
+activity — and helps the team coordinate by compiling what the team has decided into
+a cited wiki, surfacing accountability gaps, and taking action with a member's consent.
 
-This is a solo-dev pilot targeting small student teams (≤4 members).
+The pitch is not "saves you time". Execution already got cheaper; planning did not.
+At the volume agentic tooling now produces, nobody holds the shared picture any more.
+Comrade's territory is **coherence at speed**.
+
+The primary target is developer and engineering teams — connecting a repository is a
+core feature, not an integration. Any small self-organising team fits: startups,
+enterprise sub-teams, student project groups. Student teams are a pilot beachhead
+served by the free tier, not the ceiling.
+
+Two invariants shape the whole codebase:
+
+- **The agent never performs a group-visible action it chose itself.** It proposes; a
+  human approves; a separate database role executes. See `shared/consent.py`. Two
+  group-visible AI writes are not exceptions to this, because neither is the agent
+  acting on its own initiative: its reply when a member asks it something in the room,
+  and the memory compiler's diff card, which is a system notice.
+- **The model never supplies identity.** `team_id` and `requester_id` are bound
+  server-side into ADK session state and read from there by every tool — never
+  passed as LLM arguments.
 
 ## Stack
 
 - **Agent:** Google ADK (Python), single `LlmAgent` on Gemini 2.5 Flash (Pro for escalation)
-- **Backend:** Supabase (Postgres + pgvector + Realtime + Auth + Storage)
+- **Backend:** Supabase (Postgres + Realtime + Auth + Storage)
+- **Frontend:** React + TypeScript + Vite SPA; talks to Postgres directly under RLS,
+  and to the FastAPI service only where a key or role must stay server-side
 - **Tools:** ADK native function tools (call the DB under team-scoped worker roles); GitHub integration TBD
-- **Embeddings:** OpenAI `text-embedding-3-small` + pgvector
-- **Eval:** DeepEval (deterministic metrics only)
+- **Memory:** Gemini two-stage compiler with cited, versioned wiki facts; vector
+  retrieval is intentionally not part of the current design
+- **Eval:** deterministic tool-routing checks, with optional live-model smoke tests
+
+Access control is enforced by Postgres row-level security, not by application code.
+Every worker connects under one of four RLS-bound roles — `agent`, `executor`,
+`pipeline`, `admin` — and never as `service_role`.
 
 ## Repository layout
 
 | Path | Purpose |
 |------|---------|
-| `agent/` | Google ADK `LlmAgent` and its function tools |
-| `server/` | FastAPI runtime — `POST /agent/turn` runs one agent turn |
-| `pipeline/` | Document pipeline worker (PDF/.docx/WhatsApp ingestion) |
+| `agent/` | Google ADK `LlmAgent`, its four function tools, and the turn runtime |
+| `server/` | FastAPI service — agent turns, consent resolution, invites, document ingest |
+| `pipeline/` | Job worker, document parsers, and the two-stage memory compiler |
+| `shared/` | Config, RLS-bound DB sessions, consent mechanism, nudges, run logging |
+| `frontend/` | React + Vite SPA (screens, hooks, pure view-models, 4-layer test suite) |
 | `supabase/` | Supabase config + SQL migrations (`supabase/migrations/`) |
-| `shared/` | Shared config, models, and utilities |
-| `tests/` | pytest + DeepEval suites |
-| `comrade-canvas (3)/` | Planning & research docs (design source of truth) |
+| `evaluation/` | Tool-routing eval against a live model |
+| `scripts/` | Local role setup SQL + smoke scripts |
+| `tests/` | pytest unit, integration, and live-model smoke suites |
+| `docs/` | Architecture and research findings |
 
 ## Setup
 
@@ -36,16 +64,59 @@ uv sync                 # create the virtualenv and install dependencies
 cp .env.example .env    # then fill in real values (never commit .env)
 ```
 
-## Run the agent service
+The frontend has its own dependencies and environment:
 
 ```bash
-uv run uvicorn server.app:app --reload      # serves on http://127.0.0.1:8000
-
-curl -s http://127.0.0.1:8000/agent/turn \
-  -H 'content-type: application/json' \
-  -d '{"team_id":"<team-uuid>","requester_id":"<user-uuid>","text":"Give me a status summary."}'
+cd frontend && npm install
 ```
 
-Every turn is recorded to `public.agent_runs` (one row per turn, one step per tool
-call / result / text chunk) for observability. `team_id` / `requester_id` are
-bound server-side; sourcing them from the Supabase JWT is the next task.
+It needs `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and optionally
+`VITE_AGENT_API_URL` (defaults to `http://localhost:8000`). `lib/supabase.ts`
+throws at import if the first two are missing, so a misconfigured environment
+fails immediately rather than at the first query.
+
+For the database-backed test suite and workers, also start the local Supabase
+stack, apply migrations, and create the local worker login roles as described
+in [HANDOFF.md](HANDOFF.md#8-running-the-stack-locally).
+
+## Run it
+
+Three processes, each in its own terminal:
+
+```bash
+uv run uvicorn server.app:app --reload      # API on http://127.0.0.1:8000
+uv run python -m pipeline.worker            # job queue + ambient chat capture
+cd frontend && npm run dev                  # SPA on http://localhost:5173
+```
+
+The worker drains the job queue, then sweeps every team's group chat into memory
+once at least five new messages have accumulated past the last watermark. Without
+it, uploaded documents stay in `parsing` forever.
+
+### Calling the API directly
+
+Identity comes from a Supabase-issued JWT and nothing else — there is no way to
+act as another user by naming them in the body. `team_id` is still a body field,
+because a user belongs to many teams and it is a routing choice, but every
+endpoint re-checks membership through the caller's own RLS context.
+
+```bash
+curl -s http://127.0.0.1:8000/agent/turn \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"team_id":"<team-uuid>","text":"Give me a status summary.","thread_type":"group"}'
+```
+
+`POST /agent/turn/stream` runs the same turn as newline-delimited JSON, one object
+per line — NDJSON over `fetch` rather than SSE, because `EventSource` cannot send an
+Authorization header. Membership and per-team rate-limit checks both run before the
+response starts, so a non-member gets a real 403 and an over-budget team a real 429.
+
+Every turn is recorded to `public.agent_runs` — one row per turn, one step per tool
+call, tool result, and text chunk — for observability and crash recovery.
+
+## Architecture
+
+[docs/architecture.md](docs/architecture.md) traces every flow function by function:
+the agent turn, the consent lifecycle, document ingest, chat capture, and the
+frontend tree.

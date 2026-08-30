@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     comrade_agent_db_url: str       # agent: reads + proposes + private nudges
     comrade_executor_db_url: str    # executes approved consent actions only
     comrade_pipeline_db_url: str    # document parser + memory compiler
+    # PostgREST-style authenticator for user_session (SET ROLE authenticated).
+    # Empty -> falls back to the admin URL (dev only; production must set it).
+    comrade_authenticator_db_url: str = ""
 
     # Filled in as those features are built.
     gemini_api_key: str = ""
@@ -23,6 +26,19 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
     supabase_secret_key: str = ""
     github_pat: str = ""
+
+    # HTTP surface. The JWT secret verifies Supabase-issued user tokens; without
+    # it the API refuses to authenticate anyone rather than trusting the caller.
+    supabase_jwt_secret: str = ""
+    # Comma-separated browser origins allowed to call the API.
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # Per-team hourly cap on agent turns — the lid on LLM spend and the
+    # simplest abuse brake. 0 disables the cap entirely.
+    agent_turns_per_hour: int = 60
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()

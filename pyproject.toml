@@ -5,11 +5,15 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.137.1",
     "google-adk>=2.2.0",
+    "httpx>=0.28.1",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.1",
+    "pyjwt[crypto]>=2.10.1",
+    "python-multipart>=0.0.20",
     "pymupdf4llm>=1.27.2.3",
     "python-docx>=1.2.0",
     "uvicorn[standard]>=0.49.0",
+    "psycopg-pool>=3.3.1",
 ]
 
 [dependency-groups]
@@ -21,3 +25,7 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# `live` = talks to a paid/nondeterministic external service (Gemini).
+# Excluded by default; run explicitly with: uv run pytest -m live
+markers = ["live: hits external paid services (Gemini); run with -m live"]
+addopts = "-m 'not live'"

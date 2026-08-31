@@ -10,7 +10,7 @@ import {
 } from 'react-router-dom';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './state/AuthContext';
-import { TeamProvider } from './state/TeamContext';
+import { TeamProvider, useTeam } from './state/TeamContext';
 import { Sidebar } from './components/Sidebar';
 import { useIsNarrow } from './hooks/useIsNarrow';
 import { Login } from './screens/Login';
@@ -22,6 +22,7 @@ import { Wiki } from './screens/Wiki';
 import { Documents } from './screens/Documents';
 import { ConsentInbox } from './screens/ConsentInbox';
 import { Setup } from './screens/Setup';
+import { Team } from './screens/Team';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { session, loading } = useAuth();
@@ -47,18 +48,37 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
 function TeamShell() {
   const { teamId } = useParams<{ teamId: string }>();
+  if (!teamId) return <Navigate to="/teams" replace />;
+  return (
+    <TeamProvider teamId={teamId}>
+      <TeamShellInner />
+    </TeamProvider>
+  );
+}
+
+function TeamShellInner() {
   const location = useLocation();
   const narrow = useIsNarrow();
+  const { access } = useTeam();
   const [navOpen, setNavOpen] = useState(false);
 
   // Any navigation closes the drawer. Without this a member taps "Tasks" and
   // lands on a screen still covered by the menu they just used.
   useEffect(() => setNavOpen(false), [location.pathname]);
 
-  if (!teamId) return <Navigate to="/teams" replace />;
+  // A team you are not in renders as a complete shell full of nothing: no
+  // name, no roster, no messages, no error — indistinguishable from a quiet
+  // team. Two supported paths reach it now: leaving a team and then pressing
+  // Back, and a stale `comrade.teamId` pointing at a team that is gone.
+  // 'unknown' deliberately does NOT redirect; a failed request is not a
+  // refusal, and the screens below have their own error states for it.
+  if (access === 'denied') {
+    localStorage.removeItem('comrade.teamId');
+    return <Navigate to="/teams" replace />;
+  }
 
   return (
-    <TeamProvider teamId={teamId}>
+    <>
       <div style={{ display: 'flex', height: '100dvh', overflow: 'hidden' }}>
         {/* Wide: the sidebar is simply there. Narrow: it is off-canvas, so it
             must not occupy layout space at all — `display: none` rather than a
@@ -124,7 +144,7 @@ function TeamShell() {
           </ErrorBoundary>
         </div>
       </div>
-    </TeamProvider>
+    </>
   );
 }
 
@@ -163,6 +183,7 @@ export default function App() {
             <Route path="docs" element={<Documents />} />
             <Route path="inbox" element={<ConsentInbox />} />
             <Route path="setup" element={<Setup />} />
+            <Route path="team" element={<Team />} />
           </Route>
           <Route
             path="/"

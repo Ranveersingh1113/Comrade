@@ -197,3 +197,50 @@ export async function streamTurn(
   }
   if (buffer.trim()) onFrame(JSON.parse(buffer) as StreamFrame);
 }
+
+
+// ---------------------------------------------------------------------------
+// Team lifecycle (D4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask a teammate to leave. This does NOT remove them.
+ *
+ * It files a consent card in THEIR inbox, which only they can see and only
+ * they can approve — §23.1's "nobody configures another member's
+ * participation", implemented with the mechanism already here rather than a
+ * remove button with a confirmation dialog on it.
+ */
+export async function askToLeave(
+  teamId: string,
+  memberId: string,
+  reason?: string,
+): Promise<{ consent_id: string; status: string }> {
+  return request(`/teams/${teamId}/members/${memberId}/departure-request`, {
+    reason: reason?.trim() || null,
+  });
+}
+
+/**
+ * Download the team's history as JSON — everything THIS member can read.
+ *
+ * Not routed through `request`, which is POST-and-JSON: this is a GET whose
+ * body is a file. Do it before leaving; afterwards RLS returns nothing and
+ * there is nothing to export.
+ */
+export async function downloadTeamExport(teamId: string): Promise<void> {
+  const res = await fetch(`${BASE}/teams/${teamId}/export`, {
+    headers: { Authorization: await authHeader() },
+  });
+  if (!res.ok) throw new AgentApiError(res.status, res.statusText);
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `comrade-${teamId}.json`;
+  a.click();
+  // Revoked on the next tick, not in a `finally`. The download starts
+  // asynchronously after click() returns, so revoking immediately races it and
+  // can cancel a save that appeared to work. The blob is a few megabytes of
+  // team history; leaving it pinned for one tick is the cheaper mistake.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}

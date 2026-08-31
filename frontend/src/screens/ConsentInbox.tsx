@@ -43,7 +43,11 @@ export function ConsentInbox() {
       <header className="screen-header">
         <div className="display">Consent inbox</div>
         <div className="sub">
-          Actions Comrade proposed on your request — nothing runs without your key
+          {/* Was "Actions Comrade proposed on your request". Since D4 that is
+              not true of every card: a departure request is put here by a
+              TEAMMATE, not by Comrade and not on your request. What holds for
+              all of them is the second half, which was always the point. */}
+          Nothing here runs without your key
         </div>
       </header>
       <div style={{ maxWidth: 720, margin: '0 auto', padding: '24px 32px 44px' }}>

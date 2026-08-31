@@ -21,7 +21,16 @@ export function TeamGate() {
   const uid = session?.user.id ?? '';
 
   const load = async () => {
-    const { data: ms } = await supabase.from('memberships').select('*').eq('user_id', uid);
+    // Not `.eq('status','active')`: an INVITED row is exactly what this
+    // screen exists to show. But a row you LEFT must not appear at all —
+    // status !== 'active' renders the ACCEPT INVITE branch below, so a team
+    // you walked out of would offer to let you back in, and the update would
+    // be refused by the transition guard.
+    const { data: ms } = await supabase
+      .from('memberships')
+      .select('*')
+      .eq('user_id', uid)
+      .in('status', ['invited', 'active']);
     const memberships = (ms as Membership[] | null) ?? [];
     if (memberships.length === 0) {
       setOptions([]);

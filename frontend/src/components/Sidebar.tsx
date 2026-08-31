@@ -36,13 +36,19 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const navigate = useNavigate();
   const teamId = team?.id ?? '';
 
-  const [pendingCount, setPendingCount] = useState(0);
+  // null = we do not know yet. The count is a HEAD request that is routinely
+  // aborted (a re-render cancels it), and `count ?? 0` turned every one of
+  // those into a confident "consent queue clear" — the D2 defect, in the one
+  // place it costs the most: a card nobody knows is waiting. Since D4 that
+  // card may be a teammate asking you to leave.
+  const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [lastCompile, setLastCompile] = useState<MemoryCompilation | null>(null);
   const [nextMilestone, setNextMilestone] = useState<Milestone | null>(null);
 
   const loadSignals = useCallback(async () => {
     if (!teamId) return;
-    const [{ count }, { data: compiles }, { data: mss }] = await Promise.all([
+    const [{ count, error: countErr }, { data: compiles }, { data: mss }] =
+      await Promise.all([
       supabase
         .from('consent_queue')
         .select('id', { count: 'exact', head: true })
@@ -68,7 +74,9 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         .order('due_at', { ascending: true })
         .limit(1),
     ]);
-    setPendingCount(count ?? 0);
+    // Keep the last known figure rather than overwriting it with a zero we
+    // did not receive.
+    if (!countErr) setPendingCount(count ?? 0);
     setLastCompile(((compiles as MemoryCompilation[] | null) ?? [])[0] ?? null);
     setNextMilestone(((mss as Milestone[] | null) ?? [])[0] ?? null);
   }, [teamId]);
@@ -174,7 +182,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               animation: 'tickerPulse 3.4s ease-in-out infinite',
             }}
           >
-            {pendingCount > 0 ? `watching · ${pendingCount} awaiting key` : 'watching · all clear'}
+            {pendingCount === null
+              ? 'watching'
+              : pendingCount > 0
+                ? `watching · ${pendingCount} awaiting key`
+                : 'watching · all clear'}
           </span>
         </span>
       </NavLink>
@@ -193,7 +205,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           >
             <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>{item.icon}</span>
             {item.label}
-            {item.to === 'inbox' && pendingCount > 0 && (
+            {item.to === 'inbox' && pendingCount !== null && pendingCount > 0 && (
               <span
                 style={{
                   marginLeft: 'auto',
@@ -300,9 +312,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           )}
           <div>
             <span style={{ color: 'var(--lavender)' }}>✳</span>{' '}
-            {pendingCount === 0
-              ? 'consent queue clear'
-              : `${pendingCount} consent${pendingCount > 1 ? 's' : ''} awaiting key`}
+            {pendingCount === null
+              ? 'checking the consent queue'
+              : pendingCount === 0
+                ? 'consent queue clear'
+                : `${pendingCount} consent${pendingCount > 1 ? 's' : ''} awaiting key`}
           </div>
           {nextMilestone?.due_at && (
             <div>
@@ -322,6 +336,19 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           })}
         >
           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>⚙</span> Project setup
+        </NavLink>
+        {/* Sits with Sign out rather than in the main nav: leaving a team is
+            the same class of action, and neither belongs beside Tasks. */}
+        <NavLink
+          to="team"
+          style={({ isActive }) => ({
+            ...navBase,
+            fontWeight: isActive ? 600 : 400,
+            color: isActive ? 'var(--paper)' : '#A6A1B3',
+            background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+          })}
+        >
+          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>◇</span> Membership
         </NavLink>
         <button
           onClick={() => signOut()}

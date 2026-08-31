@@ -1,0 +1,36 @@
+-- Corrects 20260831140000, which was right about one view and wrong about the
+-- other. The distinction is the point.
+--
+-- A view over RLS-protected tables is safe if EITHER:
+--   (a) it runs as its caller (security_invoker = on), so the underlying
+--       policies apply; OR
+--   (b) it carries its own scoping predicate, deliberately, because it needs
+--       to see rows the caller cannot.
+--
+-- contribution_v was NEITHER. It has no WHERE clause of its own and ran as its
+-- owner, so it returned every team's rows to any authenticated caller. That is
+-- the leak 20260831140000 closed, and security_invoker = on is the right fix:
+-- the view is a plain projection and has no reason to see more than its
+-- caller.
+--
+-- document_opens_summary is (b), and I mistook it for the same bug.
+--
+--     WHERE is_team_member(d.team_id) AND d.deleted_at IS NULL
+--
+-- It runs as its owner ON PURPOSE. document_opens is private per member
+-- (`user_id = auth.uid()`), and the whole point of this view is to answer
+-- "opened by 3 of 4" WITHOUT naming who — an aggregate over rows the caller
+-- must not read individually. Forcing security_invoker = on collapsed that
+-- count to the caller's own opens, which is not a smaller number, it is a
+-- different and useless one.
+--
+-- tests/test_consent_tiers.py::test_opens_summary_counts_without_naming
+-- caught this immediately: it asserts A1 sees a count of 1 for a document only
+-- A2 opened. An existing test defending a deliberate design against a blunt
+-- fix is exactly what it is for.
+
+alter view public.document_opens_summary set (security_invoker = off);
+
+-- The anon revoke from 20260831140000 stands for both views and is the part
+-- that was unambiguously right: on a view there is no RLS behind the grant, so
+-- for a security-definer view like this one the grant IS the entire boundary.

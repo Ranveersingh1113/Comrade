@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { messageTime } from '../lib/format';
 import { pendingQueueRows } from '../lib/consentModel';
 import type { ConsentItem } from '../lib/types';
+import { isConfirmedEmpty } from '../lib/listState';
 import { useTeam } from '../state/TeamContext';
 import { useTeamRealtime } from '../hooks/useRealtime';
 import { ConsentCard } from '../components/ConsentCard';
@@ -75,7 +76,7 @@ export function ConsentInbox() {
         <div className="micro-label" style={{ marginBottom: 12 }}>
           Pending — {pending.length}
         </div>
-        {pending.length === 0 && (
+        {isConfirmedEmpty(error, items === null, pending.length) && (
           <div
             className="card"
             style={{ padding: '15px 18px', fontSize: 13, color: 'var(--text-soft)', marginBottom: 24 }}

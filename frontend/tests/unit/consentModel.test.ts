@@ -1,5 +1,7 @@
-import { describe, expect, test } from 'vitest';
-import { argsPretty, batchProgressLabel, consentPhase, pendingQueueRows } from '../../src/lib/consentModel';
+import { describe, expect, it, test } from 'vitest';
+import {
+  argsPretty, batchProgressLabel, consentPhase, isActionable, isExpired, pendingQueueRows,
+} from '../../src/lib/consentModel';
 import type { ConsentItem } from '../../src/lib/types';
 
 const item = (over: Partial<ConsentItem>): ConsentItem => ({
@@ -121,5 +123,65 @@ describe('argsPretty', () => {
   });
   test('renders literal values (hard design rule: show EXACTLY what will run)', () => {
     expect(argsPretty({ body: 'post this' })).toContain('"body": "post this"');
+  });
+});
+
+describe('expiry', () => {
+  const HOUR = 60 * 60 * 1000;
+  const now = Date.parse('2026-08-31T12:00:00Z');
+  const item = (over: Partial<ConsentItem> = {}): ConsentItem => ({
+    id: 'c1',
+    team_id: 't1',
+    requesting_member_id: 'me',
+    tool_name: 'task_create',
+    tool_args: {},
+    source_snippet: null,
+    action_hash: 'abc',
+    status: 'pending',
+    reversible: true,
+    tier: 'T1',
+    expires_at: new Date(now + 24 * HOUR).toISOString(),
+    created_at: new Date(now - HOUR).toISOString(),
+    resolved_at: null,
+    batch_id: null,
+    ...over,
+  });
+
+  it('a live item inside its backstop is actionable', () => {
+    expect(isExpired(item(), now)).toBe(false);
+    expect(isActionable(item(), now)).toBe(true);
+  });
+
+  it('an item past its backstop is not actionable', () => {
+    // The bug: status stays 'pending' forever because nothing sweeps the
+    // queue, so without this the card offered an APPROVE button that
+    // execute_consent refuses with a 409.
+    const dead = item({ expires_at: new Date(now - HOUR).toISOString() });
+    expect(isExpired(dead, now)).toBe(true);
+    expect(isActionable(dead, now)).toBe(false);
+  });
+
+  it('treats the exact expiry instant as expired', () => {
+    // execute_consent uses `expires_at < now()`; a card claiming one more
+    // second of life than the executor allows is the wrong way to be wrong.
+    const edge = item({ expires_at: new Date(now).toISOString() });
+    expect(isExpired(edge, now)).toBe(true);
+  });
+
+  it('an item with no backstop never expires', () => {
+    expect(isExpired(item({ expires_at: null }), now)).toBe(false);
+  });
+
+  it('reports an expired item as its own phase, not as pending', () => {
+    const dead = item({ expires_at: new Date(now - HOUR).toISOString() });
+    expect(consentPhase(dead, 'me', false, now)).toBe('expired');
+  });
+
+  it('an already-resolved item keeps its resolved phase', () => {
+    const done = item({
+      status: 'executed',
+      expires_at: new Date(now - HOUR).toISOString(),
+    });
+    expect(consentPhase(done, 'me', false, now)).toBe('executed');
   });
 });

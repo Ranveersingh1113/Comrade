@@ -45,7 +45,8 @@ function makeQuery(table: string) {
   const chain = () => q;
   Object.assign(q, {
     select: chain, eq: chain, neq: chain, in: chain, is: chain, not: chain,
-    gte: chain, lte: chain, order: chain, limit: chain,
+    gte: chain, lte: chain, gt: chain, lt: chain, or: chain,
+    order: chain, limit: chain,
     single: () => Promise.resolve({ data: rows()[0] ?? null, error: null }),
     maybeSingle: () => Promise.resolve({ data: rows()[0] ?? null, error: null }),
     insert: (values: unknown) => {

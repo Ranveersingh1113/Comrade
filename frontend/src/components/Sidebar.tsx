@@ -47,7 +47,12 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         .from('consent_queue')
         .select('id', { count: 'exact', head: true })
         .eq('team_id', teamId)
-        .eq('status', 'pending'),
+        .eq('status', 'pending')
+        // Past its 7-day backstop it cannot be approved, so counting it as
+        // "awaiting your key" sends a member to an inbox that has nothing
+        // they can act on. Filter server-side: the count is a head request
+        // and never fetches the rows to filter locally.
+        .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`),
       supabase
         .from('memory_compilations')
         .select('*')

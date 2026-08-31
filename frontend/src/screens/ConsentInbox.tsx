@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { messageTime } from '../lib/format';
-import { pendingQueueRows } from '../lib/consentModel';
+import { isActionable, pendingQueueRows } from '../lib/consentModel';
 import type { ConsentItem } from '../lib/types';
 import { isConfirmedEmpty } from '../lib/listState';
 import { useTeam } from '../state/TeamContext';
@@ -30,8 +30,11 @@ export function ConsentInbox() {
   }, [load]);
   useTeamRealtime('consent_queue', teamId, load);
 
-  // Every item needs exactly one key — the requester's (findings §10).
-  const isLive = (i: ConsentItem) => i.status === 'pending';
+  // Every item needs exactly one key — the requester's (findings §10) — and
+  // it has to still be inside its 7-day backstop. An expired item kept
+  // status='pending', so it sat here offering an APPROVE button that
+  // execute_consent then refuses.
+  const isLive = (i: ConsentItem) => isActionable(i);
   const pending = items.filter(isLive);
   const history = items.filter((i) => !isLive(i));
 

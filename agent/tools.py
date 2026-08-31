@@ -12,7 +12,7 @@ from typing import Literal
 from google.adk.tools import ToolContext
 
 from pipeline.parsers import spotlight
-from pipeline.wiki import all_active_pages
+from pipeline.wiki import ORPHAN_TITLE, all_active_pages
 from shared.consent import AGENT_PROPOSABLE, propose_action, propose_batch
 from shared.db import user_session
 from shared.nudge import send_nudge
@@ -206,6 +206,87 @@ def search_messages(
             "truncated": len(body) > MESSAGE_BODY_CHARS,
         }
         for message_id, body, thread_type, created_at, kind, name in rows
+    ]
+
+
+# Ranked full-text search over one team's ACTIVE wiki facts.
+#
+# `to_tsvector('english', v.fact)` is repeated verbatim from
+# idx_memory_versions_fts, and `v.is_active` repeats its partial predicate; any
+# other spelling and the planner cannot use the index. The same RLS caveat as
+# _SEARCH_SQL applies — `@@` is not LEAKPROOF, so under `authenticated` the
+# index is not reachable and idx_memory_versions_team bounds the scan instead.
+#
+# The joins are what make a hit usable rather than a bare string: the page
+# title so the agent can open the rest of it, valid_from because §20.3.1
+# measured a 39-point temporal gap on exactly this, and the first citation so
+# the fact arrives with its provenance (§20.4's third advantage).
+_MEMORY_SEARCH_SQL = (
+    "select v.fact, v.valid_from, p.title,"
+    "       (select c.source_kind from public.memory_citations c"
+    "         where c.version_id = v.id order by c.created_at limit 1)"
+    " from public.memory_versions v"
+    " join public.memory_entries e on e.id = v.entry_id"
+    " left join public.memory_pages p on p.id = e.page_id"
+    " where v.team_id = %(team_id)s and v.is_active and not e.archived"
+    " and to_tsvector('english', v.fact) @@ plainto_tsquery('english', %(q)s)"
+    " order by ts_rank_cd(to_tsvector('english', v.fact),"
+    " plainto_tsquery('english', %(q)s)) desc, v.valid_from desc"
+    " limit %(limit)s"
+)
+
+MEMORY_SEARCH_LIMIT_DEFAULT = 8
+MEMORY_SEARCH_LIMIT_MAX = 25
+
+
+def search_memory(
+    team_id: str,
+    requester_id: str,
+    query: str,
+    limit: int = MEMORY_SEARCH_LIMIT_DEFAULT,
+) -> list[dict]:
+    """Ranked matches from this team's wiki, read as the requesting member.
+
+    Beside the always-in-prompt page index, not instead of it (§20.4,
+    corrected): the index is complete and page bodies load on demand, and the
+    failure this covers is the narrow one — "the agent opened one page when the
+    answer needed two."
+
+    Two exclusions do the real work. `is_active` keeps SUPERSEDED facts out:
+    memory_versions is bi-temporal, so a revised fact keeps its old row, and
+    returning one would let the agent quote a value the team explicitly
+    replaced — with a date and a citation attached, which reads as more
+    authoritative than a guess rather than less. `not e.archived` keeps search
+    agreeing with the page view, so a fact cannot be absent from the wiki and
+    present here.
+
+    Read as the member, so au_memory_versions_select is the gate. The explicit
+    team_id is not redundant: `authenticated` has no current_team(), and a
+    member of two teams would otherwise search both at once with no way to tell
+    which wiki an answer came from.
+    """
+    q = query.strip()
+    if not q:
+        return []
+    with user_session(requester_id) as conn:
+        rows = conn.execute(
+            _MEMORY_SEARCH_SQL,
+            {
+                "team_id": team_id,
+                "q": q,
+                "limit": max(1, min(limit, MEMORY_SEARCH_LIMIT_MAX)),
+            },
+        ).fetchall()
+    return [
+        {
+            "fact": fact,
+            "valid_from": valid_from.isoformat() if valid_from else None,
+            # Orphan facts have no page; naming the bucket keeps the shape
+            # uniform so the agent never has to branch on null.
+            "page": title or ORPHAN_TITLE,
+            "source_kind": source_kind,
+        }
+        for fact, valid_from, title, source_kind in rows
     ]
 
 
@@ -489,6 +570,32 @@ def memory_read_page(title: str, tool_context: ToolContext) -> dict:
     """
     return read_memory_page(
         tool_context.state["team_id"], tool_context.state["requester_id"], title
+    )
+
+
+def memory_search(query: str, tool_context: ToolContext) -> list[dict]:
+    """Search the team wiki for facts matching some words.
+
+    Your instructions already list every page by title and description — use
+    that index and `memory_read_page` when you know which page an answer lives
+    on. Use this instead when you do NOT: when the answer might be spread
+    across several pages, when no title obviously covers it, or when a
+    read_page came back without what you needed.
+
+    Each hit gives the fact, the page it is on, the date it became true and
+    where it came from. Quote the date — a fact from May and one from this
+    morning are not equally reliable. Superseded facts are never returned, so
+    what you get back is what the team currently believes. An empty list means
+    the wiki does not record it; say that rather than guessing, and consider
+    that the wording may differ from yours — this matches words, not meanings.
+
+    Args:
+        query: content words to look for, e.g. "deployment checklist" or
+            "who owns the API". Not a question — "when is the demo" searches
+            for the words "when", "demo".
+    """
+    return search_memory(
+        tool_context.state["team_id"], tool_context.state["requester_id"], query
     )
 
 

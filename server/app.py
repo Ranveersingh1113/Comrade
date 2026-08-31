@@ -25,6 +25,7 @@ from starlette.concurrency import run_in_threadpool
 
 from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
+from pipeline.chat import enqueue_remember
 from pipeline.github import enqueue_github_event, resolve_team_for_repo
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
@@ -441,6 +442,41 @@ def member_departure_request(
         reversible=False,
         tier="T1",
     )
+
+
+@app.post("/teams/{team_id}/messages/{message_id}/remember")
+def remember_message(team_id: str, message_id: str, user_id: CurrentUserId) -> dict:
+    """Tell Comrade to remember something that was said (§20.7.1).
+
+    Every fact otherwise arrives through automatic extraction, and a member who
+    watches the compiler miss something important has no recourse. This is that
+    recourse — and the only available mitigation for extractor starvation
+    (§20.3.2), since stage 1 is otherwise the sole path from source to memory.
+
+    It does not write a fact. Members cannot write memory_* at all (§6.0), and
+    should not: a direct write would be an unspotlighted path straight into
+    agent context. It queues a compile of this one message, which then earns a
+    citation, a diff card and a revert like anything else.
+
+    The message must be a live GROUP message in this team. §6.0's boundary is
+    that private threads never reach memory, and a member must not be able to
+    route their own private thread into the shared wiki by tapping a button —
+    that is the invariant the whole memory design rests on.
+    """
+    require_membership(user_id, team_id)
+    with user_session(user_id) as conn:
+        row = conn.execute(
+            "select 1 from public.messages where id=%s and team_id=%s"
+            " and thread_type='group' and deleted_scope is null",
+            (message_id, team_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "no such message in this team's room — private and deleted"
+            " messages cannot be remembered",
+        )
+    return {"job_id": enqueue_remember(team_id, message_id)}
 
 
 # ---------- observations ----------

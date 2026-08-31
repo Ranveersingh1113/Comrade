@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { streamTurn, agentErrorText, suppressObservation } from '../lib/agentApi';
+import {
+  streamTurn, agentErrorText, rememberMessage, suppressObservation,
+} from '../lib/agentApi';
 import { activityLabel } from '../lib/toolActivity';
 import { useIsNarrow } from '../hooks/useIsNarrow';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
@@ -28,6 +30,7 @@ export function GroupRoom() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [step, setStep] = useState('');
   const [agentNote, setAgentNote] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -67,6 +70,7 @@ export function GroupRoom() {
     if (!text || !teamId) return;
     setDraft('');
     setSendError(null);
+    setNote(null);
     setAgentNote(null);
     const mentionsAi = /@comrade/i.test(text);
     if (mentionsAi) {
@@ -143,6 +147,21 @@ export function GroupRoom() {
       setSendError(agentErrorText(e));
     }
     await refresh();
+  };
+
+  const remember = async (m: Message) => {
+    // The compiler is the only writer of memory (§6.0), so this queues a
+    // compile of that one message rather than inserting a fact. The member
+    // gets told it was queued, not that it was remembered — the compiler
+    // still decides whether there is a durable fact in there, and saying
+    // otherwise would promise something this cannot deliver.
+    if (!team) return;
+    try {
+      await rememberMessage(team.id, m.id);
+      setNote('Queued — Comrade will fold that into the wiki and show the diff.');
+    } catch (e) {
+      setSendError(agentErrorText(e));
+    }
   };
 
   const nextMilestone = milestones.find((m) => m.due_at && new Date(m.due_at) > new Date());
@@ -240,6 +259,7 @@ export function GroupRoom() {
                 compilation={compilationsByMessage.get(m.id) ?? null}
                 onDelete={() => void deleteForEveryone(m)}
                 onSuppress={() => void suppressObs(m)}
+                onRemember={() => void remember(m)}
               />
             ))}
             {aiTyping && (
@@ -327,6 +347,12 @@ export function GroupRoom() {
                 {sendError}
               </div>
             )}
+            {/* Confirmations, not errors — muted, and cleared by the next send. */}
+            {note && (
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+                {note}
+              </div>
+            )}
             <div className="composer">
               <input
                 value={draft}
@@ -361,6 +387,7 @@ function MessageRow({
   compilation,
   onDelete,
   onSuppress,
+  onRemember,
 }: {
   m: Message;
   senderName: string;
@@ -368,6 +395,7 @@ function MessageRow({
   compilation: MemoryCompilation | null;
   onDelete: () => void;
   onSuppress: () => void;
+  onRemember: () => void;
 }) {
   const cls = classifyMessage(
     m,
@@ -461,6 +489,28 @@ function MessageRow({
               }}
             >
               ✕ remove
+            </button>
+          )}
+          {/* Any member may mark any human message as worth keeping
+              (findings §20.7.1). Not restricted to your own: the point is that
+              a HUMAN judged it durable, and noticing that a teammate said
+              something important is the same signal as saying it yourself.
+              AI messages are excluded — the agent's own output is not a
+              source, and compiling it would let memory cite itself. */}
+          {!isAI && hover && (
+            <button
+              onClick={onRemember}
+              className="mono"
+              title="Queue this for the wiki — Comrade compiles it, cites it, and you can revert it"
+              style={{
+                border: 'none',
+                background: 'transparent',
+                color: 'var(--faint)',
+                fontSize: 10,
+                cursor: 'pointer',
+              }}
+            >
+              ✦ remember this
             </button>
           )}
           {/* Proactive AI observations get a one-tap standing objection (any

@@ -167,7 +167,9 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
     return jobs
 
 
-def compile_messages(team_id: str, messages: list[dict], through) -> dict:
+def compile_messages(
+    team_id: str, messages: list[dict], through, trigger: str = "scheduled"
+) -> dict:
     """Two-stage compile of a chat batch: extract (chat prompt, per-line
     source_index) -> consolidate against the wiki -> apply with per-message
     citations. Always writes the compilation row, so the watermark advances
@@ -196,17 +198,63 @@ def compile_messages(team_id: str, messages: list[dict], through) -> dict:
     with team_session(Role.PIPELINE, team_id) as conn:
         return apply_compilation(
             conn, team_id, candidates, decisions, sources,
-            trigger="scheduled", chat_through=through,
+            trigger=trigger, chat_through=through,
         )
 
 
 def handle_chat_compile_job(team_id: str, payload: dict) -> None:
-    """Worker handler for 'compile_memory' jobs."""
+    """Worker handler for 'compile_memory' jobs.
+
+    `trigger` distinguishes the automatic sweep from a member asking for
+    something to be remembered (§20.7.1). It is not bookkeeping: a fact a human
+    explicitly marked is the highest-signal fact in the system, and a
+    compilation indistinguishable from the sweep throws that away.
+    """
     with team_session(Role.PIPELINE, team_id) as conn:
         messages = fetch_chat_messages_by_id(
             conn, team_id, payload.get("message_ids", [])
         )
-    compile_messages(team_id, messages, payload.get("through"))
+    compile_messages(
+        team_id, messages, payload.get("through"),
+        trigger=payload.get("trigger", "scheduled"),
+    )
 
 
 register("compile_memory", handle_chat_compile_job)
+
+
+def enqueue_remember(team_id: str, message_id: str) -> str:
+    """Queue a compile of ONE message, now, because a member asked (§20.7.1).
+
+    Deliberately the same job type and the same handler as the sweep. Members
+    cannot write memory_* — that is comrade_pipeline's alone (§6.0) — and
+    routing through the compiler is what keeps the datamarking guarantee: the
+    text is spotlighted before it reaches a model, exactly as it would be if
+    the sweep had picked it up.
+
+    `through` is None ON PURPOSE. A chat compile normally stamps chat_through,
+    and chat_watermark takes the max across done compilations — so stamping
+    this one would advance the sweep past every message it has not read yet.
+    Remembering one line would silently discard the conversation around it.
+    """
+    payload = {"message_ids": [str(message_id)], "through": None,
+               "trigger": "on_demand"}
+    dedupe_key = f"remember:{message_id}"
+    with team_session(Role.PIPELINE, team_id) as conn:
+        row = conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
+            " values (%s,'compile_memory',%s,%s)"
+            " on conflict (team_id, job_type, dedupe_key)"
+            " where dedupe_key is not null and status in ('pending','processing')"
+            " do nothing returning id",
+            (team_id, Json(payload), dedupe_key),
+        ).fetchone()
+        if row is None:
+            # Already queued — a double tap, or two members marking the same
+            # line. One request, one job.
+            row = conn.execute(
+                "select id from public.jobs where team_id=%s"
+                " and job_type='compile_memory' and dedupe_key=%s",
+                (team_id, dedupe_key),
+            ).fetchone()
+    return str(row[0])

@@ -260,3 +260,19 @@ export async function downloadTeamExport(teamId: string): Promise<void> {
   // team history; leaving it pinned for one tick is the cheaper mistake.
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+
+
+/**
+ * Ask Comrade to remember something that was said (findings §20.7.1).
+ *
+ * Does NOT write a fact. Members cannot write memory at all — it queues a
+ * compile of this one message, which then earns a citation, a diff card and a
+ * one-tap revert like every other fact. Group messages only: private threads
+ * never reach memory.
+ */
+export async function rememberMessage(
+  teamId: string,
+  messageId: string,
+): Promise<{ job_id: string }> {
+  return request(`/teams/${teamId}/messages/${messageId}/remember`);
+}

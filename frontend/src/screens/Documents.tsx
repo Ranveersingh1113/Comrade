@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 import { AgentApiError, ingestDocument } from '../lib/agentApi';
 import { messageTime } from '../lib/format';
 import type { DocumentKind, DocumentOpen, DocumentRow } from '../lib/types';
+import { isConfirmedEmpty } from '../lib/listState';
 import { useTeam } from '../state/TeamContext';
 
 const STORAGE_BUCKET = 'documents';
@@ -182,7 +183,7 @@ export function Documents() {
           )}
 
           <div className="card" style={{ overflow: 'hidden' }}>
-            {docs.length === 0 && (
+            {isConfirmedEmpty(error, docs === null, docs.length) && (
               <div style={{ padding: '18px 19px', fontSize: 13, color: 'var(--faint)' }}>
                 Nothing shared yet — upload a brief, proposal, or WhatsApp export.
               </div>

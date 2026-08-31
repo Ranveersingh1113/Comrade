@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { daysUntil, firstNameOf, shortDate } from '../lib/format';
 import type { ContributionRow, Milestone } from '../lib/types';
+import { isConfirmedEmpty } from '../lib/listState';
 import { useTeam } from '../state/TeamContext';
 import { taskCell, taskMark, taskPill, useTasks } from '../hooks/useTasks';
 import { taskAffordance } from '../lib/taskFlow';
@@ -9,7 +10,7 @@ import { Avatar } from '../components/Avatar';
 
 export function Tasks() {
   const { team, roster, myUserId } = useTeam();
-  const { tasks, error, advance, create } = useTasks();
+  const { tasks, error, loading, advance, create } = useTasks();
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [contrib, setContrib] = useState<Map<string, ContributionRow>>(new Map());
   const [newTitle, setNewTitle] = useState('');
@@ -160,7 +161,7 @@ export function Tasks() {
                     paddingLeft: 49,
                   }}
                 >
-                  {mine.length === 0 && (
+                  {isConfirmedEmpty(error, loading, mine.length) && (
                     <div style={{ fontSize: 12, color: 'var(--faint)', fontStyle: 'italic' }}>
                       No tasks yet.
                     </div>

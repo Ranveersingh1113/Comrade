@@ -11,6 +11,7 @@ import type {
 } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import {
+  factProvenance,
   projectWiki,
   type WikiFact,
   type WikiPage as WikiPageView,
@@ -142,6 +143,27 @@ export function Wiki() {
                     </span>
                     <span style={{ flex: 1, fontSize: 13, lineHeight: 1.5, color: 'var(--text-body)' }}>
                       {f.active.fact}
+                      {/* When it became true, and where it came from. The
+                          model has had this since findings §20.3.1; the
+                          member reading the same wiki had not, so a fact
+                          compiled today and one compiled in May looked
+                          identical to the person deciding whether to act. */}
+                      {factProvenance(f) && (
+                        <span
+                          style={{
+                            marginLeft: 8,
+                            fontSize: 11,
+                            fontStyle: 'italic',
+                            color: 'var(--muted)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {/* Leading space so a screen reader does not read
+                              "Fridayas of Aug 31" as one word — the margin is
+                              visual only. */}
+                          {' '}{factProvenance(f)}
+                        </span>
+                      )}
                       {f.citations.map((c) => (
                         <Link
                           key={c.id}

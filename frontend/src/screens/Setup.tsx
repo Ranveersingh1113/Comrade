@@ -197,8 +197,9 @@ export function Setup() {
                 paddingLeft: 35,
               }}
             >
-              Comrade reads commits and PRs to keep contribution tracking honest — it never writes
-              to the repo. (GitHub ingestion isn't wired in the backend yet.)
+              Comrade reads merged PRs, reviews and issues to keep the wiki and contribution
+              tracking honest — it never writes to the repo, and it only compiles work a human
+              verified. (Ingestion is built; connecting a repo from here is not.)
             </div>
           </div>
 

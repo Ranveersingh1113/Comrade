@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import {
   BrowserRouter,
   Navigate,
@@ -11,6 +12,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './state/AuthContext';
 import { TeamProvider } from './state/TeamContext';
 import { Sidebar } from './components/Sidebar';
+import { useIsNarrow } from './hooks/useIsNarrow';
 import { Login } from './screens/Login';
 import { TeamGate } from './screens/TeamGate';
 import { GroupRoom } from './screens/GroupRoom';
@@ -46,14 +48,81 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 function TeamShell() {
   const { teamId } = useParams<{ teamId: string }>();
   const location = useLocation();
+  const narrow = useIsNarrow();
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Any navigation closes the drawer. Without this a member taps "Tasks" and
+  // lands on a screen still covered by the menu they just used.
+  useEffect(() => setNavOpen(false), [location.pathname]);
+
   if (!teamId) return <Navigate to="/teams" replace />;
+
   return (
     <TeamProvider teamId={teamId}>
-      <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
-        <Sidebar />
-        <ErrorBoundary key={location.pathname}>
-          <Outlet />
-        </ErrorBoundary>
+      <div style={{ display: 'flex', height: '100dvh', overflow: 'hidden' }}>
+        {/* Wide: the sidebar is simply there. Narrow: it is off-canvas, so it
+            must not occupy layout space at all — `display: none` rather than a
+            transform, because a translated 250px column still forces the
+            document wider than the viewport and brings back the horizontal
+            scroll this whole change exists to remove. */}
+        {(!narrow || navOpen) && (
+          <div
+            style={
+              narrow
+                ? {
+                    position: 'fixed',
+                    inset: 0,
+                    zIndex: 40,
+                    display: 'flex',
+                    background: 'rgba(20,18,28,0.45)',
+                  }
+                : { display: 'flex' }
+            }
+            onClick={narrow ? () => setNavOpen(false) : undefined}
+          >
+            <Sidebar onNavigate={narrow ? () => setNavOpen(false) : undefined} />
+          </div>
+        )}
+
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          }}
+        >
+          {narrow && (
+            <button
+              type="button"
+              aria-label="Open navigation"
+              aria-expanded={navOpen}
+              onClick={() => setNavOpen(true)}
+              style={{
+                flex: 'none',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                padding: '12px 16px',
+                border: 'none',
+                borderBottom: '1px solid var(--border-soft)',
+                background: 'var(--ink)',
+                color: 'var(--paper)',
+                font: 'inherit',
+                fontSize: 12,
+                letterSpacing: '0.18em',
+                textTransform: 'uppercase',
+                cursor: 'pointer',
+              }}
+            >
+              <span aria-hidden>☰</span> Menu
+            </button>
+          )}
+          <ErrorBoundary key={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
+        </div>
       </div>
     </TeamProvider>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { streamTurn, agentErrorText, suppressObservation } from '../lib/agentApi';
+import { useIsNarrow } from '../hooks/useIsNarrow';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
 import { classifyMessage, memberBars } from '../lib/roomModel';
 import type { DocumentRow, MemoryCompilation, Message, Milestone, Task } from '../lib/types';
@@ -13,6 +14,7 @@ import { MemoryDiffCard } from '../components/MemoryDiffCard';
 type RoomLayout = 'classic' | 'split' | 'board';
 
 export function GroupRoom() {
+  const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
   const { messages, compilationsByMessage, error, refresh } = useMessages('group');
   const taskState = useTasks();
@@ -133,7 +135,7 @@ export function GroupRoom() {
           display: 'flex',
           alignItems: 'flex-end',
           gap: 16,
-          padding: '20px 28px 14px',
+          padding: narrow ? '14px 16px 10px' : '20px 28px 14px',
           borderBottom: '1px solid var(--border-soft)',
         }}
       >
@@ -186,7 +188,18 @@ export function GroupRoom() {
         />
       )}
 
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+      {/* Narrow: stack the rail BELOW the conversation instead of beside it.
+          Side by side, a 250px sidebar plus a 296px rail leaves 
+          conversation on a 375px screen. */}
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          minHeight: 0,
+          flexDirection: narrow ? 'column' : 'row',
+          overflowY: narrow ? 'auto' : 'hidden',
+        }}
+      >
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <div ref={chatRef} style={{ flex: 1, overflowY: 'auto', padding: '20px 0 8px' }}>
             {error && (
@@ -276,9 +289,9 @@ export function GroupRoom() {
         </div>
 
         {layout === 'classic' && (
-          <ClassicPanel nextMilestone={nextMilestone} milestones={milestones} taskState={taskState} docs={docs} />
+          <ClassicPanel narrow={narrow} nextMilestone={nextMilestone} milestones={milestones} taskState={taskState} docs={docs} />
         )}
-        {layout === 'split' && <SplitPanel taskState={taskState} />}
+        {layout === 'split' && <SplitPanel taskState={taskState} narrow={narrow} />}
       </div>
     </main>
   );
@@ -477,11 +490,13 @@ function TaskCells({ tasks, size = 11 }: { tasks: Task[]; size?: number }) {
 /* ---------------- classic right panel ---------------- */
 
 function ClassicPanel({
+  narrow,
   nextMilestone,
   milestones,
   taskState,
   docs,
 }: {
+  narrow: boolean;
   nextMilestone: Milestone | undefined;
   milestones: Milestone[];
   taskState: TaskActions;
@@ -492,7 +507,7 @@ function ClassicPanel({
   return (
     <aside
       style={{
-        width: 296,
+        width: narrow ? '100%' : 296,
         flex: 'none',
         borderLeft: '1px solid var(--border-soft)',
         overflowY: 'auto',
@@ -603,12 +618,12 @@ function ClassicPanel({
 
 /* ---------------- split layout panel ---------------- */
 
-function SplitPanel({ taskState }: { taskState: TaskActions }) {
+function SplitPanel({ taskState, narrow }: { taskState: TaskActions; narrow: boolean }) {
   const { roster, myUserId } = useTeam();
   return (
     <aside
       style={{
-        width: 364,
+        width: narrow ? '100%' : 364,
         flex: 'none',
         borderLeft: '1px solid var(--border-soft)',
         overflowY: 'auto',

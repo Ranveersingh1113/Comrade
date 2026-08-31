@@ -1,10 +1,42 @@
 // Wiki projection: memory rows -> page views. Mirrors pipeline/wiki.py
 // (the backend's member-facing renderer) so both surfaces agree on layout.
+import { shortDate } from './format';
 import type {
   MemoryCitation, MemoryEntry, MemoryPage, MemoryVersion,
 } from './types';
 
 export const UNCATEGORIZED = 'Uncategorized'; // mirrors pipeline/wiki.py ORPHAN_TITLE
+
+const SOURCE_LABEL: Record<string, string> = {
+  message: 'from chat',
+  document: 'from a doc',
+  github: 'from the repo',
+};
+
+/**
+ * When a fact became true, and where it came from — the same annotation
+ * pipeline/wiki.py:annotate() puts in front of the model.
+ *
+ * findings §20.3.1 measured a 39-point temporal-reasoning gap that turns on
+ * whether facts reach the reader carrying dates. Phase 0 fixed that for the
+ * MODEL and missed the member: this screen fetched valid_from and source_kind
+ * and rendered neither, so a fact compiled this morning and one compiled in
+ * May looked identical to the person deciding whether to trust it.
+ *
+ * Returns null when there is nothing to say, so the caller renders no empty
+ * parenthetical.
+ */
+export function factProvenance(fact: WikiFact): string | null {
+  const bits: string[] = [];
+  const when = fact.active.valid_from ?? fact.active.created_at;
+  if (when) bits.push(`as of ${shortDate(when)}`);
+  const label = SOURCE_LABEL[fact.citations[0]?.source_kind ?? ''];
+  if (label) bits.push(label);
+  // ", " and not " · ": shortDate already contains a "·" ("MON · AUG 31"),
+  // so a middot separator here would render "as of MON · AUG 31 · from a doc"
+  // — three fragments joined by the same mark, two of which are one fact.
+  return bits.length > 0 ? bits.join(', ') : null;
+}
 
 export interface WikiFact {
   entryId: string;

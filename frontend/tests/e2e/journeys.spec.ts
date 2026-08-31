@@ -122,8 +122,35 @@ test.describe.serial('Comrade journeys', () => {
     await expect(page.getByText('What tasks are open right now?')).toBeVisible({
       timeout: 30000,
     });
-    await expect(page.locator('main').getByText(/task/i).nth(1)).toBeVisible({
+    // Assert a reply ARRIVED, not that it used a particular word. The prior
+    // version looked for a second element matching /task/i, which depends on
+    // how the model phrases itself — "Nothing is open right now" is a correct
+    // answer containing no "task" — and it flaked three times across this
+    // session's runs. What the test is actually for is that a live turn
+    // round-trips through the server and renders.
+    await expect(page.locator('[data-sender="ai"]').last()).toBeVisible({
       timeout: 30000,
     });
+    await expect(page.locator('[data-sender="ai"]').last()).not.toBeEmpty();
   });
+});
+
+test('9. no screen scrolls sideways on a phone', async ({ browser }) => {
+  // The objective half of the responsive work. The product shipped with zero
+  // breakpoints: a 250px sidebar plus a 296px rail on a 375px viewport pushed
+  // every screen into horizontal scroll. Eyes catch that once; this catches it
+  // every run.
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 812 } });
+  const phone = await ctx.newPage();
+  await signIn(phone, state.leader.email);
+
+  for (const path of ['room', 'tasks', 'wiki', 'docs', 'inbox', 'thread']) {
+    await phone.goto(`/t/${state.teamId}/${path}`);
+    await phone.waitForLoadState('networkidle');
+    const overflows = await phone.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    expect(overflows, `/${path} scrolls sideways at 375px`).toBe(false);
+  }
+  await ctx.close();
 });

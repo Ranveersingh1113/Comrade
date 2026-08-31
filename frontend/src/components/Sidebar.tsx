@@ -30,7 +30,7 @@ const navBase: React.CSSProperties = {
   textDecoration: 'none',
 };
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const { team, roster, myUserId } = useTeam();
   const { signOut } = useAuth();
   const navigate = useNavigate();
@@ -47,7 +47,12 @@ export function Sidebar() {
         .from('consent_queue')
         .select('id', { count: 'exact', head: true })
         .eq('team_id', teamId)
-        .eq('status', 'pending'),
+        .eq('status', 'pending')
+        // Past its 7-day backstop it cannot be approved, so counting it as
+        // "awaiting your key" sends a member to an inbox that has nothing
+        // they can act on. Filter server-side: the count is a head request
+        // and never fetches the rows to filter locally.
+        .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`),
       supabase
         .from('memory_compilations')
         .select('*')
@@ -75,8 +80,10 @@ export function Sidebar() {
 
   return (
     <nav
+      onClick={onNavigate}
       style={{
         width: 250,
+        maxWidth: '85vw',
         flex: 'none',
         background: 'var(--ink)',
         color: 'var(--paper)',

@@ -122,9 +122,16 @@ test.describe.serial('Comrade journeys', () => {
     await expect(page.getByText('What tasks are open right now?')).toBeVisible({
       timeout: 30000,
     });
-    await expect(page.locator('main').getByText(/task/i).nth(1)).toBeVisible({
+    // Assert a reply ARRIVED, not that it used a particular word. The prior
+    // version looked for a second element matching /task/i, which depends on
+    // how the model phrases itself — "Nothing is open right now" is a correct
+    // answer containing no "task" — and it flaked three times across this
+    // session's runs. What the test is actually for is that a live turn
+    // round-trips through the server and renders.
+    await expect(page.locator('[data-sender="ai"]').last()).toBeVisible({
       timeout: 30000,
     });
+    await expect(page.locator('[data-sender="ai"]').last()).not.toBeEmpty();
   });
 });
 

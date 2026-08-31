@@ -96,6 +96,10 @@ export function PrivateThread() {
               <div
                 key={m.id}
                 className="fade-up"
+                // A stable hook for the e2e turn test. It previously asserted
+                // the reply contained the word "task", which depends on how
+                // the model happens to phrase itself and flaked three times.
+                data-sender={isAI ? 'ai' : 'user'}
                 style={{
                   display: 'flex',
                   gap: 13,

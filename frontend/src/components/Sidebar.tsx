@@ -30,7 +30,7 @@ const navBase: React.CSSProperties = {
   textDecoration: 'none',
 };
 
-export function Sidebar() {
+export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const { team, roster, myUserId } = useTeam();
   const { signOut } = useAuth();
   const navigate = useNavigate();
@@ -75,8 +75,10 @@ export function Sidebar() {
 
   return (
     <nav
+      onClick={onNavigate}
       style={{
         width: 250,
+        maxWidth: '85vw',
         flex: 'none',
         background: 'var(--ink)',
         color: 'var(--paper)',

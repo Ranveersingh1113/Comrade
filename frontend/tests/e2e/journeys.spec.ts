@@ -127,3 +127,23 @@ test.describe.serial('Comrade journeys', () => {
     });
   });
 });
+
+test('9. no screen scrolls sideways on a phone', async ({ browser }) => {
+  // The objective half of the responsive work. The product shipped with zero
+  // breakpoints: a 250px sidebar plus a 296px rail on a 375px viewport pushed
+  // every screen into horizontal scroll. Eyes catch that once; this catches it
+  // every run.
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 812 } });
+  const phone = await ctx.newPage();
+  await signIn(phone, state.leader.email);
+
+  for (const path of ['room', 'tasks', 'wiki', 'docs', 'inbox', 'thread']) {
+    await phone.goto(`/t/${state.teamId}/${path}`);
+    await phone.waitForLoadState('networkidle');
+    const overflows = await phone.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    expect(overflows, `/${path} scrolls sideways at 375px`).toBe(false);
+  }
+  await ctx.close();
+});

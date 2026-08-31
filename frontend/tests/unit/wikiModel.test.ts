@@ -1,8 +1,9 @@
-import { describe, expect, test } from 'vitest';
-import { projectWiki, UNCATEGORIZED } from '../../src/lib/wikiModel';
+import { describe, expect, it, test } from 'vitest';
+import { factProvenance, projectWiki, UNCATEGORIZED } from '../../src/lib/wikiModel';
 import type {
   MemoryCitation, MemoryEntry, MemoryPage, MemoryVersion,
 } from '../../src/lib/types';
+import type { WikiFact } from '../../src/lib/wikiModel';
 
 const page = (id: string, title: string): MemoryPage =>
   ({ id, title, description: '', team_id: 't1' }) as MemoryPage;
@@ -76,4 +77,55 @@ test('archived entries are excluded even with an active version', () => {
     [], [],
   );
   expect(out).toEqual([]);
+});
+
+describe('factProvenance', () => {
+  const fact = (over: Partial<WikiFact> = {}): WikiFact => ({
+    entryId: 'e1',
+    active: {
+      id: 'v1', entry_id: 'e1', team_id: 't1', compilation_id: null,
+      fact: 'The demo is Friday', change_type: 'added', is_active: true,
+      valid_from: '2026-08-20T10:00:00Z', valid_until: null,
+      created_at: '2026-08-20T10:00:00Z',
+    },
+    history: [],
+    citations: [],
+    revertQueued: false,
+    ...over,
+  });
+
+  it('dates a fact so a stale one is distinguishable from a fresh one', () => {
+    expect(factProvenance(fact())).toContain('as of');
+  });
+
+  it('names where the fact came from', () => {
+    const withDoc = fact({
+      citations: [{
+        id: 'c1', version_id: 'v1', source_kind: 'document',
+        source_id: 'd1', excerpt: null, created_at: '2026-08-20T10:00:00Z',
+      }],
+    });
+    expect(factProvenance(withDoc)).toContain('from a doc');
+  });
+
+  it('labels each source kind the compiler can produce', () => {
+    for (const [kind, label] of [
+      ['message', 'from chat'], ['document', 'from a doc'], ['github', 'from the repo'],
+    ] as const) {
+      const f = fact({
+        citations: [{
+          id: 'c1', version_id: 'v1', source_kind: kind,
+          source_id: 's1', excerpt: null, created_at: '2026-08-20T10:00:00Z',
+        }],
+      });
+      expect(factProvenance(f)).toContain(label);
+    }
+  });
+
+  it('renders nothing rather than an empty parenthetical', () => {
+    const undated = fact({
+      active: { ...fact().active, valid_from: '', created_at: '' },
+    });
+    expect(factProvenance(undated)).toBeNull();
+  });
 });

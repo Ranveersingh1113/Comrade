@@ -41,6 +41,9 @@ _TIER_ORDER = {"T0": 0, "T1": 1, "T2": 2}
 _TOOL_TIER_FLOORS = {
     "task_create": "T1",           # assignee-confirm is the affected member's key
     "task_update": "T1",           # ditto -- reassignment moves the same key
+    # Affects exactly one member -- the one holding the key. See
+    # _exec_member_depart for why those are always the same person.
+    "member_depart": "T1",
 }
 DEFAULT_TIER = "T2"
 
@@ -375,11 +378,70 @@ def _exec_task_update(conn, team_id, requester_id, args) -> dict:
     return {"task_id": str(row[0])}
 
 
+def _precheck_member_depart(conn, team_id, requester_id, args) -> None:
+    if str(args.get("user_id")) != str(requester_id):
+        raise ConsentError("a departure may only be approved by the member leaving")
+    ok = conn.execute(
+        "select 1 from public.memberships where team_id=%s and user_id=%s"
+        " and status='active'",
+        (team_id, requester_id),
+    ).fetchone()
+    if ok is None:
+        raise ConsentError("already not an active member of this team")
+
+
+def _exec_member_depart(conn, team_id, requester_id, args) -> dict:
+    """A member leaves, because they said so — asked by someone, decided by them.
+
+    The whole point of routing this through consent rather than giving anyone a
+    remove button: §23.1 says nobody configures another member's participation.
+    So a teammate may ASK (server/app.py member_departure_request), and the
+    request lands in the affected member's own inbox as a card only they can
+    see and only they can approve.
+
+    Which is why the identity check below is the load-bearing line, not a
+    formality. `requesting_member_id` is the key-holder — RLS
+    (au_consent_queue_update) lets only that member approve. If args named
+    SOMEONE ELSE, an asker could file a proposal against a teammate, approve
+    it with their own key, and the consent queue would have become the admin
+    removal power this design exists to refuse. Belt and braces: the precheck
+    rejects the mismatch, and this uses requesting_member_id regardless of
+    what args say, so a divergence can never execute against the wrong person.
+    """
+    if str(args.get("user_id")) != str(requester_id):
+        raise ConsentError("a departure may only be approved by the member leaving")
+    row = conn.execute(
+        "update public.memberships set status='left', left_at=now()"
+        " where team_id=%s and user_id=%s and status='active' returning id",
+        (team_id, requester_id),
+    ).fetchone()
+    if row is None:
+        raise ConsentError("already not an active member of this team")
+    return {"user_id": str(requester_id)}
+
+
 _PRECHECKS = {
     "task_create": _precheck_task_create,
     "task_update": _precheck_task_update,
+    "member_depart": _precheck_member_depart,
 }
 _EXECUTORS = {
     "task_create": _exec_task_create,
     "task_update": _exec_task_update,
+    "member_depart": _exec_member_depart,
 }
+
+# What the MODEL may name in a proposal, which is not the same set as what can
+# be executed. Until member_depart existed the two were identical and nothing
+# had to say so: agent/tools.py hands team_propose_batch's LLM-chosen
+# tool_name straight to propose_action, and the `not in _EXECUTORS` check
+# happened to reject everything else. That validation was accidental — a side
+# effect of the executor map being two entries long — and adding a third entry
+# would have quietly given the agent a new verb.
+#
+# It must never gain member_depart. Not because the agent could remove anyone
+# (it cannot; the key stays with the member) but because "Comrade suggests you
+# leave the team" is not a card this product puts in anyone's inbox, and
+# because the pending-hash index means such a card would block the real one a
+# teammate tried to send.
+AGENT_PROPOSABLE = frozenset({"task_create", "task_update"})

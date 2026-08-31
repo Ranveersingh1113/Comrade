@@ -19,7 +19,7 @@ from fastapi import (
     Depends, FastAPI, File, HTTPException, Request, UploadFile, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
@@ -31,7 +31,8 @@ from server.invites import invite_member
 from server.webhooks import verify_signature
 from shared.config import settings
 from shared.consent import (
-    ConsentError, approve_consent, edit_and_approve, reject_consent,
+    ConsentError, approve_consent, edit_and_approve, propose_action,
+    reject_consent,
 )
 from shared.db import Role, team_session, user_session
 
@@ -299,6 +300,147 @@ def team_invite(
     """
     require_membership(user_id, team_id)
     return invite_member(team_id, user_id, req.email)
+
+
+# Everything the product reads, in the order a person would want to read it
+# back. The scoping is not here — it is RLS, running as the caller. That is the
+# whole reason this endpoint is short: "the team's data, as far as you can see
+# it" is not a filter anyone has to write, it is what a SELECT already means
+# for role `authenticated`. Your own private thread comes out; a teammate's
+# does not; and tests/test_product_read_paths.py is what keeps that true.
+_EXPORT_RELATIONS = (
+    ("team", "select * from public.teams where id = %(team)s"),
+    ("members",
+     "select m.*, p.display_name, p.email from public.memberships m"
+     " join public.profiles p on p.id = m.user_id where m.team_id = %(team)s"),
+    ("messages",
+     "select * from public.messages where team_id = %(team)s order by created_at"),
+    ("tasks", "select * from public.tasks where team_id = %(team)s order by created_at"),
+    ("milestones",
+     "select * from public.milestones where team_id = %(team)s order by due_at"),
+    ("documents",
+     "select * from public.documents where team_id = %(team)s order by created_at"),
+    ("wiki_pages",
+     "select * from public.memory_pages where team_id = %(team)s order by title"),
+    ("wiki_facts",
+     "select v.* from public.memory_versions v where v.team_id = %(team)s"
+     " order by v.created_at"),
+    ("wiki_citations",
+     "select c.* from public.memory_citations c"
+     " join public.memory_versions v on v.id = c.version_id"
+     " where v.team_id = %(team)s"),
+    ("change_log",
+     "select * from public.change_log where team_id = %(team)s order by created_at"),
+    ("github_repos", "select * from public.github_repos where team_id = %(team)s"),
+    ("github_activity",
+     "select * from public.github_activity where team_id = %(team)s"
+     " order by occurred_at"),
+    ("consent_queue",
+     "select * from public.consent_queue where team_id = %(team)s order by created_at"),
+)
+
+
+@app.get("/teams/{team_id}/export")
+def team_export(team_id: str, user_id: CurrentUserId) -> Response:
+    """Take your team's history with you, as one JSON file.
+
+    §23.3 promises memory and history are retained rather than held hostage,
+    and this is the promise being keepable: it is also the honest answer to
+    "what happens if we stop paying" and the thing to do before you leave —
+    once you have left, RLS returns nothing and there is nothing to export.
+
+    ponytail: builds the whole document in memory and returns it in one
+    response. Fine at pilot size (a team's entire history is megabytes of
+    text); if a team ever outgrows that, stream it relation by relation rather
+    than adding pagination to a file nobody reads incrementally.
+    """
+    require_membership(user_id, team_id)
+    out: dict[str, object] = {
+        "exported_by": user_id,
+        "team_id": team_id,
+        "note": (
+            "Everything this member could read at export time. A teammate's"
+            " private thread is not here, because it was never theirs to read."
+        ),
+    }
+    with user_session(user_id) as conn:
+        for name, sql in _EXPORT_RELATIONS:
+            cur = conn.execute(sql, {"team": team_id})
+            cols = [c.name for c in cur.description or []]
+            out[name] = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    body = json.dumps(out, default=str, indent=2, ensure_ascii=False)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="comrade-{team_id}.json"'
+        },
+    )
+
+
+class DepartureRequest(BaseModel):
+    # A note to a person, shown on their card. Capped because it lands in a
+    # fixed-size card, not because anything downstream parses it.
+    reason: str | None = Field(default=None, max_length=280)
+
+
+@app.post("/teams/{team_id}/members/{member_id}/departure-request")
+def member_departure_request(
+    team_id: str, member_id: str, req: DepartureRequest, user_id: CurrentUserId
+) -> dict:
+    """Ask a teammate to leave. Only they can answer.
+
+    There is no remove-member endpoint and there is not going to be one. §23.1:
+    "nobody approves another member's actions, nobody configures permissions."
+    So this files a consent proposal whose requesting_member_id is the person
+    being asked — which, through au_consent_queue_update, makes their key the
+    only one that resolves it. The asker cannot approve their own request
+    because RLS will not show them the row.
+
+    Deliberately available to every active member, not just the leader. A
+    leader-only version would be the removal power wearing a politer name.
+    """
+    require_membership(user_id, team_id)
+    if member_id == user_id:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "to leave a team, leave it — this is for asking someone else",
+        )
+
+    # Read as the caller, so RLS confirms both people really share this team.
+    with user_session(user_id) as conn:
+        row = conn.execute(
+            "select p.display_name from public.memberships m"
+            " join public.profiles p on p.id = m.user_id"
+            " where m.team_id=%s and m.user_id=%s and m.status='active'",
+            (team_id, member_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND, "not an active member of this team"
+            )
+        asker = conn.execute(
+            "select display_name from public.profiles where id=%s", (user_id,)
+        ).fetchone()
+
+    who = (asker[0] if asker else None) or "A teammate"
+    note = f"{who} asked you to leave this team."
+    if req.reason:
+        note = f"{note} They said: {req.reason}"
+
+    return propose_action(
+        team_id=team_id,
+        requester_id=member_id,
+        tool_name="member_depart",
+        args={"user_id": member_id},
+        source_snippet=note,
+        # Not reversible BY THE PERSON DECIDING, which is whose card this is.
+        # A leader can invite them back afterwards; that is a new decision by
+        # someone else, not an undo they hold.
+        reversible=False,
+        tier="T1",
+    )
 
 
 # ---------- observations ----------

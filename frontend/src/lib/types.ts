@@ -14,10 +14,14 @@ export interface Team {
   name: string;
   created_by: string | null;
   created_at: string;
+  /** Stamped when the last active member leaves; cleared if anyone rejoins. */
+  archived_at: string | null;
 }
 
 export type MembershipRole = 'leader' | 'member';
-export type MembershipStatus = 'invited' | 'active';
+// 'left' is a state, not a deletion — the row survives so a departed
+// member's messages and tasks keep an author the roster can still name.
+export type MembershipStatus = 'invited' | 'active' | 'left';
 
 export interface Membership {
   id: string;
@@ -26,6 +30,7 @@ export interface Membership {
   role: MembershipRole;
   status: MembershipStatus;
   joined_at: string | null;
+  left_at: string | null;
   created_at: string;
 }
 

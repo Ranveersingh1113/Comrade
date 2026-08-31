@@ -13,7 +13,7 @@ from google.adk.tools import ToolContext
 
 from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
-from shared.consent import propose_action, propose_batch
+from shared.consent import AGENT_PROPOSABLE, propose_action, propose_batch
 from shared.db import user_session
 from shared.nudge import send_nudge
 
@@ -584,18 +584,41 @@ def team_propose_batch(items: list[dict], tool_context: ToolContext) -> dict:
             task_update needs task_id plus whichever fields are changing.
             `source` is the optional note shown on that item's card.
     """
-    return propose_batch(
+    # This is the ONE place a tool name chosen by the model reaches the consent
+    # queue. Every other proposal path names its tool as a literal. Until
+    # member_depart existed, propose_action's `not in _EXECUTORS` check
+    # happened to reject everything unexpected — accidental validation that
+    # would have widened the moment the executor map grew. Say it out loud
+    # instead, and refuse per item so one bad name does not discard four good
+    # proposals (propose_batch's own partial-failure contract).
+    allowed, refused = [], []
+    for item in items:
+        name = item.get("tool_name")
+        if name in AGENT_PROPOSABLE:
+            allowed.append(
+                {
+                    "tool_name": name,
+                    "args": item.get("args") or {},
+                    "source_snippet": item.get("source") or None,
+                }
+            )
+        else:
+            refused.append(
+                {
+                    "status": "failed",
+                    "tool_name": name,
+                    "error": f"{name!r} is not a tool the agent may propose",
+                }
+            )
+    if not allowed:
+        return {"batch_id": None, "items": refused}
+    result = propose_batch(
         tool_context.state["team_id"],
         tool_context.state["requester_id"],
-        [
-            {
-                "tool_name": item.get("tool_name"),
-                "args": item.get("args") or {},
-                "source_snippet": item.get("source") or None,
-            }
-            for item in items
-        ],
+        allowed,
     )
+    result["items"].extend(refused)
+    return result
 
 
 def task_propose_update(

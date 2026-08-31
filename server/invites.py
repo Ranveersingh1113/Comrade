@@ -82,10 +82,20 @@ def invite_member(team_id: str, leader_id: str, email: str) -> dict:
 
     # Written as the leader — au_memberships_insert's leader branch authorises.
     with user_session(leader_id) as conn:
+        # `do nothing` would be right if the only conflicting row were a live
+        # membership. Since D4 it may also be a DEPARTED one, and leaving is
+        # not a ban: without the update below a member who left could never be
+        # invited back, and the leader would be told "already_member" about
+        # someone who is demonstrably not one. The WHERE keeps that narrow —
+        # an active or already-invited row is still left untouched, and
+        # left -> invited is the one transition trg_membership_identity_guard
+        # allows a leader to make on somebody else's row.
         row = conn.execute(
             "insert into public.memberships (team_id, user_id, role, status)"
             " values (%s,%s,'member','invited')"
-            " on conflict (team_id, user_id) do nothing"
+            " on conflict (team_id, user_id) do update"
+            "   set status='invited', role='member', left_at=null"
+            "   where memberships.status = 'left'"
             " returning id",
             (team_id, invitee_id),
         ).fetchone()

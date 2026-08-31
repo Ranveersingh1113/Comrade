@@ -84,9 +84,22 @@ def test_edit_and_approve_executes_new_args(seeded):
         conn.close()
 
 
-def test_post_group_message_has_no_executor(seeded):
-    """§13: the agent may not originate group content. Nothing executes it."""
-    from shared.consent import _EXECUTORS
+def test_the_agent_may_propose_exactly_two_things(seeded):
+    """§13: the agent may not originate group content. Nothing executes it.
+
+    This pinned `_EXECUTORS` because, until D4, "what can be executed" and
+    "what the agent may ask for" were the same set — so one assertion covered
+    both and nobody had to notice they were different questions. member_depart
+    separated them: it executes, and the agent must never name it.
+
+    So the pin moves to AGENT_PROPOSABLE, which is the set that actually
+    bounds the model, and _EXECUTORS keeps only the assertion that is about
+    the agent's reach rather than its size. If a future action is added to
+    both sets, THIS test is the one that should make someone stop and argue
+    for it out loud.
+    """
+    from shared.consent import _EXECUTORS, AGENT_PROPOSABLE
 
     assert "post_group_message" not in _EXECUTORS
-    assert set(_EXECUTORS) == {"task_create", "task_update"}
+    assert AGENT_PROPOSABLE == {"task_create", "task_update"}
+    assert "member_depart" not in AGENT_PROPOSABLE

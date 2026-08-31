@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { streamTurn, agentErrorText, suppressObservation } from '../lib/agentApi';
+import { activityLabel } from '../lib/toolActivity';
 import { useIsNarrow } from '../hooks/useIsNarrow';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
 import { classifyMessage, memberBars } from '../lib/roomModel';
@@ -25,6 +26,8 @@ export function GroupRoom() {
   const [aiTyping, setAiTyping] = useState(false);
   const [pending, setPending] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [step, setStep] = useState('');
+  const [agentNote, setAgentNote] = useState<string | null>(null);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -64,15 +67,31 @@ export function GroupRoom() {
     if (!text || !teamId) return;
     setDraft('');
     setSendError(null);
+    setAgentNote(null);
     const mentionsAi = /@comrade/i.test(text);
     if (mentionsAi) {
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
       setAiTyping(true);
       setPending('');
+      setStep('');
       try {
         await streamTurn(teamId, text, 'group', (f) => {
           if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
+          // The runtime already says what it is doing; the room was throwing
+          // it away and showing three dots instead.
+          else if (f.type === 'tool_call') setStep(activityLabel(f.tool ?? ''));
+          // Q6. The room's turn lock is held by someone else's question, so
+          // this turn never runs — and until D6 that arrived as nothing at
+          // all: the indicator vanished, no reply appeared, and the member
+          // had no way to tell it apart from a hang. Surfaced as a real
+          // message, not an error, because nothing has gone wrong.
+          else if (f.type === 'busy') setAgentNote(f.detail ?? null);
+          // The model returned nothing. Same slot as 'busy' because it is the
+          // same thing from the member's side — Comrade did not answer, and
+          // here is why — and emphatically not an error banner: nothing they
+          // did went wrong.
+          else if (f.type === 'empty') setAgentNote(f.detail ?? null);
           else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
         });
       } catch (e) {
@@ -81,6 +100,7 @@ export function GroupRoom() {
       } finally {
         setAiTyping(false);
         setPending('');
+        setStep('');
         await refresh();
       }
     } else {
@@ -248,7 +268,7 @@ export function GroupRoom() {
                     {pending}
                   </div>
                 ) : (
-                  <div style={{ display: 'flex', gap: 4, alignItems: 'center', paddingTop: 13 }}>
+                  <div style={{ display: 'flex', gap: 9, alignItems: 'center', paddingTop: 13 }}>
                     {[0, 0.2, 0.4].map((d) => (
                       <span
                         key={d}
@@ -261,8 +281,43 @@ export function GroupRoom() {
                         }}
                       />
                     ))}
+                    {step && (
+                      <span className="mono" style={{ fontSize: 10, color: 'var(--faint)' }}>
+                        {step}
+                      </span>
+                    )}
                   </div>
                 )}
+              </div>
+            )}
+            {/* Comrade explaining why there is no reply — a busy room (Q6)
+                or a model that returned nothing. In the transcript rather
+                than beside the composer, because it IS Comrade answering, and
+                not styled as an error, because the member did nothing wrong.
+                Both causes share the slot: from where they sit, the question
+                is the same one. */}
+            {agentNote && (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 14,
+                  padding: '10px 28px',
+                  borderLeft: '3px solid var(--border-soft)',
+                }}
+              >
+                <span className="orb" style={{ width: 36, height: 36, fontSize: 13, opacity: 0.55 }}>
+                  ◈
+                </span>
+                <div
+                  style={{
+                    paddingTop: 10,
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    color: 'var(--muted)',
+                  }}
+                >
+                  {agentNote}
+                </div>
               </div>
             )}
           </div>

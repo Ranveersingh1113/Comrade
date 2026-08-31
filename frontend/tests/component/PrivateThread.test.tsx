@@ -134,7 +134,12 @@ test('accumulates streamed text in the pending bubble while the turn runs', asyn
   });
 });
 
-test('shows which tool the agent is using before any text arrives', async () => {
+test('says what the agent is doing, in words, before any text arrives', async () => {
+  // This used to assert /checking memory_read_page/ — the raw tool identifier,
+  // which is what the screen actually printed. Honest and unreadable, and
+  // wrong for the half of the tools that are not "checks" at all: the same
+  // template rendered "checking team_propose_task" for something that drafts
+  // a task and waits for your key.
   const { body, release } = heldStream([
     { type: 'run', run_id: 'r1' },
     { type: 'tool_call', tool: 'memory_read_page' },
@@ -149,6 +154,53 @@ test('shows which tool the agent is using before any text arrives', async () => 
   await user.type(screen.getByPlaceholderText(/this stays private/), 'what did we decide?');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
 
-  expect(await screen.findByText(/checking memory_read_page/)).toBeInTheDocument();
+  expect(await screen.findByText(/reading the wiki/)).toBeInTheDocument();
+  expect(screen.queryByText(/memory_read_page/)).not.toBeInTheDocument();
   release();
+});
+
+
+test('an empty turn says so instead of just stopping', async () => {
+  // 🔴 Six of fourteen live turns came back with no events at all. Because the
+  // server persists a reply only `if reply`, nothing was written and nothing
+  // rendered: the typing dots stopped and that was the whole answer, which is
+  // exactly what a hang looks like. The run row said 'done'.
+  const enc = new TextEncoder();
+  const body = new ReadableStream({
+    start(controller) {
+      for (const line of [
+        { type: 'run', run_id: 'r1' },
+        {
+          type: 'empty',
+          run_id: 'r1',
+          detail:
+            'Comrade had nothing to say that time — the model came back empty.'
+            + ' Nothing was changed. Try asking again.',
+        },
+        { type: 'done', user_message_id: 'm-u', reply_message_id: null },
+      ]) {
+        controller.enqueue(enc.encode(`${JSON.stringify(line)}
+`));
+      }
+      controller.close();
+    },
+  });
+  server.use(
+    http.post(`${BASE}/agent/turn/stream`, () =>
+      new HttpResponse(body, { headers: { 'Content-Type': 'application/x-ndjson' } }),
+    ),
+  );
+  const user = userEvent.setup();
+  renderInApp(<PrivateThread />);
+  await user.type(screen.getByPlaceholderText(/this stays private/), 'what did we decide?');
+  await user.click(screen.getByRole('button', { name: 'SEND' }));
+
+  const note = await screen.findByText(/came back empty/);
+  expect(note).toBeInTheDocument();
+  // It survives the end of the turn — the frames all arrive and the stream
+  // closes, and the explanation has to still be there afterwards or it is no
+  // better than the silence it replaces.
+  expect(await screen.findByText(/Nothing was changed/)).toBeInTheDocument();
+  // Not the error slot: nothing the member did failed.
+  expect(note).not.toHaveStyle({ color: 'var(--terracotta)' });
 });

@@ -145,10 +145,26 @@ export async function ingestDocument(
 }
 
 export interface StreamFrame {
-  type: 'run' | 'tool_call' | 'tool_result' | 'text' | 'done' | 'error';
+  // 'busy' was missing here, which is how it came to be silently dropped:
+  // stream_turn emits it and returns when a group room's turn lock is held
+  // (decision Q6), and GroupRoom matched neither 'text' nor 'error', so the
+  // member's message sat unanswered with no explanation at all — the exact
+  // outcome that decision was written to prevent.
+  type:
+    | 'run'
+    | 'busy'
+    // The model came back with nothing at all. Was reported as a successful
+    // turn that simply rendered no reply — see agent/runtime.py.
+    | 'empty'
+    | 'tool_call'
+    | 'tool_result'
+    | 'text'
+    | 'done'
+    | 'error';
   run_id?: string;
   tool?: string;
   text?: string;
+  /** Carried by 'busy', 'empty' and 'error'. */
   detail?: string;
   user_message_id?: string;
   reply_message_id?: string | null;

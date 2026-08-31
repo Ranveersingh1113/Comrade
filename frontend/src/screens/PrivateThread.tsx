@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { streamTurn, agentErrorText } from '../lib/agentApi';
+import { activityLabel } from '../lib/toolActivity';
 import { messageTime } from '../lib/format';
 import { useTeam } from '../state/TeamContext';
 import { useMessages } from '../hooks/useMessages';
@@ -13,6 +14,7 @@ export function PrivateThread() {
   const [pending, setPending] = useState('');
   const [step, setStep] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [agentNote, setAgentNote] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const me = profileOf(myUserId);
@@ -27,6 +29,7 @@ export function PrivateThread() {
     if (!text || !team) return;
     setDraft('');
     setSendError(null);
+    setAgentNote(null);
     setWaiting(true);
     setPending('');
     setStep('');
@@ -35,7 +38,16 @@ export function PrivateThread() {
       // The stream is only for watching it happen.
       await streamTurn(team.id, text, 'private', (f) => {
         if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
-        else if (f.type === 'tool_call') setStep(`checking ${f.tool}…`);
+        // Was `checking ${f.tool}…`, which printed the raw identifier —
+        // "checking team_get_state…". Honest, unreadable, and wrong for the
+        // half of them that are not checks.
+        else if (f.type === 'tool_call') setStep(`${activityLabel(f.tool ?? '')}…`);
+        // 🔴 The model returning nothing was, until now, indistinguishable
+        // from a hang: the indicator stopped, no message appeared, and the
+        // run was recorded as done. Six of fourteen live turns did this.
+        // 'busy' never reaches a private thread — they are not serialised —
+        // so this slot has one cause here and two in the group room.
+        else if (f.type === 'empty') setAgentNote(f.detail ?? null);
         else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
       });
     } catch (e) {
@@ -201,6 +213,28 @@ export function PrivateThread() {
                   )}
                 </div>
               )}
+            </div>
+          )}
+          {/* Comrade explaining why there is no reply. Not the error slot: the
+              member's message went through fine, the model just had nothing to
+              say, and telling them that is the difference between a product
+              and a hang. */}
+          {agentNote && (
+            <div style={{ display: 'flex', gap: 12, padding: '4px 0 8px' }}>
+              <span className="orb" style={{ width: 30, height: 30, fontSize: 12, opacity: 0.55 }}>
+                ◈
+              </span>
+              <div
+                style={{
+                  paddingTop: 6,
+                  fontSize: 12.5,
+                  lineHeight: 1.5,
+                  color: 'var(--muted)',
+                  maxWidth: 470,
+                }}
+              >
+                {agentNote}
+              </div>
             </div>
           )}
         </div>

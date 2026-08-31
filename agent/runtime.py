@@ -152,12 +152,40 @@ async def stream_turn(
         except Exception:
             await run_in_threadpool(finish_run, team_id, run_id, "failed")
             raise
+        reply = _reply_from_steps(all_steps)
+        if not reply:
+            # 🔴 A turn that produced nothing was being reported as a success.
+            #
+            # Measured 2026-08-31 against the live model: six of fourteen
+            # consecutive turns came back with NO events at all — no tool
+            # calls, no text, all_steps = 0 — and every one was stamped
+            # status='done'. server/app.py only persists a reply `if reply`,
+            # so nothing was written, nothing rendered, and the member who
+            # asked Comrade a question got silence indistinguishable from a
+            # hang. The run row said it went fine.
+            #
+            # Whatever makes the model return an empty candidate (a filtered
+            # response, a transient upstream error ADK swallows) is a separate
+            # question. This is the part that is ours: an empty turn is a
+            # FAILED turn, and the member has to be told rather than left
+            # watching an indicator disappear.
+            #
+            # 'failed' rather than a new status, and deliberately: from the
+            # product's side "raised an exception" and "produced no answer"
+            # are the same event — you asked and got nothing. The traceback
+            # path still logs its own detail.
+            await run_in_threadpool(finish_run, team_id, run_id, "failed")
+            yield {
+                "type": "empty",
+                "run_id": run_id,
+                "detail": (
+                    "Comrade had nothing to say that time — the model came"
+                    " back empty. Nothing was changed. Try asking again."
+                ),
+            }
+            return
         await run_in_threadpool(finish_run, team_id, run_id, "done")
-        yield {
-            "type": "final",
-            "run_id": run_id,
-            "reply": _reply_from_steps(all_steps),
-        }
+        yield {"type": "final", "run_id": run_id, "reply": reply}
 
 
 async def run_turn(
@@ -189,6 +217,17 @@ async def run_turn(
                 "reply": "",
                 "steps": [],
                 "busy": item["detail"],
+            }
+        if item.get("type") == "empty":
+            # Same trap, second cause: the model returned nothing, so there is
+            # no `final` either and `final["run_id"]` below would raise. The
+            # run row DOES exist here (and is now marked failed), so hand it
+            # back — a caller that wants to look up what happened can.
+            return {
+                "run_id": item["run_id"],
+                "reply": "",
+                "steps": steps,
+                "empty": item["detail"],
             }
         steps.append(item)
     return {"run_id": final["run_id"], "reply": final["reply"], "steps": steps}

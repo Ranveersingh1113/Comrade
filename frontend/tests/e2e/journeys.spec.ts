@@ -122,16 +122,27 @@ test.describe.serial('Comrade journeys', () => {
     await expect(page.getByText('What tasks are open right now?')).toBeVisible({
       timeout: 30000,
     });
-    // Assert a reply ARRIVED, not that it used a particular word. The prior
-    // version looked for a second element matching /task/i, which depends on
-    // how the model phrases itself — "Nothing is open right now" is a correct
-    // answer containing no "task" — and it flaked three times across this
-    // session's runs. What the test is actually for is that a live turn
-    // round-trips through the server and renders.
-    await expect(page.locator('[data-sender="ai"]').last()).toBeVisible({
-      timeout: 30000,
-    });
-    await expect(page.locator('[data-sender="ai"]').last()).not.toBeEmpty();
+    // Assert the member GETS AN ANSWER OF SOME KIND, not that the model spoke.
+    //
+    // Two earlier versions of this assertion were too strong and I chased both.
+    // It first looked for a second element matching /task/i, which depends on
+    // how the model phrases itself. It then required an AI message, which
+    // depends on the model producing one at all — and measurement says it
+    // often does not: six of fourteen live turns came back with no events
+    // whatsoever, which is why agent/runtime.py now emits an `empty` frame and
+    // marks the run failed instead of reporting a silent success.
+    //
+    // So a bare AI-message assertion is testing the model, not the product.
+    // What the product guarantees — and what this now checks — is that a live
+    // turn round-trips through the server and the member is told something
+    // either way. A blank screen fails both branches, which is the regression
+    // worth catching.
+    const answered = page.locator('[data-sender="ai"]').last();
+    const explained = page.getByText(/came back empty/);
+    await expect(answered.or(explained)).toBeVisible({ timeout: 30000 });
+    if (await answered.count()) {
+      await expect(answered).not.toBeEmpty();
+    }
   });
 });
 

@@ -108,7 +108,10 @@ _CONSOLIDATE_SYSTEM = (
     " page it belongs on, or propose a short new page title of 2-4 words; when"
     " you propose a NEW title, also set page_description to one short line"
     " saying what belongs on that page, so a reader can pick it from an index"
-    " without opening it),"
+    " without opening it; set page_kind to 'skill' when the page holds HOW THE"
+    " TEAM DOES SOMETHING - a procedure, a convention, a standard someone"
+    " could follow - and 'fact' when it holds things that are true about the"
+    " project),"
     " 'revise' (it updates or replaces one existing fact - set entry_id to that"
     " fact's id), 'invalidate' (it states an existing fact no longer holds and"
     " nothing replaces it - set entry_id), 'noop' (it duplicates an existing"
@@ -139,6 +142,10 @@ class Decision(BaseModel):
     # the input the LIVE recall index selects on (agent/agent.py:wiki_section),
     # not routing polish — findings §2.3, promoted by §20.4-1.
     page_description: str | None = None
+    # 'fact' | 'skill'. Lets the model create a procedure page rather than only
+    # ever a fact page — without it the kind column exists and nothing can
+    # produce one, which is decoration (§24.2, §6.3-3).
+    page_kind: str | None = None
 
 
 class _Consolidation(BaseModel):
@@ -298,6 +305,7 @@ def build_consolidation_prompt(
 
 
 _ACTIONS = {"add", "revise", "invalidate", "noop"}
+_PAGE_KINDS = {"fact", "skill"}
 
 
 def validate_decisions(
@@ -327,11 +335,16 @@ def validate_decisions(
             continue
         title = (d.page_title or "").strip() or None
         description = (d.page_description or "").strip() or None
+        # Degrades rather than raises, like every other field here: a model
+        # inventing 'procedure' must not abort a compile. The fact still
+        # belongs in memory, just on an ordinary page.
+        kind = (d.page_kind or "").strip().lower()
+        kind = kind if kind in _PAGE_KINDS else "fact"
         out.append(
             Decision(
                 candidate_index=i, action=d.action,
                 entry_id=d.entry_id, page_title=title,
-                page_description=description,
+                page_description=description, page_kind=kind,
             )
         )
     return out
@@ -373,7 +386,10 @@ def consolidate(
     return validate_decisions(candidates, pages, raw)
 
 
-def _resolve_page(conn, team_id: str, title: str | None, description: str | None = None):
+def _resolve_page(
+    conn, team_id: str, title: str | None, description: str | None = None,
+    kind: str | None = None,
+):
     """Find (case-insensitively) or create the page an added fact lands on.
 
     An existing page's description is filled in if it is still blank, but
@@ -382,6 +398,11 @@ def _resolve_page(conn, team_id: str, title: str | None, description: str | None
     """
     name = (title or "").strip() or DEFAULT_PAGE_TITLE
     desc = (description or "").strip()
+    # An existing page keeps its kind. Letting a later compile flip a fact page
+    # to a procedure (or back) would rewrite what a page IS on the strength of
+    # one document, and the facts already on it were written under the old
+    # reading.
+    page_kind = kind if kind in _PAGE_KINDS else "fact"
     row = conn.execute(
         "select id, description from public.memory_pages"
         " where team_id=%s and lower(title)=lower(%s)",
@@ -395,9 +416,9 @@ def _resolve_page(conn, team_id: str, title: str | None, description: str | None
             )
         return row[0]
     created = conn.execute(
-        "insert into public.memory_pages (team_id, title, description)"
-        " values (%s,%s,%s) on conflict do nothing returning id",
-        (team_id, name, desc),
+        "insert into public.memory_pages (team_id, title, description, kind)"
+        " values (%s,%s,%s,%s) on conflict do nothing returning id",
+        (team_id, name, desc, page_kind),
     ).fetchone()
     if created is not None:
         return created[0]
@@ -453,7 +474,9 @@ def apply_compilation(
             continue
 
         if action == "add":
-            page_id = _resolve_page(conn, team_id, dec.page_title, dec.page_description)
+            page_id = _resolve_page(
+                conn, team_id, dec.page_title, dec.page_description, dec.page_kind
+            )
             target = conn.execute(
                 "insert into public.memory_entries (team_id, page_id)"
                 " values (%s,%s) returning id",

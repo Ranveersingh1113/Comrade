@@ -78,11 +78,16 @@ export interface DocumentOpen {
   questions_asked: number;
 }
 
+// 'fact' = things that are true about the project; 'skill' = how the team
+// does something (findings §24.2 — the standard that replaces the handoff).
+export type MemoryPageKind = 'fact' | 'skill';
+
 export interface MemoryPage {
   id: string;
   team_id: string;
   title: string;
   description: string;
+  kind: MemoryPageKind;
   created_at: string;
   updated_at: string;
 }

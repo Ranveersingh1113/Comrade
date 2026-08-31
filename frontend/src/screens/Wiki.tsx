@@ -123,8 +123,30 @@ export function Wiki() {
         )}
         {pages?.map((pg) => (
           <div key={pg.pageId ?? 'orphan'} className="card fade-up" style={{ padding: '18px 21px' }}>
-            <div className="display" style={{ fontSize: 20 }}>
-              {pg.title}
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
+              <div className="display" style={{ fontSize: 20 }}>
+                {pg.title}
+              </div>
+              {/* A procedure is a different kind of claim from a fact — "how we
+                  do this" rather than "this is true" — and a page that renders
+                  identically to a fact page has not actually been added
+                  (findings §24.2, §6.3-3). */}
+              {pg.kind === 'skill' && (
+                <span
+                  className="mono"
+                  style={{
+                    fontSize: 9.5,
+                    letterSpacing: '0.14em',
+                    textTransform: 'uppercase',
+                    color: 'var(--muted)',
+                    border: '1px solid var(--border-soft)',
+                    borderRadius: 3,
+                    padding: '2px 6px',
+                  }}
+                >
+                  how we do it
+                </span>
+              )}
             </div>
             {pg.description && (
               <div style={{ fontSize: 11.5, fontStyle: 'italic', color: 'var(--muted)', marginTop: 4 }}>

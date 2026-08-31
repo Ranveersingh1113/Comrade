@@ -20,7 +20,7 @@ def all_active_pages(conn, team_id: str) -> list[dict]:
     (pre-page data) surface under a virtual 'Uncategorized' bucket so they
     stay visible to consolidation and rendering."""
     page_rows = conn.execute(
-        "select id, title, description from public.memory_pages"
+        "select id, title, description, kind from public.memory_pages"
         " where team_id = %s order by title",
         (team_id,),
     ).fetchall()
@@ -53,13 +53,21 @@ def all_active_pages(conn, team_id: str) -> list[dict]:
             "page_id": str(pid),
             "title": title,
             "description": description,
+            "kind": kind,
             "facts": by_page.get(str(pid), []),
         }
-        for pid, title, description in page_rows
+        for pid, title, description, kind in page_rows
     ]
     if orphans:
         pages.append(
-            {"page_id": None, "title": ORPHAN_TITLE, "description": "", "facts": orphans}
+            {
+                "page_id": None, "title": ORPHAN_TITLE, "description": "",
+                # Facts with no page are facts, not procedures — an orphan
+                # bucket claiming to be a skill page would be a claim nobody
+                # made.
+                "kind": "fact",
+                "facts": orphans,
+            }
         )
     return pages
 
@@ -94,10 +102,21 @@ def render_team_wiki(conn, team_id: str) -> str:
     for p in all_active_pages(conn, team_id):
         if not p["facts"]:
             continue
-        header = f"## {p['title']}"
+        skill = p.get("kind") == "skill"
+        # §20.3.1's lesson applied to a second column: memory that is stored
+        # and then dropped at the render boundary may as well not exist. A
+        # skill page rendering identically to a fact page has changed nothing
+        # for the agent reading it — "how the team does something" is a
+        # different claim from "this is true", and the reader has to be able
+        # to tell them apart.
+        header = f"## {p['title']}" + (" (procedure)" if skill else "")
         if p["description"]:
             header += f"\n_{p['description']}_"
-        bullets = "\n".join(f"- {annotate(f)}" for f in p["facts"])
+        # Numbered for a procedure: it has an order, and bullets throw it away.
+        marker = (lambda i: f"{i}.") if skill else (lambda _: "-")
+        bullets = "\n".join(
+            f"{marker(i)} {annotate(f)}" for i, f in enumerate(p["facts"], 1)
+        )
         sections.append(f"{header}\n\n{bullets}")
     if not sections:
         return "# Team wiki\n\n_(empty)_"

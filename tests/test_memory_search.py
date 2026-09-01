@@ -23,6 +23,19 @@ import pytest
 from agent.tools import search_memory
 from shared.config import settings
 from tests._seed import A1, B1, TEAM_A, TEAM_B, VER_A
+from pipeline.parsers import SPACE_MARK
+
+def unmarked(value):
+    """Tool results are datamarked — spaces become SPACE_MARK — so a test that
+    looks for ordinary prose has to undo the marking first.
+
+    Added 2026-09-02 when spotlight() was extended from document_read to every
+    read path. These assertions are about WHICH facts come back and what they
+    say, not about the marking; the marking itself is the subject of
+    tests/test_datamarking.py.
+    """
+    return value.replace(SPACE_MARK, " ") if isinstance(value, str) else value
+
 
 
 @pytest.fixture
@@ -60,7 +73,7 @@ def _fact(admin, team_id, text, page_title=None, active=True, archived=False):
 def test_it_finds_a_fact_by_its_words(seeded, admin):
     _fact(admin, TEAM_A, "the listing expires after 90 minutes", "Listings")
     hits = search_memory(TEAM_A, A1, "listing expires")
-    assert any("90 minutes" in h["fact"] for h in hits)
+    assert any("90 minutes" in unmarked(h["fact"]) for h in hits)
 
 
 def test_lexical_search_misses_a_near_synonym(seeded, admin):
@@ -98,7 +111,9 @@ def test_a_superseded_fact_never_comes_back(seeded, admin):
           active=False)
     _fact(admin, TEAM_A, "the listing expires after 90 minutes", "Listings")
     hits = search_memory(TEAM_A, A1, "listing expires")
-    assert [h["fact"] for h in hits] == ["the listing expires after 90 minutes"]
+    assert [unmarked(h["fact"]) for h in hits] == [
+        "the listing expires after 90 minutes"
+    ]
 
 
 def test_an_archived_entry_is_gone_too(seeded, admin):
@@ -118,7 +133,7 @@ def test_it_does_not_cross_a_team_boundary(seeded, admin):
     _fact(admin, TEAM_B, "team B ships on tuesdays", "Releases")
     assert search_memory(TEAM_A, A1, "tuesdays") == []
     with_b = search_memory(TEAM_B, B1, "tuesdays")
-    assert any("tuesdays" in h["fact"] for h in with_b)
+    assert any("tuesdays" in unmarked(h["fact"]) for h in with_b)
 
 
 def test_a_stranger_gets_nothing(seeded, admin):
@@ -135,7 +150,10 @@ def test_every_hit_carries_its_date_and_page(seeded, admin):
     title is what lets the agent open the rest of the page.
     """
     _fact(admin, TEAM_A, "the demo is on 14 march", "Deadlines")
-    hit = next(h for h in search_memory(TEAM_A, A1, "demo") if "demo" in h["fact"])
+    hit = next(
+        h for h in search_memory(TEAM_A, A1, "demo")
+        if "demo" in unmarked(h["fact"])
+    )
     assert hit["page"] == "Deadlines"
     assert hit["valid_from"] is not None
 
@@ -158,7 +176,7 @@ def test_a_citation_is_returned_when_there_is_one(seeded, admin):
     )
     hit = next(
         h for h in search_memory(TEAM_A, A1, "deadline friday")
-        if h["fact"] == "deadline is Friday"
+        if unmarked(h["fact"]) == "deadline is Friday"
     )
     assert hit["source_kind"] == "document"
 
@@ -191,7 +209,7 @@ def test_the_best_match_comes_first(seeded, admin):
     _fact(admin, TEAM_A, "deployment deployment checklist for deployment day",
           "Deploys")
     hits = search_memory(TEAM_A, A1, "deployment")
-    assert "checklist" in hits[0]["fact"]
+    assert "checklist" in unmarked(hits[0]["fact"])
 
 
 def test_the_tool_is_declared_a_read(seeded):
@@ -225,8 +243,8 @@ def test_a_member_of_two_teams_searches_only_the_one_they_asked_about(seeded, ad
     _fact(admin, TEAM_A, "team A deploys on fridays", "Releases")
     _fact(admin, TEAM_B, "team B deploys on tuesdays", "Releases")
 
-    a_hits = [h["fact"] for h in search_memory(TEAM_A, A1, "deploys")]
+    a_hits = [unmarked(h["fact"]) for h in search_memory(TEAM_A, A1, "deploys")]
     assert a_hits == ["team A deploys on fridays"]
 
-    b_hits = [h["fact"] for h in search_memory(TEAM_B, A1, "deploys")]
+    b_hits = [unmarked(h["fact"]) for h in search_memory(TEAM_B, A1, "deploys")]
     assert b_hits == ["team B deploys on tuesdays"]

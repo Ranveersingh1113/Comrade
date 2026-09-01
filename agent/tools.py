@@ -129,14 +129,16 @@ def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
             {
                 "source_kind": source_kind,
                 "source_id": str(source_id),
-                "excerpt": excerpt,
+                # The excerpt is VERBATIM source text — the most directly
+                # attacker-shaped string this tool returns.
+                "excerpt": spotlight(excerpt or ""),
             }
         )
     return {
         "title": page["title"],
         "description": page["description"],
         "facts": [
-            {"fact": f["text"], "citations": by_entry.get(f["entry_id"], [])}
+            {"fact": spotlight(f["text"]), "citations": by_entry.get(f["entry_id"], [])}
             for f in page["facts"]
         ],
     }
@@ -202,7 +204,7 @@ def search_messages(
             "sender": "Comrade" if kind == "ai" else (name or "a former member"),
             "thread": thread_type,
             "created_at": created_at.isoformat(),
-            "body": body[:MESSAGE_BODY_CHARS],
+            "body": spotlight(body[:MESSAGE_BODY_CHARS]),
             "truncated": len(body) > MESSAGE_BODY_CHARS,
         }
         for message_id, body, thread_type, created_at, kind, name in rows
@@ -279,7 +281,7 @@ def search_memory(
         ).fetchall()
     return [
         {
-            "fact": fact,
+            "fact": spotlight(fact),
             "valid_from": valid_from.isoformat() if valid_from else None,
             # Orphan facts have no page; naming the bucket keeps the shape
             # uniform so the agent never has to branch on null.
@@ -515,7 +517,7 @@ def fetch_repo_activity(
             "author": author,
             "occurred_at": occurred_at.isoformat() if occurred_at else None,
             "url": payload.get("url"),
-            "summary": full[:REPO_SUMMARY_CHARS],
+            "summary": spotlight(full[:REPO_SUMMARY_CHARS]),
             "truncated": len(full) > REPO_SUMMARY_CHARS,
         })
     return out

@@ -4,6 +4,19 @@ import psycopg
 from agent.agent import wiki_section
 from shared.config import settings
 from tests._seed import A1, B1, TEAM_A, TEAM_B
+from pipeline.parsers import SPACE_MARK
+
+def unmarked(value):
+    """Tool results are datamarked — spaces become SPACE_MARK — so a test that
+    looks for ordinary prose has to undo the marking first.
+
+    Added 2026-09-02 when spotlight() was extended from document_read to every
+    read path. These assertions are about WHICH facts come back and what they
+    say, not about the marking; the marking itself is the subject of
+    tests/test_datamarking.py.
+    """
+    return value.replace(SPACE_MARK, " ") if isinstance(value, str) else value
+
 
 
 def _admin():
@@ -108,10 +121,10 @@ def test_read_page_returns_facts_with_citations(seeded):
 
     page = read_memory_page(TEAM_A, A1, "Deadlines")
     assert page["title"] == "Deadlines"
-    assert page["facts"][0]["fact"] == "Demo is Friday"
+    assert unmarked(page["facts"][0]["fact"]) == "Demo is Friday"
     citation = page["facts"][0]["citations"][0]
     assert citation["source_kind"] == "document"
-    assert citation["excerpt"] == "demo on Friday"
+    assert unmarked(citation["excerpt"]) == "demo on Friday"
 
 
 def test_read_page_is_case_insensitive(seeded):

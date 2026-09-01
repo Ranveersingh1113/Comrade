@@ -79,6 +79,34 @@ def workspace_for(team_id: str) -> Path:
     return workspaces_root() / team_id.lower()
 
 
+#: GitHub's own rules for an owner/repo pair, applied because repo_full_name
+#: reaches this from a database column that some UI will one day let a member
+#: fill in. It becomes a directory name, so it gets the same suspicion team_id
+#: does.
+_REPO_FULL_NAME = re.compile(r"^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$")
+
+
+def repo_checkout(team_id: str, repo_full_name: str) -> Path:
+    """Where one repository sits inside one team's workspace.
+
+    A team may connect more than one repo (`github_repos` is unique on
+    (team_id, repo_full_name), not on team_id), so the checkout is a level
+    down rather than the workspace itself.
+
+    The slash becomes a double underscore instead of a subdirectory: nesting
+    `owner/repo` would make the owner a directory shared by every repo of
+    theirs, and a repo literally named `..` — GitHub forbids it, our schema
+    does not — would climb. Flattening removes the question.
+    """
+    name = (repo_full_name or "").strip()
+    if not _REPO_FULL_NAME.match(name) or ".." in name:
+        raise WorkspaceError(
+            f"{repo_full_name!r} is not an owner/repo name, so it cannot name"
+            " a checkout directory."
+        )
+    return workspace_for(team_id) / name.replace("/", "__")
+
+
 def ensure_workspace(team_id: str) -> Path:
     """The team's workspace directory, created if it does not exist."""
     path = workspace_for(team_id)

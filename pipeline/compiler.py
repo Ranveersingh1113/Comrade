@@ -16,6 +16,8 @@ compile_document() orchestrates extract -> consolidate -> apply, and
 handle_document_job() is the worker handler (parse -> spotlight -> compile).
 """
 import base64
+import logging
+import re
 
 from google import genai
 from google.genai import types
@@ -31,6 +33,8 @@ from shared.config import settings
 from shared.db import Role, team_session
 
 MODEL_FLASH = "gemini-2.5-flash"
+logger = logging.getLogger(__name__)
+
 MODEL_PRO = "gemini-2.5-pro"
 _PRO_THRESHOLD = 200_000  # chars; escalate big WhatsApp exports to Pro
 
@@ -104,7 +108,10 @@ _CONSOLIDATE_SYSTEM = (
     " page it belongs on, or propose a short new page title of 2-4 words; when"
     " you propose a NEW title, also set page_description to one short line"
     " saying what belongs on that page, so a reader can pick it from an index"
-    " without opening it),"
+    " without opening it; set page_kind to 'skill' when the page holds HOW THE"
+    " TEAM DOES SOMETHING - a procedure, a convention, a standard someone"
+    " could follow - and 'fact' when it holds things that are true about the"
+    " project),"
     " 'revise' (it updates or replaces one existing fact - set entry_id to that"
     " fact's id), 'invalidate' (it states an existing fact no longer holds and"
     " nothing replaces it - set entry_id), 'noop' (it duplicates an existing"
@@ -135,6 +142,10 @@ class Decision(BaseModel):
     # the input the LIVE recall index selects on (agent/agent.py:wiki_section),
     # not routing polish — findings §2.3, promoted by §20.4-1.
     page_description: str | None = None
+    # 'fact' | 'skill'. Lets the model create a procedure page rather than only
+    # ever a fact page — without it the kind column exists and nothing can
+    # produce one, which is decoration (§24.2, §6.3-3).
+    page_kind: str | None = None
 
 
 class _Consolidation(BaseModel):
@@ -162,6 +173,115 @@ def extract_candidates(marked_text: str, kind: str = "document") -> list[Candida
     return list(parsed.facts) if parsed else []
 
 
+# How many facts stage 2 may be shown at once. §20.3.3 / §6.3-8: consolidation
+# sent the WHOLE wiki on every compile, so cost was O(wiki size x compile
+# frequency) with only a >=5-message debounce holding it back.
+#
+# 400 sits comfortably above pilot scale (§20.3.3 calls 300 fine), so this does
+# not fire for a real team today — the point is that it CANNOT run away, not
+# that it trims anything now. A module constant rather than a setting until
+# somebody needs to tune it per team.
+CONSOLIDATION_FACT_CAP = 400
+
+# Words that say nothing about what a page is about. Without this, overlap
+# scoring ranks by page LENGTH — the longest page shares the most "the" and
+# "is" with anything — which is relevance-blind and recency-blind at once.
+_STOPWORDS = frozenset("""
+a an and are as at be been by for from has have in is it its of on or that the
+this to was were will with we our us you your they their he she i not no but if
+then than so do does did can could should would may might must about into over
+""".split())
+
+
+def _terms(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _STOPWORDS}
+
+
+def select_pages(
+    candidates: list[Candidate],
+    pages: list[dict],
+    max_facts: int = CONSOLIDATION_FACT_CAP,
+) -> tuple[list[dict], list[str]]:
+    """Choose which pages stage 2 gets to see. Returns (kept, dropped_titles).
+
+    The cap is the easy half. The trap is what a cap does to REVISE:
+
+        a fact the model cannot see is a fact it cannot revise
+
+    validate_decisions degrades any decision naming an unknown entry to 'add',
+    so a naive truncation does not merely lose recall — it turns "revise this
+    fact" into "add a near-duplicate", on every compile, for every fact outside
+    the window. The wiki fills with pairs consolidation can never merge,
+    because the original is always the one that got cut.
+
+    Hence selection rather than truncation, on two signals:
+
+      1. **Overlap** with what the candidates are actually talking about. This
+         is the one that matters: it puts the page a candidate would revise in
+         front of the model.
+      2. **Recency**, as the tie-break, for candidates that match nothing —
+         a genuinely new fact belongs with recent work more often than with
+         old.
+
+    Pages are kept WHOLE. Half a page is the worst outcome available: the model
+    revises the facts it can see and adds duplicates of the ones it cannot,
+    inside a page it is looking straight at.
+
+    Returning the dropped titles is not decoration. A silent cap is a
+    correctness problem, and the caller logs what the model was never shown.
+    """
+    if max_facts < 1:
+        raise ValueError(f"max_facts must be at least 1, got {max_facts}")
+    if not pages:
+        return [], []
+
+    total = sum(len(p["facts"]) for p in pages)
+    if total <= max_facts:
+        # The common case, and it must stay byte-identical to no cap at all.
+        return pages, []
+
+    cand_terms: set[str] = set()
+    for c in candidates:
+        cand_terms |= _terms(c.text)
+
+    def rank(page: dict) -> tuple[int, object]:
+        page_terms = _terms(page["title"]) | _terms(page.get("description") or "")
+        for f in page["facts"]:
+            page_terms |= _terms(f["text"])
+        # No page-level timestamp exists (see wiki.all_active_pages), so
+        # recency is the newest fact on the page.
+        stamps = [f["valid_from"] for f in page["facts"] if f["valid_from"] is not None]
+        newest = max(stamps) if stamps else None
+        return (len(cand_terms & page_terms), newest)
+
+    ordered = sorted(
+        pages,
+        key=lambda p: (rank(p)[0], rank(p)[1] is not None, rank(p)[1] or 0),
+        reverse=True,
+    )
+
+    kept: list[dict] = []
+    dropped: list[str] = []
+    budget = max_facts
+    for page in ordered:
+        n = len(page["facts"])
+        if n <= budget or not kept:
+            # `or not kept` — the top-ranked page goes in even if it alone
+            # busts the budget. An over-budget prompt costs money; an EMPTY
+            # one turns every candidate into an add, which is the duplicate
+            # factory switched fully on.
+            kept.append(page)
+            budget -= n
+        else:
+            dropped.append(page["title"])
+
+    # Restore the caller's order so the prompt is stable across compiles that
+    # happen to rank pages differently.
+    order = {id(p): i for i, p in enumerate(pages)}
+    kept.sort(key=lambda p: order[id(p)])
+    return kept, dropped
+
+
 def build_consolidation_prompt(
     candidates: list[Candidate], pages: list[dict]
 ) -> str:
@@ -185,6 +305,7 @@ def build_consolidation_prompt(
 
 
 _ACTIONS = {"add", "revise", "invalidate", "noop"}
+_PAGE_KINDS = {"fact", "skill"}
 
 
 def validate_decisions(
@@ -214,11 +335,16 @@ def validate_decisions(
             continue
         title = (d.page_title or "").strip() or None
         description = (d.page_description or "").strip() or None
+        # Degrades rather than raises, like every other field here: a model
+        # inventing 'procedure' must not abort a compile. The fact still
+        # belongs in memory, just on an ordinary page.
+        kind = (d.page_kind or "").strip().lower()
+        kind = kind if kind in _PAGE_KINDS else "fact"
         out.append(
             Decision(
                 candidate_index=i, action=d.action,
                 entry_id=d.entry_id, page_title=title,
-                page_description=description,
+                page_description=description, page_kind=kind,
             )
         )
     return out
@@ -227,7 +353,23 @@ def validate_decisions(
 def consolidate(
     candidates: list[Candidate], pages: list[dict], doc_len: int
 ) -> list[Decision]:
-    """Stage 2: one LLM call deciding an action per candidate, then validated."""
+    """Stage 2: one LLM call deciding an action per candidate, then validated.
+
+    The page set is capped first (§20.3.3), and the SAME capped set feeds both
+    the prompt and validate_decisions. That consistency is what makes the cap
+    safe: validate_decisions builds its allowed-entry set from whatever it is
+    given, so passing the full list here and the capped list to the prompt
+    would accept a revise against a fact the model was never shown.
+    """
+    pages, dropped = select_pages(candidates, pages)
+    if dropped:
+        # Never silently. A capped compile can only 'add' where it would have
+        # 'revised', so the log has to say which pages were out of view when
+        # a duplicate shows up later.
+        logger.info(
+            "consolidation capped at %d facts; %d page(s) not shown: %s",
+            CONSOLIDATION_FACT_CAP, len(dropped), ", ".join(dropped),
+        )
     prompt = build_consolidation_prompt(candidates, pages)
     resp = _get_client().models.generate_content(
         model=MODEL_PRO if doc_len > _PRO_THRESHOLD else MODEL_FLASH,
@@ -244,7 +386,10 @@ def consolidate(
     return validate_decisions(candidates, pages, raw)
 
 
-def _resolve_page(conn, team_id: str, title: str | None, description: str | None = None):
+def _resolve_page(
+    conn, team_id: str, title: str | None, description: str | None = None,
+    kind: str | None = None,
+):
     """Find (case-insensitively) or create the page an added fact lands on.
 
     An existing page's description is filled in if it is still blank, but
@@ -253,6 +398,11 @@ def _resolve_page(conn, team_id: str, title: str | None, description: str | None
     """
     name = (title or "").strip() or DEFAULT_PAGE_TITLE
     desc = (description or "").strip()
+    # An existing page keeps its kind. Letting a later compile flip a fact page
+    # to a procedure (or back) would rewrite what a page IS on the strength of
+    # one document, and the facts already on it were written under the old
+    # reading.
+    page_kind = kind if kind in _PAGE_KINDS else "fact"
     row = conn.execute(
         "select id, description from public.memory_pages"
         " where team_id=%s and lower(title)=lower(%s)",
@@ -266,9 +416,9 @@ def _resolve_page(conn, team_id: str, title: str | None, description: str | None
             )
         return row[0]
     created = conn.execute(
-        "insert into public.memory_pages (team_id, title, description)"
-        " values (%s,%s,%s) on conflict do nothing returning id",
-        (team_id, name, desc),
+        "insert into public.memory_pages (team_id, title, description, kind)"
+        " values (%s,%s,%s,%s) on conflict do nothing returning id",
+        (team_id, name, desc, page_kind),
     ).fetchone()
     if created is not None:
         return created[0]
@@ -324,7 +474,9 @@ def apply_compilation(
             continue
 
         if action == "add":
-            page_id = _resolve_page(conn, team_id, dec.page_title, dec.page_description)
+            page_id = _resolve_page(
+                conn, team_id, dec.page_title, dec.page_description, dec.page_kind
+            )
             target = conn.execute(
                 "insert into public.memory_entries (team_id, page_id)"
                 " values (%s,%s) returning id",

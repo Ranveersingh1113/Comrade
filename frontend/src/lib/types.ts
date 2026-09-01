@@ -49,6 +49,12 @@ export interface Message {
   deleted_scope: DeletedScope;
   deleted_by: string | null;
   deleted_at: string | null;
+  /**
+   * The member drafted this with Comrade in their private thread and published
+   * it themselves (findings §13.4). Provenance, not authorship — attribution
+   * stays with the member, which is the point of the whole shape.
+   */
+  ai_assisted: boolean;
   created_at: string;
 }
 
@@ -78,11 +84,16 @@ export interface DocumentOpen {
   questions_asked: number;
 }
 
+// 'fact' = things that are true about the project; 'skill' = how the team
+// does something (findings §24.2 — the standard that replaces the handoff).
+export type MemoryPageKind = 'fact' | 'skill';
+
 export interface MemoryPage {
   id: string;
   team_id: string;
   title: string;
   description: string;
+  kind: MemoryPageKind;
   created_at: string;
   updated_at: string;
 }
@@ -205,4 +216,20 @@ export interface ContributionRow {
   tasks_active: number;
   github_events: number;
   group_messages: number;
+}
+
+/**
+ * Member discussion anchored to a memory ENTRY (findings §6.3-6).
+ *
+ * The entry, not the version: consolidation replaces versions routinely, and a
+ * comment anchored to one would detach from the fact it argues with at exactly
+ * the moment the fact changes.
+ */
+export interface MemoryComment {
+  id: string;
+  entry_id: string;
+  team_id: string;
+  author_id: string;
+  body: string;
+  created_at: string;
 }

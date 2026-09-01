@@ -1,7 +1,7 @@
 import {
   afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi,
 } from 'vitest';
-import { screen } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import {
@@ -178,4 +178,75 @@ describe('a plain user message', () => {
     expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
     expect(screen.queryByText(/MEMORY UPDATED/)).not.toBeInTheDocument();
   });
+});
+
+
+describe('remember this', () => {
+  test('offers to remember a human message but never an AI one', async () => {
+    // The agent's own output is not a source. Compiling it would let memory
+    // cite itself — a fact whose provenance is a sentence the model produced
+    // from the wiki it is about to be written into.
+    supaState.tables.messages = [
+      msg({ id: 'm-human', body: 'the expiry is 90 minutes' }),
+      msg({ id: 'm-ai', sender_kind: 'ai', sender_id: null, body: 'Noted.' }),
+    ];
+    const user = userEvent.setup();
+    renderInApp(<GroupRoom />);
+    await user.hover(await screen.findByText('the expiry is 90 minutes'));
+    expect(await screen.findByText(/remember this/)).toBeInTheDocument();
+
+    // Hovering the AI message offers nothing — and the human message's own
+    // offer goes away with the hover, which is why this counts zero rather
+    // than one.
+    await user.hover(screen.getByText('Noted.'));
+    expect(screen.queryAllByText(/remember this/)).toHaveLength(0);
+  });
+
+  test('says it was queued, not that it was remembered', async () => {
+    // The compiler is the only writer of memory and it still decides whether
+    // there is a durable fact in there. "Remembered" would promise something
+    // this cannot deliver.
+    let hit = '';
+    server.use(
+      http.post(`${BASE}/teams/:teamId/messages/:messageId/remember`, ({ params }) => {
+        hit = String(params.messageId);
+        return HttpResponse.json({ job_id: 'job-1' });
+      }),
+    );
+    supaState.tables.messages = [msg({ id: 'm-human', body: 'the expiry is 90 minutes' })];
+    const user = userEvent.setup();
+    renderInApp(<GroupRoom />);
+    const row = await screen.findByText('the expiry is 90 minutes');
+    await user.hover(row);
+    // fireEvent, not userEvent: the button only exists while the row is
+    // hovered, and userEvent's click moves the pointer first — which drops the
+    // hover and unmounts the button before the click lands. Verified both ways;
+    // user.click never reaches the handler here.
+    fireEvent.click(screen.getByTitle(/Queue this for the wiki/));
+
+    await waitFor(() => expect(hit).toBe('m-human'));
+    expect(await screen.findByText(/Queued/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Remembered/)).not.toBeInTheDocument();
+  });
+});
+
+
+test('a published draft is marked without losing the member as its author', async () => {
+  // §13.4's whole shape in one assertion: the member's name is on it and the
+  // provenance sits beside that, not instead of it. A message attributed to
+  // Comrade would let someone disown work published under their own name.
+  supaState.tables.messages = [
+    msg({ id: 'm-pub', body: 'Summary, trimmed.', ai_assisted: true }),
+  ];
+  renderInApp(<GroupRoom />);
+  expect(await screen.findByText('Summary, trimmed.')).toBeInTheDocument();
+  expect(screen.getByText(/drafted with Comrade/)).toBeInTheDocument();
+  expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
+});
+
+test('an ordinary message carries no provenance marker', async () => {
+  supaState.tables.messages = [msg({ id: 'm-plain', body: 'morning all' })];
+  renderInApp(<GroupRoom />);
+  await screen.findByText('morning all');
+  expect(screen.queryByText(/drafted with Comrade/)).not.toBeInTheDocument();
 });

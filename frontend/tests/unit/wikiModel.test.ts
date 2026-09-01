@@ -129,3 +129,51 @@ describe('factProvenance', () => {
     expect(factProvenance(undated)).toBeNull();
   });
 });
+
+describe('page kind', () => {
+  it('carries a skill page through to the view', () => {
+    const pages = [
+      { id: 'p1', team_id: 't', title: 'Releasing', description: 'how we ship',
+        kind: 'skill' as const, created_at: '', updated_at: '' },
+    ];
+    const entries = [{ id: 'e1', team_id: 't', page_id: 'p1', archived: false }];
+    const versions = [
+      { id: 'v1', entry_id: 'e1', team_id: 't', fact: 'run the migration first',
+        change_type: 'added', is_active: true, valid_from: null, valid_until: null,
+        compilation_id: null, created_at: '' },
+    ];
+    const [page] = projectWiki(pages as never, entries as never, versions as never, [], []);
+    expect(page.kind).toBe('skill');
+  });
+
+  it('treats a page written before the column existed as a fact page', () => {
+    // Rows predating the migration come back without `kind`; undefined would
+    // render as neither kind and the badge logic would silently do nothing.
+    const pages = [
+      { id: 'p1', team_id: 't', title: 'Deadlines', description: '',
+        created_at: '', updated_at: '' },
+    ];
+    const entries = [{ id: 'e1', team_id: 't', page_id: 'p1', archived: false }];
+    const versions = [
+      { id: 'v1', entry_id: 'e1', team_id: 't', fact: 'demo is 14 march',
+        change_type: 'added', is_active: true, valid_from: null, valid_until: null,
+        compilation_id: null, created_at: '' },
+    ];
+    const [page] = projectWiki(pages as never, entries as never, versions as never, [], []);
+    expect(page.kind).toBe('fact');
+  });
+
+  it('never calls the orphan bucket a procedure', () => {
+    // Facts with no page are facts. Mirrors pipeline/wiki.py's ORPHAN_TITLE
+    // bucket, which makes the same claim on the backend side.
+    const entries = [{ id: 'e1', team_id: 't', page_id: null, archived: false }];
+    const versions = [
+      { id: 'v1', entry_id: 'e1', team_id: 't', fact: 'a homeless fact',
+        change_type: 'added', is_active: true, valid_from: null, valid_until: null,
+        compilation_id: null, created_at: '' },
+    ];
+    const [page] = projectWiki([], entries as never, versions as never, [], []);
+    expect(page.title).toBe(UNCATEGORIZED);
+    expect(page.kind).toBe('fact');
+  });
+});

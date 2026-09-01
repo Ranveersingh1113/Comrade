@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 import { messageTime } from '../lib/format';
 import type {
   MemoryCitation,
+  MemoryComment,
   MemoryCompilation,
   MemoryEntry,
   MemoryPage,
@@ -22,20 +23,61 @@ type Fact = WikiFact;
 type PageView = WikiPageView;
 
 export function Wiki() {
-  const { team, myUserId } = useTeam();
+  const { team, myUserId, profileOf } = useTeam();
   const teamId = team?.id ?? '';
   const [pages, setPages] = useState<PageView[] | null>(null);
   const [lastCompile, setLastCompile] = useState<MemoryCompilation | null>(null);
   const [expandedFact, setExpandedFact] = useState<string | null>(null);
+  const [comments, setComments] = useState<MemoryComment[]>([]);
+  const [draft, setDraft] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
+
+  const commentsByEntry = new Map<string, MemoryComment[]>();
+  for (const c of comments) {
+    commentsByEntry.set(c.entry_id, [...(commentsByEntry.get(c.entry_id) ?? []), c]);
+  }
+
+  const addComment = async (entryId: string) => {
+    const body = (draft[entryId] ?? '').trim();
+    if (!body || !teamId) return;
+    const { error: err } = await supabase.from('memory_comments').insert({
+      entry_id: entryId, team_id: teamId, author_id: myUserId, body,
+    });
+    if (err) {
+      setError(err.message);
+      return;
+    }
+    setDraft((d) => ({ ...d, [entryId]: '' }));
+    await load();
+  };
+
+  const withdraw = async (commentId: string) => {
+    // Only your own — au_memory_comments_delete is the gate, and a teammate's
+    // objection is not yours to erase.
+    const { error: err } = await supabase
+      .from('memory_comments')
+      .delete()
+      .eq('id', commentId);
+    if (err) {
+      setError(err.message);
+      return;
+    }
+    await load();
+  };
 
   const load = useCallback(async () => {
     if (!teamId) return;
-    const [pagesRes, entriesRes, versionsRes, revertsRes, compileRes] = await Promise.all([
+    const [pagesRes, entriesRes, versionsRes, revertsRes, commentsRes, compileRes] =
+      await Promise.all([
       supabase.from('memory_pages').select('*').eq('team_id', teamId).order('title'),
       supabase.from('memory_entries').select('*').eq('team_id', teamId).eq('archived', false),
       supabase.from('memory_versions').select('*').eq('team_id', teamId).order('created_at'),
       supabase.from('memory_reverts').select('*').eq('team_id', teamId),
+      supabase
+        .from('memory_comments')
+        .select('*')
+        .eq('team_id', teamId)
+        .order('created_at'),
       supabase
         .from('memory_compilations')
         .select('*')
@@ -45,7 +87,8 @@ export function Wiki() {
         .limit(1),
     ]);
     const err =
-      pagesRes.error ?? entriesRes.error ?? versionsRes.error ?? revertsRes.error ?? null;
+      pagesRes.error ?? entriesRes.error ?? versionsRes.error ?? revertsRes.error
+      ?? commentsRes.error ?? null;
     if (err) {
       setError(err.message);
       return;
@@ -54,6 +97,7 @@ export function Wiki() {
     const entries = (entriesRes.data as MemoryEntry[] | null) ?? [];
     const versions = (versionsRes.data as MemoryVersion[] | null) ?? [];
     const reverts = (revertsRes.data as Array<{ entry_id: string }> | null) ?? [];
+    setComments((commentsRes.data as MemoryComment[] | null) ?? []);
     setLastCompile(((compileRes.data as MemoryCompilation[] | null) ?? [])[0] ?? null);
 
     const activeIds = versions.filter((v) => v.is_active).map((v) => v.id);
@@ -123,8 +167,30 @@ export function Wiki() {
         )}
         {pages?.map((pg) => (
           <div key={pg.pageId ?? 'orphan'} className="card fade-up" style={{ padding: '18px 21px' }}>
-            <div className="display" style={{ fontSize: 20 }}>
-              {pg.title}
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
+              <div className="display" style={{ fontSize: 20 }}>
+                {pg.title}
+              </div>
+              {/* A procedure is a different kind of claim from a fact — "how we
+                  do this" rather than "this is true" — and a page that renders
+                  identically to a fact page has not actually been added
+                  (findings §24.2, §6.3-3). */}
+              {pg.kind === 'skill' && (
+                <span
+                  className="mono"
+                  style={{
+                    fontSize: 9.5,
+                    letterSpacing: '0.14em',
+                    textTransform: 'uppercase',
+                    color: 'var(--muted)',
+                    border: '1px solid var(--border-soft)',
+                    borderRadius: 3,
+                    padding: '2px 6px',
+                  }}
+                >
+                  how we do it
+                </span>
+              )}
             </div>
             {pg.description && (
               <div style={{ fontSize: 11.5, fontStyle: 'italic', color: 'var(--muted)', marginTop: 4 }}>
@@ -223,6 +289,71 @@ export function Wiki() {
                         REVERT QUEUED
                       </span>
                     )}
+                  </div>
+                  {/* The members' half of the wiki (findings §6.3-6).
+                      Consolidation resolves every conflict by picking a winner
+                      and marking the loser inactive, so the reasoning behind a
+                      disagreement is otherwise nowhere. Anchored to the ENTRY,
+                      so it is still here after the fact is revised — which is
+                      the moment it matters, because that is when the objection
+                      either was heeded or was not. */}
+                  <div style={{ margin: '6px 0 2px 22px' }}>
+                    {commentsByEntry.get(f.entryId)?.map((c) => (
+                      <div
+                        key={c.id}
+                        style={{
+                          display: 'flex',
+                          gap: 8,
+                          alignItems: 'baseline',
+                          fontSize: 12,
+                          padding: '3px 0',
+                          color: 'var(--text-soft)',
+                        }}
+                      >
+                        <span style={{ fontWeight: 600, flex: 'none' }}>
+                          {profileOf(c.author_id)?.display_name ?? 'a former member'}
+                        </span>
+                        <span style={{ flex: 1 }}>{c.body}</span>
+                        {c.author_id === myUserId && (
+                          <button
+                            onClick={() => void withdraw(c.id)}
+                            className="mono"
+                            title="Withdraw your comment"
+                            style={{
+                              border: 'none',
+                              background: 'transparent',
+                              color: 'var(--faint)',
+                              fontSize: 9,
+                              cursor: 'pointer',
+                              flex: 'none',
+                            }}
+                          >
+                            withdraw
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    <input
+                      value={draft[f.entryId] ?? ''}
+                      onChange={(e) =>
+                        setDraft((d) => ({ ...d, [f.entryId]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void addComment(f.entryId);
+                      }}
+                      placeholder="Disagree, or add what the wiki left out…"
+                      style={{
+                        width: '100%',
+                        marginTop: 4,
+                        border: 'none',
+                        borderBottom: '1px dashed var(--border-soft)',
+                        background: 'transparent',
+                        padding: '4px 0',
+                        fontSize: 12,
+                        fontFamily: 'inherit',
+                        outline: 'none',
+                      }}
+                    />
                   </div>
                   {expandedFact === f.entryId && (
                     <div

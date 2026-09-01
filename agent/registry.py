@@ -46,6 +46,7 @@ REGISTRY: dict[str, ToolSpec] = {
     # RLS is already the gate — nothing to add.
     "team_get_state":    ToolSpec("db", writes=False, needs_human=False),
     "memory_read_page":  ToolSpec("db", writes=False, needs_human=False),
+    "memory_search":     ToolSpec("db", writes=False, needs_human=False),
     "messages_search":   ToolSpec("db", writes=False, needs_human=False),
     "document_read":     ToolSpec("db", writes=False, needs_human=False),
     "task_get":          ToolSpec("db", writes=False, needs_human=False),

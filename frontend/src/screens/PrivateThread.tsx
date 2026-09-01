@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { streamTurn, agentErrorText } from '../lib/agentApi';
+import { supabase } from '../lib/supabase';
 import { activityLabel } from '../lib/toolActivity';
 import { messageTime } from '../lib/format';
 import { useTeam } from '../state/TeamContext';
@@ -15,6 +16,8 @@ export function PrivateThread() {
   const [step, setStep] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const [agentNote, setAgentNote] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState<string | null>(null);
+  const [publishDraft, setPublishDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const me = profileOf(myUserId);
@@ -23,6 +26,30 @@ export function PrivateThread() {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, waiting]);
+
+  const publish = async () => {
+    // A plain insert — no endpoint, no consent path. au_messages_insert
+    // already requires sender_kind='user' and sender_id = auth.uid(), and RLS
+    // gates rows rather than columns, so a member setting ai_assisted on their
+    // OWN message needs no new permission. A consent card here would make a
+    // person ask permission to speak.
+    const body = publishDraft.trim();
+    if (!body || !team) return;
+    const { error: err } = await supabase.from('messages').insert({
+      team_id: team.id,
+      thread_type: 'group',
+      sender_kind: 'user',
+      sender_id: myUserId,
+      body,
+      ai_assisted: true,
+    });
+    if (err) {
+      setSendError(err.message);
+      return;
+    }
+    setPublishing(null);
+    setPublishDraft('');
+  };
 
   const send = async () => {
     const text = draft.trim();
@@ -166,9 +193,74 @@ export function PrivateThread() {
                     {messageTime(m.created_at).toUpperCase()}
                   </div>
                 </div>
+                {/* Publish this into the room (findings §13.4). It composes a
+                    NEW message from you — it does not move this one, so the
+                    thread keeps its history and the room never receives
+                    something authored by the AI (§13). The draft is editable
+                    before it goes, because it is about to carry your name. */}
+                {isAI && (
+                  publishing === m.id ? null : (
+                    <button
+                      onClick={() => {
+                        setPublishing(m.id);
+                        setPublishDraft(m.body);
+                      }}
+                      className="mono"
+                      title="Post this to the group room as your own message, marked as drafted with Comrade"
+                      style={{
+                        alignSelf: 'flex-end',
+                        border: 'none',
+                        background: 'transparent',
+                        color: 'var(--faint)',
+                        fontSize: 9.5,
+                        cursor: 'pointer',
+                        flex: 'none',
+                      }}
+                    >
+                      ↥ publish to the room
+                    </button>
+                  )
+                )}
               </div>
             );
           })}
+          {publishing && (
+            <div
+              className="card"
+              style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 9 }}
+            >
+              <div style={{ fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.5 }}>
+                This goes to the room under your name, marked{' '}
+                <b>drafted with Comrade</b>. Trim it first — you are the one
+                saying it.
+              </div>
+              <textarea
+                value={publishDraft}
+                onChange={(e) => setPublishDraft(e.target.value)}
+                rows={5}
+                style={{
+                  width: '100%',
+                  border: '1px solid var(--border)',
+                  borderRadius: 3,
+                  padding: '10px 12px',
+                  fontSize: 13,
+                  fontFamily: 'inherit',
+                  lineHeight: 1.5,
+                  resize: 'vertical',
+                  outline: 'none',
+                  background: '#fff',
+                }}
+              />
+              <div style={{ display: 'flex', gap: 9 }}>
+                <button className="btn-primary" onClick={() => void publish()}>
+                  POST TO THE ROOM
+                </button>
+                <button className="btn-ghost" onClick={() => setPublishing(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
           {waiting && (
             <div style={{ display: 'flex', gap: 13 }}>
               <AiOrb size={32} breathing />

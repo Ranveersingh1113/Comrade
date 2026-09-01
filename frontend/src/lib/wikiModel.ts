@@ -2,7 +2,7 @@
 // (the backend's member-facing renderer) so both surfaces agree on layout.
 import { shortDate } from './format';
 import type {
-  MemoryCitation, MemoryEntry, MemoryPage, MemoryVersion,
+  MemoryCitation, MemoryEntry, MemoryPage, MemoryPageKind, MemoryVersion,
 } from './types';
 
 export const UNCATEGORIZED = 'Uncategorized'; // mirrors pipeline/wiki.py ORPHAN_TITLE
@@ -50,6 +50,7 @@ export interface WikiPage {
   pageId: string | null;
   title: string;
   description: string;
+  kind: MemoryPageKind;
   facts: WikiFact[];
 }
 
@@ -97,11 +98,20 @@ export function projectWiki(
     pageId: p.id,
     title: p.title,
     description: p.description,
+    // Defaulted rather than assumed present: rows written before the column
+    // existed come back without it, and `undefined` would render as neither
+    // kind.
+    kind: p.kind ?? 'fact',
     facts: collect((e) => e.page_id === p.id),
   }));
   const orphans = collect((e) => e.page_id === null);
   if (orphans.length > 0) {
-    views.push({ pageId: null, title: UNCATEGORIZED, description: '', facts: orphans });
+    // Facts with no page are facts, not procedures — mirrors
+    // pipeline/wiki.py's orphan bucket.
+    views.push({
+      pageId: null, title: UNCATEGORIZED, description: '', kind: 'fact',
+      facts: orphans,
+    });
   }
   return views.filter((v) => v.facts.length > 0);
 }

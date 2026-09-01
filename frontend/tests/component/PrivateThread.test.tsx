@@ -204,3 +204,76 @@ test('an empty turn says so instead of just stopping', async () => {
   // Not the error slot: nothing the member did failed.
   expect(note).not.toHaveStyle({ color: 'var(--terracotta)' });
 });
+
+
+describe('publishing into the room', () => {
+  const aiMsg = {
+    id: 'p-ai', team_id: 'team-1', thread_type: 'private', thread_owner_id: 'u1',
+    sender_kind: 'ai', sender_id: null, body: 'Here is a draft of the summary.',
+    deleted_scope: null, deleted_by: null, deleted_at: null, ai_assisted: false,
+    created_at: '2026-07-20T09:00:10Z',
+  };
+
+  test('only Comrade replies can be published', async () => {
+    // Your own message is already in a thread you own; "publish" on it would
+    // mean nothing. The affordance belongs on the thing you would want to
+    // share — what Comrade drafted for you.
+    supaState.tables.messages = [
+      aiMsg,
+      { ...aiMsg, id: 'p-me', sender_kind: 'user', sender_id: 'u1', body: 'draft me a summary' },
+    ];
+    renderInApp(<PrivateThread />);
+    await screen.findByText('Here is a draft of the summary.');
+    expect(screen.getAllByText(/publish to the room/)).toHaveLength(1);
+  });
+
+  test('the draft is editable before it carries your name', async () => {
+    // §13.4: prefill an EDITABLE body. It is about to be published under the
+    // member's own name with their attribution, so sending it verbatim has to
+    // be a choice rather than the only option.
+    supaState.tables.messages = [aiMsg];
+    const user = userEvent.setup();
+    renderInApp(<PrivateThread />);
+    await user.click(await screen.findByText(/publish to the room/));
+
+    // Prefilled with Comrade's words...
+    const box = await screen.findByDisplayValue('Here is a draft of the summary.');
+    // ...and actually editable, which is the half that matters.
+    await user.clear(box);
+    await user.type(box, 'my own words instead');
+    expect(screen.getByDisplayValue('my own words instead')).toBeInTheDocument();
+  });
+
+  test('publishes as the member, into the group, marked', async () => {
+    supaState.tables.messages = [aiMsg];
+    const user = userEvent.setup();
+    renderInApp(<PrivateThread />);
+    await user.click(await screen.findByText(/publish to the room/));
+    const box = screen.getByDisplayValue('Here is a draft of the summary.');
+    await user.clear(box);
+    await user.type(box, 'Summary, trimmed.');
+    await user.click(screen.getByRole('button', { name: 'POST TO THE ROOM' }));
+
+    const write = supaState.inserts.find((w) => w.table === 'messages');
+    expect(write).toBeDefined();
+    expect(write!.values).toMatchObject({
+      thread_type: 'group',
+      // Attribution stays with the member — this is the whole shape (§13.4).
+      // sender_kind 'ai' here would put agent-authored content in the room,
+      // which §13 forbids outright.
+      sender_kind: 'user',
+      sender_id: 'u1',
+      body: 'Summary, trimmed.',
+      ai_assisted: true,
+    });
+  });
+
+  test('cancelling publishes nothing', async () => {
+    supaState.tables.messages = [aiMsg];
+    const user = userEvent.setup();
+    renderInApp(<PrivateThread />);
+    await user.click(await screen.findByText(/publish to the room/));
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(supaState.inserts.find((w) => w.table === 'messages')).toBeUndefined();
+  });
+});

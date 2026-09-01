@@ -472,6 +472,24 @@ function MessageRow({
               AI · SEEN BY ALL
             </span>
           )}
+          {/* Provenance, beside the member's own name rather than instead
+              of it: they wrote it and they stand behind it (§13.4). */}
+          {m.ai_assisted && (
+            <span
+              className="mono"
+              style={{
+                fontSize: 9,
+                letterSpacing: '0.1em',
+                textTransform: 'uppercase',
+                color: 'var(--muted)',
+                border: '1px solid var(--border-soft)',
+                borderRadius: 2,
+                padding: '2px 6px',
+              }}
+            >
+              drafted with Comrade
+            </span>
+          )}
           <span className="mono" style={{ fontSize: 10.5, color: 'var(--faint)' }}>
             {messageTime(m.created_at)}
           </span>

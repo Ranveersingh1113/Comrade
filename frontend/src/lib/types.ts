@@ -49,6 +49,12 @@ export interface Message {
   deleted_scope: DeletedScope;
   deleted_by: string | null;
   deleted_at: string | null;
+  /**
+   * The member drafted this with Comrade in their private thread and published
+   * it themselves (findings §13.4). Provenance, not authorship — attribution
+   * stays with the member, which is the point of the whole shape.
+   */
+  ai_assisted: boolean;
   created_at: string;
 }
 

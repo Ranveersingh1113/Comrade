@@ -229,3 +229,24 @@ describe('remember this', () => {
     expect(screen.queryByText(/^Remembered/)).not.toBeInTheDocument();
   });
 });
+
+
+test('a published draft is marked without losing the member as its author', async () => {
+  // §13.4's whole shape in one assertion: the member's name is on it and the
+  // provenance sits beside that, not instead of it. A message attributed to
+  // Comrade would let someone disown work published under their own name.
+  supaState.tables.messages = [
+    msg({ id: 'm-pub', body: 'Summary, trimmed.', ai_assisted: true }),
+  ];
+  renderInApp(<GroupRoom />);
+  expect(await screen.findByText('Summary, trimmed.')).toBeInTheDocument();
+  expect(screen.getByText(/drafted with Comrade/)).toBeInTheDocument();
+  expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
+});
+
+test('an ordinary message carries no provenance marker', async () => {
+  supaState.tables.messages = [msg({ id: 'm-plain', body: 'morning all' })];
+  renderInApp(<GroupRoom />);
+  await screen.findByText('morning all');
+  expect(screen.queryByText(/drafted with Comrade/)).not.toBeInTheDocument();
+});

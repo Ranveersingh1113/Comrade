@@ -25,8 +25,10 @@ Keys are MODEL-FACING tool names (what the LLM calls). They are a different
 namespace from shared/consent.py's `_EXECUTORS`, which keys on consent action
 names — `team_propose_task` proposes the action `task_create`.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
+
+from agent.capability import ArgPolicy
 
 Surface = Literal["sandbox", "db", "outbound"]
 
@@ -36,6 +38,13 @@ class ToolSpec:
     surface: Surface
     writes: bool
     needs_human: bool
+    #: What this tool's ARGUMENTS may name — paths, commands, a write rate.
+    #: Only meaningful for `sandbox` tools; a `db` tool's reach is decided by
+    #: RLS underneath it, which is a stronger boundary than any glob.
+    #: The default permits nothing, so a sandbox tool that forgets to declare
+    #: a scope reaches no files rather than all of them (same inversion as
+    #: UNKNOWN below).
+    args: ArgPolicy = field(default_factory=ArgPolicy)
 
 
 # The fail-closed default. Anything not in REGISTRY resolves to this.

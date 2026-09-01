@@ -16,15 +16,25 @@ from agent.permission_plugin import ChokepointPlugin
 from agent.registry import REGISTRY, ToolSpec
 
 
-def _gate(tool_name: str):
+class _Ctx:
+    """The slice of ToolContext the gate touches: a mutable state dict.
+
+    Was `None` — honest while the gate read only the tool's declaration. Since
+    it now counts writes per turn, a context that cannot hold state would make
+    the rate limit untestable.
+    """
+
+    def __init__(self, state=None):
+        self.state = state if state is not None else {}
+
+
+def _gate(tool_name: str, tool_args=None, ctx=None):
     """Run the gate for one tool call. None = allowed through untouched."""
     return asyncio.run(
         ChokepointPlugin().before_tool_callback(
             tool=BaseTool(name=tool_name, description=""),
-            tool_args={},
-            # The gate reads the tool's declaration and nothing else, so an
-            # absent context is honest here rather than a stub standing in.
-            tool_context=None,
+            tool_args=tool_args or {},
+            tool_context=ctx if ctx is not None else _Ctx(),
         )
     )
 
@@ -71,16 +81,87 @@ def test_an_undeclared_tool_is_refused_and_the_model_is_told_why():
     assert "exfiltrate_everything" in str(refusal)
 
 
-def test_a_sandbox_tool_is_not_gated(monkeypatch):
-    """§15.5: the chokepoint governs db and outbound, not a shell in a sandbox.
+def test_a_sandbox_tool_declaring_no_scope_reaches_nothing(monkeypatch):
+    """🔴 This test used to assert the OPPOSITE, and was right to at the time.
 
-    A sandbox holding no credentials and reaching nothing unproxied buys
-    nothing from per-command approval and costs the capability. There is no
-    sandbox tool yet, so the policy is asserted against a synthetic
-    declaration rather than an invented tool — and the declaration asks for a
-    human, so this fails if the sandbox exemption is dropped.
+    It read: "the chokepoint governs db and outbound, not a shell in a
+    sandbox — a sandbox holding no credentials and reaching nothing unproxied
+    buys nothing from per-command approval and costs the capability." Sound
+    argument, and both premises are false on a developer's machine: the
+    environment holds .env (the RLS-bypassing admin role, the JWT signing
+    secret, a GitHub PAT) and reaches the whole internet.
+
+    So the branch that returned None for `sandbox` was the shortest path in
+    this codebase to a completely ungated shell — one ToolSpec and nothing
+    else. It now applies the tool's argument policy, and a tool that declares
+    none reaches no files, matching UNKNOWN's inversion: undeclared means
+    unreviewed, not allowed.
     """
     monkeypatch.setitem(
-        REGISTRY, "sandbox_shell", ToolSpec("sandbox", writes=True, needs_human=True)
+        REGISTRY, "sandbox_shell", ToolSpec("sandbox", writes=False, needs_human=False)
     )
-    assert _gate("sandbox_shell") is None
+    refusal = _gate("sandbox_shell", {"path": "agent/tools.py"})
+    assert isinstance(refusal, dict)
+    assert refusal["error"] == "refused_by_capability_budget"
+
+
+def test_a_sandbox_tool_within_its_declared_scope_runs(monkeypatch):
+    from agent.capability import ArgPolicy
+
+    monkeypatch.setitem(
+        REGISTRY, "read_source",
+        ToolSpec("sandbox", writes=False, needs_human=False,
+                 args=ArgPolicy(path_arg="path", allow=("agent/**",))),
+    )
+    assert _gate("read_source", {"path": "agent/tools.py"}) is None
+
+
+def test_no_sandbox_scope_can_reach_a_secret(monkeypatch):
+    """The deny-list is not a policy choice a tool author can opt out of."""
+    from agent.capability import ArgPolicy
+
+    monkeypatch.setitem(
+        REGISTRY, "read_anything",
+        ToolSpec("sandbox", writes=False, needs_human=False,
+                 args=ArgPolicy(path_arg="path", allow=("**",))),
+    )
+    refusal = _gate("read_anything", {"path": ".env"})
+    assert isinstance(refusal, dict)
+    assert "secret" in refusal["reason"]
+
+
+def test_writes_are_capped_per_turn(monkeypatch):
+    """The RATE dimension. A loop that has decided to rewrite the repository
+    should be stopped by arithmetic, not noticed afterwards."""
+    from agent.capability import ArgPolicy
+
+    monkeypatch.setitem(
+        REGISTRY, "write_test",
+        ToolSpec("sandbox", writes=True, needs_human=False,
+                 args=ArgPolicy(path_arg="path", allow=("tests/**",),
+                                writable=("tests/**",), max_writes_per_turn=2)),
+    )
+    ctx = _Ctx()
+    args = {"path": "tests/test_agent.py"}
+    assert _gate("write_test", args, ctx) is None
+    assert _gate("write_test", args, ctx) is None
+    refusal = _gate("write_test", args, ctx)
+    assert isinstance(refusal, dict)
+    assert "limit" in refusal["reason"]
+
+
+def test_the_write_cap_is_per_turn_not_global(monkeypatch):
+    """State lives on the ADK session, and runtime.py builds a fresh one per
+    turn — so a member asking a second question starts from zero rather than
+    inheriting the last turn's exhaustion."""
+    from agent.capability import ArgPolicy
+
+    monkeypatch.setitem(
+        REGISTRY, "write_test",
+        ToolSpec("sandbox", writes=True, needs_human=False,
+                 args=ArgPolicy(path_arg="path", allow=("tests/**",),
+                                writable=("tests/**",), max_writes_per_turn=1)),
+    )
+    args = {"path": "tests/test_agent.py"}
+    assert _gate("write_test", args, _Ctx()) is None
+    assert _gate("write_test", args, _Ctx()) is None

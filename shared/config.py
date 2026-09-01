@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # it, because team checkouts inside our repo would be kept out of git and
     # out of the agent's reach only by a .gitignore line.
     comrade_workspaces_root: str = "~/.comrade/workspaces"
+    # Total disk the checkouts may occupy. A full disk takes Postgres with it,
+    # so this is an availability bound, not tidiness. Checkouts are always
+    # re-clonable, which is what makes eviction safe.
+    comrade_workspaces_max_gb: float = 20.0
     # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the

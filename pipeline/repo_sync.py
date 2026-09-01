@@ -34,13 +34,17 @@ replaces the body of this one function and nothing else.
 """
 import logging
 import subprocess
+import time
+import uuid
 from base64 import b64encode
 from pathlib import Path
 
 from pipeline.worker import PermanentJobError, register
 from shared.config import settings
-from shared.db import Role, team_session
-from shared.workspace import ensure_workspace, repo_checkout
+from shared.db import Role, connect, team_session
+from shared.workspace import (
+    ensure_workspace, remove_workspace, repo_checkout, workspaces_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,3 +192,112 @@ def handle_sync_repo(team_id: str, payload: dict) -> None:
 
 
 register("sync_repo", handle_sync_repo)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: reclaiming what no team owns any more
+# ---------------------------------------------------------------------------
+
+#: A workspace younger than this is never swept, whatever the database says.
+#: The sweep crosses teams on its own connection, so a checkout created
+#: moments ago can be invisible to it — without a grace window the reconciler
+#: would delete a workspace out from under the turn that just made it.
+SWEEP_GRACE_SECONDS = 3600
+
+
+def _live_team_ids(conn) -> set[str]:
+    return {
+        str(r[0]) for r in conn.execute("select id from public.teams").fetchall()
+    }
+
+
+def _dir_size(path: Path) -> int:
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+
+
+def sweep_orphan_workspaces() -> list[str]:
+    """Delete checkouts belonging to teams that no longer exist.
+
+    A RECONCILER, not an event handler, and deliberately. A team can be deleted
+    while the worker is down, a `remove` job can fail its three attempts, a
+    disk can be restored from a backup taken before a deletion — every one of
+    those leaves an orphan that an event-driven cleanup never hears about. A
+    sweep converges from any of them.
+
+    Two guards, because a reconciler that deletes is the most dangerous kind of
+    code in a system like this:
+
+      * Only directories whose name is a UUID are ever considered. Anything
+        else in the workspaces root was not put there by us and is not ours to
+        remove.
+      * Nothing younger than SWEEP_GRACE_SECONDS is touched, so a workspace
+        created after this connection took its snapshot survives to be seen
+        next pass.
+
+    Crosses teams, so control-plane (admin), like the job claim and the chat
+    sweep.
+    """
+    root = workspaces_root()
+    if not root.exists():
+        return []
+    with connect(Role.ADMIN) as conn:
+        live = _live_team_ids(conn)
+
+    removed: list[str] = []
+    cutoff = time.time() - SWEEP_GRACE_SECONDS
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            team_id = str(uuid.UUID(entry.name))
+        except ValueError:
+            # Not ours. Something else put it here, and a cleanup routine that
+            # deletes what it does not recognise is how a reconciler eats a
+            # directory somebody was using.
+            continue
+        if team_id in live or entry.stat().st_mtime > cutoff:
+            continue
+        remove_workspace(team_id)
+        removed.append(team_id)
+    if removed:
+        logger.info("removed %d orphaned workspace(s)", len(removed))
+    return removed
+
+
+def enforce_disk_cap() -> list[str]:
+    """Evict least-recently-used workspaces until the root is under budget.
+
+    A full disk takes Postgres down with it, so this is availability rather
+    than tidiness. Eviction is safe in a way most caches are not: a checkout is
+    a copy of something GitHub still has, and the next turn re-clones it.
+
+    ponytail: total size is recomputed by walking the tree. Fine at pilot scale
+    (tens of checkouts); if that ever costs real time, cache it per workspace
+    on last_cloned_at rather than making the walk cleverer.
+    """
+    root = workspaces_root()
+    if not root.exists():
+        return []
+    budget = int(settings.comrade_workspaces_max_gb * 1024**3)
+    spaces = [d for d in root.iterdir() if d.is_dir()]
+    total = sum(_dir_size(d) for d in spaces)
+    if total <= budget:
+        return []
+
+    evicted: list[str] = []
+    # Oldest touched first: the team least likely to be mid-turn.
+    for entry in sorted(spaces, key=lambda d: d.stat().st_mtime):
+        if total <= budget:
+            break
+        try:
+            team_id = str(uuid.UUID(entry.name))
+        except ValueError:
+            continue
+        total -= _dir_size(entry)
+        remove_workspace(team_id)
+        evicted.append(team_id)
+    logger.warning(
+        "workspaces exceeded %.1f GB; evicted %d checkout(s): %s",
+        settings.comrade_workspaces_max_gb, len(evicted), ", ".join(evicted),
+    )
+    return evicted

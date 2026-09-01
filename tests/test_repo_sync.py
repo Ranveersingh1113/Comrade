@@ -12,13 +12,14 @@ The obvious clone URL embeds the credential and git persists the remote URL in
 is about to read.
 """
 import subprocess
+import time
 from pathlib import Path
 
 import psycopg
 import pytest
 
 from pipeline.repo_sync import (
-    GIT_TIMEOUT_SECONDS, RepoSyncError, _auth_header, _run_git, enqueue_sync,
+    GIT_TIMEOUT_SECONDS, SWEEP_GRACE_SECONDS, RepoSyncError, _auth_header, _run_git, enqueue_sync,
     handle_sync_repo, sync_repo,
 )
 from pipeline.worker import PermanentJobError
@@ -261,3 +262,105 @@ def test_the_pipeline_cannot_repoint_a_repository(seeded, admin):
                 " where team_id=%s",
                 (TEAM_A,),
             )
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+
+def _age(path: Path, seconds: int) -> None:
+    """Backdate a directory past the sweep's grace window."""
+    import os
+
+    old = time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def test_a_deleted_teams_checkout_is_reclaimed(seeded, workspaces, monkeypatch):
+    """The reconciler's job. A team can be deleted while the worker is down,
+    so this converges rather than relying on having heard an event."""
+    from pipeline.repo_sync import sweep_orphan_workspaces
+    from shared.workspace import ensure_workspace
+
+    gone = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    stale = ensure_workspace(gone)
+    (stale / "app.py").write_text("x")
+    _age(stale, SWEEP_GRACE_SECONDS + 60)
+
+    assert gone in sweep_orphan_workspaces()
+    assert not stale.exists()
+
+
+def test_a_live_teams_checkout_survives_the_sweep(seeded, workspaces):
+    from pipeline.repo_sync import sweep_orphan_workspaces
+    from shared.workspace import ensure_workspace
+
+    live = ensure_workspace(TEAM_A)
+    (live / "app.py").write_text("x")
+    _age(live, SWEEP_GRACE_SECONDS + 60)
+
+    sweep_orphan_workspaces()
+    assert (live / "app.py").exists()
+
+
+def test_a_freshly_made_workspace_is_never_swept(seeded, workspaces):
+    """The race the grace window exists for.
+
+    The sweep crosses teams on its own connection, so a checkout created
+    moments ago can be invisible to its snapshot. Without the window the
+    reconciler deletes a workspace out from under the turn that just made it.
+    """
+    from pipeline.repo_sync import sweep_orphan_workspaces
+    from shared.workspace import ensure_workspace
+
+    brand_new = ensure_workspace("dddddddd-dddd-dddd-dddd-dddddddddddd")
+    assert sweep_orphan_workspaces() == []
+    assert brand_new.exists()
+
+
+def test_the_sweep_ignores_anything_that_is_not_a_uuid(seeded, workspaces):
+    """A reconciler that deletes what it does not recognise is how one eats a
+    directory somebody else was using."""
+    from pipeline.repo_sync import sweep_orphan_workspaces
+    from shared.workspace import workspaces_root
+
+    root = workspaces_root()
+    root.mkdir(parents=True, exist_ok=True)
+    stranger = root / "not-ours"
+    stranger.mkdir()
+    (stranger / "important.txt").write_text("someone else's")
+    _age(stranger, SWEEP_GRACE_SECONDS + 60)
+
+    sweep_orphan_workspaces()
+    assert (stranger / "important.txt").exists()
+
+
+def test_the_disk_cap_evicts_oldest_first(seeded, workspaces, monkeypatch):
+    """A full disk takes Postgres with it. Eviction is safe here in a way it
+    is not for most caches: a checkout is a copy of something GitHub still
+    has, and the next turn re-clones it."""
+    from pipeline.repo_sync import enforce_disk_cap
+    from shared.workspace import ensure_workspace
+
+    monkeypatch.setattr(
+        "shared.config.settings.comrade_workspaces_max_gb", 1.0 / 1024 / 1024
+    )
+    old = ensure_workspace("11111111-1111-1111-1111-111111111111")
+    new = ensure_workspace("22222222-2222-2222-2222-222222222222")
+    (old / "big.bin").write_bytes(b"x" * 4096)
+    (new / "big.bin").write_bytes(b"x" * 4096)
+    _age(old, 10_000)
+
+    evicted = enforce_disk_cap()
+    assert "11111111-1111-1111-1111-111111111111" in evicted
+    assert not old.exists()
+
+
+def test_under_budget_nothing_is_evicted(seeded, workspaces):
+    from pipeline.repo_sync import enforce_disk_cap
+    from shared.workspace import ensure_workspace
+
+    keep = ensure_workspace(TEAM_A)
+    (keep / "small.txt").write_text("x")
+    assert enforce_disk_cap() == []
+    assert keep.exists()

@@ -121,6 +121,16 @@ def tick() -> int:
             logger.info("chat sweep enqueued %d compile job(s)", len(swept))
     except Exception:  # noqa: BLE001 - sweep is best-effort by design
         logger.exception("chat sweep failed; queue drain unaffected")
+
+    # Same contract: best-effort, never fatal. A reconciler that can stop the
+    # queue draining is a reconciler that turns a disk problem into an outage.
+    from pipeline.repo_sync import enforce_disk_cap, sweep_orphan_workspaces
+
+    try:
+        sweep_orphan_workspaces()
+        enforce_disk_cap()
+    except Exception:  # noqa: BLE001
+        logger.exception("workspace sweep failed; queue drain unaffected")
     return processed
 
 

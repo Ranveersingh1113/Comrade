@@ -7,6 +7,7 @@ thread it is standing in without a second session store.
 The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
+import logging
 from contextlib import ExitStack
 from typing import Any, AsyncIterator
 
@@ -22,6 +23,8 @@ from agent.history import recent_turns
 from shared.agent_runs import append_step, finish_run, start_run
 from shared.db import room_lock
 from shared.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
@@ -59,6 +62,34 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
 def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
     """Concatenate the text steps into the user-facing reply."""
     return "".join(s["text"] for s in steps if s["type"] == "text").strip()
+
+
+# How many times to re-ask when the model returns literally nothing.
+#
+# 🔴 ROOT CAUSE, measured 2026-09-01. The empty turn is not an ADK bug and not
+# ours: Gemini intermittently returns a candidate with an EMPTY parts list and
+# a perfectly normal finish_reason of STOP. Instrumented, one looks like this —
+#
+#     finish_reason  STOP          error_code  None      n_parts  0
+#     content        not None      prompt_token_count  3180
+#                                  total_token_count   3180   <- 0 output
+#
+# No safety block, no truncation, no error, no exception: it was handed 3180
+# tokens of prompt and generated none at all. Nothing downstream can
+# distinguish that from a model with nothing to say, which is why it reached
+# the member as silence.
+#
+# Retrying is safe HERE and would not be anywhere else, and that is the whole
+# argument for this fix: an empty turn is by definition a turn with no side
+# effects — no tool ran, no consent row was written, nothing was yielded to the
+# caller. The `if all_steps` guard is what keeps that true. A turn that called
+# a tool and THEN went quiet must never be retried; it would run the tool twice.
+#
+# Three attempts, not more: measured 1-in-8 empty, so a third failure is ~1 in
+# 500 and is more likely to be something systematic than bad luck — at which
+# point the honest `empty` frame below is the right answer rather than a fourth
+# call on the member's budget.
+EMPTY_TURN_ATTEMPTS = 3
 
 
 async def stream_turn(
@@ -110,16 +141,6 @@ async def stream_turn(
         )
         yield {"type": "run", "run_id": run_id}
 
-        # Runner(app=...), not InMemoryRunner: the App is what carries the
-        # chokepoint plugin, and InMemoryRunner is ADK's dev-mode helper (§1).
-        # The session service stays in-memory and per-turn; it is FILLED from
-        # `messages` rather than replaced by ADK's DatabaseSessionService, whose
-        # unqualified tables would sit in `public` with no RLS (agent/history.py).
-        runner = Runner(app=app, session_service=InMemorySessionService())
-        session = await runner.session_service.create_session(
-            app_name=APP_NAME, user_id=requester_id,
-            state={"team_id": team_id, "requester_id": requester_id},
-        )
         message = types.Content(role="user", parts=[types.Part(text=user_text)])
         all_steps: list[dict[str, Any]] = []
         # Inside the try: a failed history read must close the run row too, not
@@ -129,26 +150,51 @@ async def stream_turn(
                 recent_turns, team_id, requester_id, thread_type,
                 settings.agent_history_turns, exclude_message_id,
             )
-            for content in history:
-                # A model-role event must be authored by this agent, or ADK
-                # relabels it as another agent's reply and rewrites it into a
-                # "For context:" note.
-                await runner.session_service.append_event(
-                    session,
-                    Event(
-                        author="user" if content.role == "user"
-                        else app.root_agent.name,
-                        content=content,
-                    ),
+            for attempt in range(1, EMPTY_TURN_ATTEMPTS + 1):
+                # Runner(app=...), not InMemoryRunner: the App is what carries
+                # the chokepoint plugin, and InMemoryRunner is ADK's dev-mode
+                # helper (§1). The session service stays in-memory and
+                # per-turn; it is FILLED from `messages` rather than replaced
+                # by ADK's DatabaseSessionService, whose unqualified tables
+                # would sit in `public` with no RLS (agent/history.py).
+                #
+                # Rebuilt per attempt: ADK appends what it produced to the
+                # session, so retrying on the same one would resend the empty
+                # candidate as context.
+                runner = Runner(app=app, session_service=InMemorySessionService())
+                session = await runner.session_service.create_session(
+                    app_name=APP_NAME, user_id=requester_id,
+                    state={"team_id": team_id, "requester_id": requester_id},
                 )
-            async for event in runner.run_async(
-                user_id=requester_id, session_id=session.id, new_message=message,
-                run_config=RunConfig(max_llm_calls=settings.agent_max_llm_calls),
-            ):
-                for step in _steps_from_event(event, len(all_steps)):
-                    await run_in_threadpool(append_step, team_id, run_id, step)
-                    all_steps.append(step)
-                    yield step
+                for content in history:
+                    # A model-role event must be authored by this agent, or ADK
+                    # relabels it as another agent's reply and rewrites it into
+                    # a "For context:" note.
+                    await runner.session_service.append_event(
+                        session,
+                        Event(
+                            author="user" if content.role == "user"
+                            else app.root_agent.name,
+                            content=content,
+                        ),
+                    )
+                async for event in runner.run_async(
+                    user_id=requester_id, session_id=session.id,
+                    new_message=message,
+                    run_config=RunConfig(
+                        max_llm_calls=settings.agent_max_llm_calls
+                    ),
+                ):
+                    for step in _steps_from_event(event, len(all_steps)):
+                        await run_in_threadpool(append_step, team_id, run_id, step)
+                        all_steps.append(step)
+                        yield step
+                if all_steps:
+                    break
+                logger.warning(
+                    "empty turn from the model (attempt %d/%d), team=%s run=%s",
+                    attempt, EMPTY_TURN_ATTEMPTS, team_id, run_id,
+                )
         except Exception:
             await run_in_threadpool(finish_run, team_id, run_id, "failed")
             raise

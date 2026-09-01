@@ -211,3 +211,19 @@ export interface ContributionRow {
   github_events: number;
   group_messages: number;
 }
+
+/**
+ * Member discussion anchored to a memory ENTRY (findings §6.3-6).
+ *
+ * The entry, not the version: consolidation replaces versions routinely, and a
+ * comment anchored to one would detach from the fact it argues with at exactly
+ * the moment the fact changes.
+ */
+export interface MemoryComment {
+  id: string;
+  entry_id: string;
+  team_id: string;
+  author_id: string;
+  body: string;
+  created_at: string;
+}

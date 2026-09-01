@@ -16,16 +16,22 @@ from agent.permission_plugin import ChokepointPlugin
 from agent.registry import REGISTRY, ToolSpec
 
 
+#: A real-shaped team id. The gate derives the workspace path from it, and
+#: shared/workspace.py refuses anything that is not a UUID — so a placeholder
+#: like "team-1" would be rejected before any policy was consulted.
+TEAM = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+
 class _Ctx:
     """The slice of ToolContext the gate touches: a mutable state dict.
 
-    Was `None` — honest while the gate read only the tool's declaration. Since
-    it now counts writes per turn, a context that cannot hold state would make
-    the rate limit untestable.
+    Was `None` — honest while the gate read only the tool's declaration. It now
+    counts writes per turn AND derives the workspace root from `team_id`, so a
+    context carrying neither would make both untestable.
     """
 
     def __init__(self, state=None):
-        self.state = state if state is not None else {}
+        self.state = {"team_id": TEAM} if state is None else state
 
 
 def _gate(tool_name: str, tool_args=None, ctx=None):

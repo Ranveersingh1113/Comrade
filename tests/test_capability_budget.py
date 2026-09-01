@@ -28,8 +28,28 @@ the ways a path or a command could get around it.
 import pytest
 
 from agent.capability import (
-    PROJECT_ROOT, ArgPolicy, CapabilityError, check_command, check_path,
+    ArgPolicy, CapabilityError, check_command, check_path,
 )
+
+
+@pytest.fixture
+def root(tmp_path):
+    """A workspace of our own, not Comrade's tree.
+
+    These tests used to resolve against PROJECT_ROOT — Comrade's own directory
+    — which meant they passed partly because Comrade's files happen to exist.
+    A temporary root tests the mechanism instead of the repository, and it is
+    what a team's checkout actually looks like: a directory with nothing
+    special about it.
+    """
+    (tmp_path / "agent").mkdir()
+    (tmp_path / "agent" / "tools.py").write_text("x")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_agent.py").write_text("x")
+    (tmp_path / "supabase" / "migrations").mkdir(parents=True)
+    (tmp_path / "supabase" / "migrations" / "init.sql").write_text("x")
+    (tmp_path / ".env").write_text("SECRET=1")
+    return tmp_path
 
 
 # ---------------------------------------------------------------------------
@@ -45,12 +65,12 @@ from agent.capability import (
     "certs/server.pem",
     "service-account.json",
 ])
-def test_a_secret_is_refused_however_it_is_spelled(path):
+def test_a_secret_is_refused_however_it_is_spelled(path, root):
     with pytest.raises(CapabilityError, match="secret"):
-        check_path(path, ArgPolicy(allow=("**",)), writing=False)
+        check_path(path, ArgPolicy(allow=("**",)), root=root, writing=False)
 
 
-def test_the_deny_list_beats_an_allow_rule_that_matches():
+def test_the_deny_list_beats_an_allow_rule_that_matches(root):
     """The ordering that makes the deny-list mean anything.
 
     `allow=("**",)` matches `.env` perfectly well. If allow were evaluated
@@ -59,72 +79,72 @@ def test_the_deny_list_beats_an_allow_rule_that_matches():
     credential.
     """
     with pytest.raises(CapabilityError, match="secret"):
-        check_path(".env", ArgPolicy(allow=("**", ".env")), writing=False)
+        check_path(".env", ArgPolicy(allow=("**", ".env")), root=root, writing=False)
 
 
 # ---------------------------------------------------------------------------
 # Paths: containment
 # ---------------------------------------------------------------------------
 
-def test_a_path_outside_the_project_is_refused():
+def test_a_path_outside_the_project_is_refused(root):
     with pytest.raises(CapabilityError, match="outside"):
         check_path("../../../Windows/System32/drivers/etc/hosts",
-                   ArgPolicy(allow=("**",)), writing=False)
+                   ArgPolicy(allow=("**",)), root=root, writing=False)
 
 
-def test_traversal_that_climbs_out_and_back_is_still_measured_at_the_end():
+def test_traversal_that_climbs_out_and_back_is_still_measured_at_the_end(root):
     """`agent/../../Comrade/.env` resolves back inside the root, so a check
     that only compared prefixes textually would pass it — and it names the
     credential file. Resolution has to happen BEFORE both checks."""
     # Specifically the SECRET refusal, not merely some refusal: that is what
     # proves resolution happened before the deny check rather than after.
     with pytest.raises(CapabilityError, match="secret"):
-        check_path("agent/../.env", ArgPolicy(allow=("**",)), writing=False)
+        check_path("agent/../.env", ArgPolicy(allow=("**",)), root=root, writing=False)
 
 
-def test_an_absolute_path_inside_the_root_is_allowed():
+def test_an_absolute_path_inside_the_root_is_allowed(root):
     """Resolution is by real path, not by string shape — an absolute path to a
     permitted file is the same file."""
-    inside = str(PROJECT_ROOT / "agent" / "tools.py")
-    assert check_path(inside, ArgPolicy(allow=("agent/**",)), writing=False)
+    inside = str(root / "agent" / "tools.py")
+    assert check_path(inside, ArgPolicy(allow=("agent/**",)), root=root, writing=False)
 
 
-def test_a_path_inside_the_root_but_outside_the_allow_globs_is_refused():
+def test_a_path_inside_the_root_but_outside_the_allow_globs_is_refused(root):
     with pytest.raises(CapabilityError, match="not in this tool's scope"):
-        check_path("supabase/migrations/20260612094142_init.sql",
-                   ArgPolicy(allow=("agent/**", "tests/**")), writing=False)
+        check_path("supabase/migrations/init.sql",
+                   ArgPolicy(allow=("agent/**", "tests/**")), root=root, writing=False)
 
 
-def test_a_permitted_path_is_permitted():
-    assert check_path("agent/tools.py", ArgPolicy(allow=("agent/**",)), writing=False)
+def test_a_permitted_path_is_permitted(root):
+    assert check_path("agent/tools.py", ArgPolicy(allow=("agent/**",)), root=root, writing=False)
 
 
-def test_writing_needs_its_own_permission():
+def test_writing_needs_its_own_permission(root):
     """A tool may read broadly and write narrowly; `allow` alone must not
     grant writes, or every read tool becomes a write tool by omission."""
     policy = ArgPolicy(allow=("**",), writable=("tests/**",))
-    assert check_path("agent/tools.py", policy, writing=False)
+    assert check_path("agent/tools.py", policy, root=root, writing=False)
     with pytest.raises(CapabilityError, match="read-only"):
-        check_path("agent/tools.py", policy, writing=True)
-    assert check_path("tests/test_agent.py", policy, writing=True)
+        check_path("agent/tools.py", policy, root=root, writing=True)
+    assert check_path("tests/test_agent.py", policy, root=root, writing=True)
 
 
-def test_a_policy_with_no_globs_permits_nothing():
+def test_a_policy_with_no_globs_permits_nothing(root):
     """Fail closed, like registry.UNKNOWN. A tool whose author forgot to
     declare a scope must reach zero files, not all of them."""
     with pytest.raises(CapabilityError):
-        check_path("agent/tools.py", ArgPolicy(), writing=False)
+        check_path("agent/tools.py", ArgPolicy(), root=root, writing=False)
 
 
 # ---------------------------------------------------------------------------
 # Commands: the allowlist is only as good as the parsing under it
 # ---------------------------------------------------------------------------
 
-def test_an_allowed_command_runs():
+def test_an_allowed_command_runs(root):
     assert check_command("uv run pytest -q", ("uv run pytest", "git status"))
 
 
-def test_a_command_outside_the_allowlist_is_refused():
+def test_a_command_outside_the_allowlist_is_refused(root):
     with pytest.raises(CapabilityError, match="not an allowed command"):
         check_command("rm -rf .", ("uv run pytest",))
 
@@ -156,7 +176,7 @@ def test_chaining_past_an_allowed_prefix_is_refused(evil):
         check_command(evil, ("uv run pytest",))
 
 
-def test_a_prefix_must_end_on_a_word_boundary():
+def test_a_prefix_must_end_on_a_word_boundary(root):
     """`git push` must not be admitted by an allowlist entry for `git p`, and
     `pytest-evil` must not be admitted by one for `pytest`."""
     with pytest.raises(CapabilityError):
@@ -164,12 +184,12 @@ def test_a_prefix_must_end_on_a_word_boundary():
     assert check_command("git status", ("git",))
 
 
-def test_an_empty_allowlist_permits_nothing():
+def test_an_empty_allowlist_permits_nothing(root):
     with pytest.raises(CapabilityError):
         check_command("echo hi", ())
 
 
-def test_a_secret_outside_the_allow_globs_still_reports_as_a_secret():
+def test_a_secret_outside_the_allow_globs_still_reports_as_a_secret(root):
     """The test that actually pins the ORDER, rather than assuming it.
 
     Mutation-checked: moving the deny check after the allow check left every
@@ -186,11 +206,11 @@ def test_a_secret_outside_the_allow_globs_still_reports_as_a_secret():
     that silently stops holding.
     """
     with pytest.raises(CapabilityError, match="secret"):
-        check_path(".env", ArgPolicy(allow=("agent/**",)), writing=False)
+        check_path(".env", ArgPolicy(allow=("agent/**",)), root=root, writing=False)
 
 
-def test_a_secret_is_refused_for_writing_too():
+def test_a_secret_is_refused_for_writing_too(root):
     """Deny is checked before the read/write split, so it does not need
     restating per direction — but nothing said so until this test did."""
     with pytest.raises(CapabilityError, match="secret"):
-        check_path(".env", ArgPolicy(allow=("**",), writable=("**",)), writing=True)
+        check_path(".env", ArgPolicy(allow=("**",), writable=("**",)), root=root, writing=True)

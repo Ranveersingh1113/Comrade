@@ -23,6 +23,7 @@ from google.adk.tools.base_tool import BaseTool
 
 from agent.capability import CapabilityError, check_command, check_path
 from agent.registry import spec_for
+from shared.workspace import WorkspaceError, workspace_for
 
 
 class ChokepointPlugin(BasePlugin):
@@ -105,8 +106,23 @@ class ChokepointPlugin(BasePlugin):
                     " agent/registry.py."
                 )
             if policy.path_arg and policy.path_arg in tool_args:
+                # DERIVED from team_id, never read from tool_args and never
+                # carried beside it in state. The model must not be able to
+                # name which team's checkout it is standing in — the same rule
+                # agent/tools.py already applies to team_id itself — and a
+                # second copy of the path is a second source of truth that can
+                # disagree with the first.
+                team_id = (ctx.state or {}).get("team_id")
+                if not team_id:
+                    raise CapabilityError(
+                        f"{name} touches the filesystem but this turn carries"
+                        " no team, so there is no workspace to scope it to."
+                    )
                 check_path(
-                    str(tool_args[policy.path_arg]), policy, writing=spec.writes
+                    str(tool_args[policy.path_arg]),
+                    policy,
+                    root=workspace_for(str(team_id)),
+                    writing=spec.writes,
                 )
             if policy.command_arg and policy.command_arg in tool_args:
                 check_command(str(tool_args[policy.command_arg]), policy.commands)
@@ -124,7 +140,7 @@ class ChokepointPlugin(BasePlugin):
                         " continuing."
                     )
                 ctx.state["writes_used"] = used
-        except CapabilityError as exc:
+        except (CapabilityError, WorkspaceError) as exc:
             return {
                 "error": "refused_by_capability_budget",
                 "tool": name,

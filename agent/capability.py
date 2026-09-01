@@ -40,9 +40,17 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# The one directory any of this may touch. Resolved once: every check compares
-# real paths, so a symlink or a `..` cannot land outside it by spelling.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# There is deliberately no module-level root here.
+#
+# The first version of this file had `PROJECT_ROOT = <Comrade's own tree>`,
+# which was wrong twice over: a team's agent has no business in Comrade's
+# source, and a writable scope over `agent/**` would have let the agent edit
+# this very file — the list of secrets it is not allowed to read.
+#
+# The root is now passed per call, derived from `team_id` by
+# shared/workspace.py. One team, one tree, and Comrade's own source is not in
+# any of them. That dissolves the self-modification problem rather than
+# carving an exception for it.
 
 # Absolute. No ArgPolicy can allow these and no allow rule overrides them.
 # Matched against the resolved path AND its bare filename, so `.env` and
@@ -105,7 +113,7 @@ def _is_secret(resolved: Path) -> bool:
     )
 
 
-def check_path(raw: str, policy: ArgPolicy, *, writing: bool) -> str:
+def check_path(raw: str, policy: ArgPolicy, *, root: Path, writing: bool) -> str:
     """Resolve `raw` and confirm the policy covers it. Returns the real path.
 
     Order matters and is the whole design: RESOLVE, then containment, then
@@ -114,18 +122,28 @@ def check_path(raw: str, policy: ArgPolicy, *, writing: bool) -> str:
     both. Denying before allowing is what makes the deny-list absolute rather
     than merely consulted.
     """
+    root = Path(root).resolve()
     candidate = Path(raw)
-    resolved = (
-        candidate if candidate.is_absolute() else PROJECT_ROOT / candidate
-    ).resolve()
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
 
     try:
-        relative = resolved.relative_to(PROJECT_ROOT)
+        relative = resolved.relative_to(root)
     except ValueError:
         raise CapabilityError(
-            f"{raw!r} resolves to {resolved}, which is outside the project"
-            f" root {PROJECT_ROOT}. Tools may only reach inside the project."
+            f"{raw!r} resolves to {resolved}, which is outside this team's"
+            " workspace. Tools reach one team's checkout and nothing else —"
+            " not another team's, and not Comrade's own source."
         ) from None
+
+    if relative.parts and relative.parts[0] == ".git":
+        # Read-only even inside a writable scope, the same carve-out Codex
+        # makes for .git/.codex/.agents. History is how a change is reviewed
+        # and reverted; an agent that can rewrite it can erase what it did.
+        if writing:
+            raise CapabilityError(
+                f"{raw!r} is inside .git, which is never writable. Change files"
+                " and let the commit be made for you."
+            )
 
     if _is_secret(resolved):
         raise CapabilityError(

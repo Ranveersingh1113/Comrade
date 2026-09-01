@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Per-team hourly cap on agent turns — the lid on LLM spend and the
     # simplest abuse brake. 0 disables the cap entirely.
     agent_turns_per_hour: int = 60
+
+    # Where each team's checked-out repository lives. Deliberately outside
+    # Comrade's own tree — shared/workspace.py refuses a value that overlaps
+    # it, because team checkouts inside our repo would be kept out of git and
+    # out of the agent's reach only by a .gitignore line.
+    comrade_workspaces_root: str = "~/.comrade/workspaces"
     # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the

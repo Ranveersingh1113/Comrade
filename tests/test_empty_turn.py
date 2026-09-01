@@ -158,3 +158,142 @@ def test_whitespace_only_is_still_empty(seeded, monkeypatch):
 
     monkeypatch.setattr("agent.runtime.Runner.run_async", _fake_run)
     assert _frames()[-1]["type"] == "empty"
+
+
+# ---------------------------------------------------------------------------
+# The root cause, and the retry it justifies
+# ---------------------------------------------------------------------------
+
+def test_an_empty_turn_is_retried_before_giving_up(seeded, monkeypatch):
+    """🔴 ROOT CAUSE, instrumented 2026-09-01.
+
+    Gemini intermittently returns a candidate with an EMPTY parts list and a
+    perfectly normal finish_reason of STOP — no safety block, no truncation,
+    no error, no exception:
+
+        finish_reason STOP · error_code None · n_parts 0
+        prompt_token_count 3180 · total_token_count 3180   (zero output)
+
+    It was handed 3180 tokens of prompt and generated none. Nothing downstream
+    can tell that apart from a model with nothing to say, which is how it
+    reached the member as silence. Measured 1 in 8 on a real prompt.
+
+    So: ask again. The second attempt sees the same history and usually
+    answers.
+    """
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+
+    def _reply(text):
+        part = MagicMock()
+        part.function_call = None
+        part.function_response = None
+        part.text = text
+        ev = MagicMock()
+        ev.content.parts = [part]
+        return ev
+
+    async def _fake_run(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The observed shape: an event whose content has NO parts at all.
+            ev = MagicMock()
+            ev.content.parts = []
+            yield ev
+        else:
+            yield _reply("Two tasks are open.")
+
+    monkeypatch.setattr("agent.runtime.Runner.run_async", _fake_run)
+    frames = _frames()
+
+    assert calls["n"] == 2, "the empty response was not retried"
+    assert [f["type"] for f in frames] == ["run", "text", "final"]
+    assert frames[-1]["reply"] == "Two tasks are open."
+
+
+def test_a_turn_that_used_a_tool_is_never_retried(seeded, monkeypatch):
+    """The line that makes retrying safe at all.
+
+    An empty turn has no side effects BY DEFINITION — no tool ran, nothing was
+    written, nothing was yielded. That is the entire argument for re-asking.
+    A turn that called a tool and THEN went quiet is a different animal: it
+    already changed something, and asking again would run the tool twice —
+    two consent rows, two nudges, two of whatever it did.
+
+    So the guard is "produced no steps", not "produced no reply".
+    """
+    from unittest.mock import MagicMock
+
+    calls = {"n": 0}
+
+    async def _fake_run(*_a, **_k):
+        calls["n"] += 1
+        part = MagicMock()
+        part.function_call = MagicMock(name="fc")
+        part.function_call.name = "team_get_state"
+        part.function_call.args = {}
+        part.function_response = None
+        part.text = None
+        ev = MagicMock()
+        ev.content.parts = [part]
+        yield ev
+
+    monkeypatch.setattr("agent.runtime.Runner.run_async", _fake_run)
+    frames = _frames()
+
+    assert calls["n"] == 1, "a turn with a tool call was retried"
+    # Still no reply, so the member is still told — the retry is an
+    # improvement on the empty case, not a replacement for saying so.
+    assert frames[-1]["type"] == "empty"
+
+
+def test_it_gives_up_rather_than_retrying_forever(seeded, monkeypatch):
+    """A persistently empty model is something systematic, not bad luck, and
+    the member's budget is not the place to discover which. Bounded, and the
+    member is still told at the end."""
+    from agent.runtime import EMPTY_TURN_ATTEMPTS
+
+    calls = {"n": 0}
+
+    async def _always_empty(*_a, **_k):
+        calls["n"] += 1
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr("agent.runtime.Runner.run_async", _always_empty)
+    frames = _frames()
+
+    assert calls["n"] == EMPTY_TURN_ATTEMPTS
+    assert frames[-1]["type"] == "empty"
+
+
+def test_the_retry_starts_from_a_clean_session(seeded, monkeypatch):
+    """ADK appends what it produced to the session as it goes, so retrying on
+    the same one would hand the model its own empty candidate as context —
+    asking it to continue from the failure it just had."""
+    from unittest.mock import MagicMock
+
+    sessions = []
+    calls = {"n": 0}
+
+    async def _fake_run(*_a, session_id=None, **_k):
+        calls["n"] += 1
+        sessions.append(session_id)
+        if calls["n"] == 1:
+            ev = MagicMock()
+            ev.content.parts = []
+            yield ev
+        else:
+            part = MagicMock()
+            part.function_call = None
+            part.function_response = None
+            part.text = "second time lucky"
+            ev = MagicMock()
+            ev.content.parts = [part]
+            yield ev
+
+    monkeypatch.setattr("agent.runtime.Runner.run_async", _fake_run)
+    _frames()
+    assert len(sessions) == 2
+    assert sessions[0] != sessions[1], "the retry reused the failed session"

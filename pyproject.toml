@@ -27,5 +27,14 @@ pythonpath = ["."]
 testpaths = ["tests"]
 # `live` = talks to a paid/nondeterministic external service (Gemini).
 # Excluded by default; run explicitly with: uv run pytest -m live
-markers = ["live: hits external paid services (Gemini); run with -m live"]
-addopts = "-m 'not live'"
+markers = [
+  "live: hits external paid services (Gemini); run with -m live",
+  # The lane that does NOT fake its dependencies. Everything else exercises
+  # git against a local bare repository through the _url_for and _create_pr
+  # seams — which is precisely where the empty-repo, CRLF and force-with-lease
+  # bugs hid, because a seam that makes testing easy is a place reality never
+  # gets checked. Slow, network-dependent, and opens a real pull request, so
+  # it runs before a merge rather than on every commit.
+  "realgithub: clones and opens a pull request on a real repository",
+]
+addopts = "-m 'not live and not realgithub'"

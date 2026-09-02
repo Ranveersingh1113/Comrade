@@ -43,7 +43,8 @@ from pathlib import Path
 import httpx
 
 from pipeline.repo_sync import (
-    GIT_TIMEOUT_SECONDS, RepoSyncError, _auth_header, _token_for, _run_git,
+    GIT_FLAGS, GIT_TIMEOUT_SECONDS, RepoSyncError, _auth_header, _token_for,
+    _run_git,
     default_branch as _remote_default_branch,
 )
 from shared.workspace import repo_checkout
@@ -75,7 +76,7 @@ def branch_for(action_hash: str) -> str:
 def _git_out(args: list[str], cwd: Path) -> str:
     """A read-only git command whose stdout we want. No credential needed."""
     proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        ["git", *GIT_FLAGS, *args], cwd=str(cwd), capture_output=True, text=True,
         timeout=GIT_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
@@ -202,7 +203,7 @@ def open_pull_request(
         # apply", which reads exactly like a genuine conflict and sent me
         # looking at the wrong half of this function.
         proc = subprocess.run(  # noqa: S603
-            ["git", "apply", "--index", "-"],
+            ["git", *GIT_FLAGS, "apply", "--index", "-"],
             cwd=str(checkout), input=patch.encode("utf-8"),
             capture_output=True, timeout=GIT_TIMEOUT_SECONDS,
         )
@@ -238,7 +239,7 @@ def open_pull_request(
         # and still refuses with "stale info". The refspec is what updates the
         # remote-tracking ref the lease actually reads.
         subprocess.run(  # noqa: S603 - a missing branch is not an error here
-            ["git", "-c", _auth_header(token), "fetch", "origin",
+            ["git", *GIT_FLAGS, "-c", _auth_header(token), "fetch", "origin",
              f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
             cwd=str(checkout), capture_output=True,
             timeout=GIT_TIMEOUT_SECONDS,
@@ -251,7 +252,7 @@ def open_pull_request(
         # precisely what we expect to be overwriting, and an empty expected
         # value means "expect this branch not to exist yet".
         remote_sha = subprocess.run(  # noqa: S603
-            ["git", "rev-parse", "--verify", "--quiet",
+            ["git", *GIT_FLAGS, "rev-parse", "--verify", "--quiet",
              f"refs/remotes/origin/{branch}"],
             cwd=str(checkout), capture_output=True, text=True,
             timeout=GIT_TIMEOUT_SECONDS,

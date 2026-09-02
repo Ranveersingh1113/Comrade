@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from agent.capability import ArgPolicy
-from agent.repo_tools import EDIT_POLICY, READ_POLICY
+from agent.repo_tools import EDIT_POLICY, READ_POLICY, RUN_POLICY
 
 Surface = Literal["sandbox", "db", "outbound"]
 
@@ -129,6 +129,23 @@ REGISTRY: dict[str, ToolSpec] = {
     # team_propose_task carries it — the call being made IS the request for
     # approval, and gating it would deadlock the tool whose whole job is to ask.
     "repo_propose_pr": ToolSpec("db", writes=True, needs_human=False),
+    # The first tool that EXECUTES the team's code rather than reading it.
+    #
+    # writes=False, and that is not an oversight. The per-turn write cap counts
+    # tool calls that edit files, and a command's writes land inside a
+    # container against a checkout that `sync_repo` resets at the start of
+    # every turn. Counting them against the same cap as repo_edit would mean a
+    # test run that writes a cache file eats the budget for the change the
+    # agent is actually there to make.
+    #
+    # needs_human=False for the same reason repo_edit carries it: what a
+    # container with no network can do is bounded by the container, and the
+    # reviewable action downstream is still the pull request. A consent card
+    # per `pytest -q` is the fatigue §5 exists to avoid, and it would buy
+    # nothing a human could meaningfully judge.
+    "repo_run": ToolSpec(
+        "sandbox", writes=False, needs_human=False, args=RUN_POLICY
+    ),
 }
 
 

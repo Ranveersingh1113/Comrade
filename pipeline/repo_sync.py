@@ -76,6 +76,26 @@ def _token_for(team_id: str, repo_full_name: str) -> str:
     return settings.github_pat
 
 
+#: Flags on EVERY git invocation, not a tuning knob.
+#:
+#: `core.fsmonitor` starts `git fsmonitor--daemon --detach`, a background
+#: process that deliberately OUTLIVES the git command that started it and
+#: holds ~37MB of commit charge with 8 IPC threads. One per repository. It is
+#: a real win on a large checkout a developer works in all day; it is pure
+#: leak for a tree we `reset --hard` every turn and delete when the team
+#: leaves.
+#:
+#: 418 of them accumulated on this machine in two hours of running the test
+#: suite -- 15GB of commit charge -- and took the box to within half a
+#: gigabyte of its commit limit, where an unrelated pytest run died with a
+#: MemoryError that pointed nowhere near git. A server hosting many teams
+#: accumulates one per checkout and never gives it back.
+#:
+#: `protocol.version=2` is unrelated and free: fewer refs on the wire for the
+#: shallow fetches this module does constantly.
+GIT_FLAGS = ("-c", "core.fsmonitor=false", "-c", "protocol.version=2")
+
+
 def _auth_header(token: str) -> str:
     basic = b64encode(f"x-access-token:{token}".encode()).decode()
     return f"http.extraHeader=Authorization: Basic {basic}"
@@ -95,7 +115,7 @@ def _run_git(args: list[str], cwd: Path | None, token: str) -> None:
     when a clone fails, and CalledProcessError discards it.
     """
     proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
-        ["git", "-c", _auth_header(token), *args],
+        ["git", *GIT_FLAGS, "-c", _auth_header(token), *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,

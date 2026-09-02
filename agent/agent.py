@@ -12,6 +12,7 @@ from google.adk.apps import App
 from agent.permission_plugin import ChokepointPlugin
 from agent.repo_tools import (
     repo_edit, repo_glob, repo_grep, repo_guide, repo_propose_pr, repo_read,
+    repo_run,
 )
 from agent.tools import (
     document_read,
@@ -97,6 +98,13 @@ Reading the team's code:
   whatever you did not think to retype. If the text you name appears twice the
   edit is refused rather than guessed at, and if it appears not at all, read
   the file again rather than rephrasing.
+- repo_run runs one command against the checkout in a container: run the
+  tests after an edit, run a linter, run a script. Check your own work with it
+  rather than saying a change should work. There is NO NETWORK inside it, so
+  anything that installs or downloads will fail — say the dependencies aren't
+  available rather than trying to work around it. One command, no pipes or
+  chaining. A non-zero exit is an answer: read it, and never report tests as
+  passing when the exit code says otherwise.
 - Nothing you edit reaches the team until a member approves a pull request.
   When the whole change is made, call repo_propose_pr ONCE with a title and a
   body. It shows the member the literal diff; if they approve, Comrade opens a
@@ -230,6 +238,7 @@ root_agent = LlmAgent(
         repo_glob,
         repo_grep,
         repo_edit,
+        repo_run,
         repo_propose_pr,
         repo_activity,
         messages_search,

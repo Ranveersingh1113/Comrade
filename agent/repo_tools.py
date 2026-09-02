@@ -27,11 +27,15 @@ WHY THERE IS NO `repo_list_files`
 than two where the second exists only to enumerate. An agent that wants the
 tree asks for `**/*`.
 """
+import shlex
 from pathlib import Path
 
 from google.adk.tools import ToolContext
 
-from agent.capability import ArgPolicy, CapabilityError, check_path
+from agent.capability import (
+    ArgPolicy, CapabilityError, check_command, check_path,
+)
+from agent.sandbox import SandboxError, run_contained
 from pipeline.parsers import spotlight
 from shared.db import user_session
 from shared.workspace import WorkspaceError, repo_checkout
@@ -434,3 +438,59 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
         # Closing a pull request is one click, and nothing is merged by this.
         reversible=True,
     )
+
+
+#: What `repo_run` will start. Deliberately builders and runners only — no
+#: `cat`, no `less`, no `find`. Reading is repo_read's job, and repo_read is
+#: where the refusal to open .env and friends actually lives; a shell that
+#: could read files would route around it without anyone deciding to.
+#:
+#: BE CLEAR ABOUT WHAT THIS ALLOWLIST IS. `python` is arbitrary code
+#: execution, so anyone treating this as a confidentiality boundary is
+#: fooling themselves — `python -c "print(open('.env').read())"` is one line.
+#: The CONTAINER is the boundary: no network, no capabilities, nothing of
+#: Comrade's inside it. The allowlist stops accidents and keeps the agent's
+#: intent legible in the audit log, which is worth having and is not the same
+#: claim.
+RUN_COMMANDS = (
+    "python", "python3", "pytest", "ruff", "mypy",
+    "node", "npm", "npx", "pnpm", "yarn", "jest", "vitest", "tsc", "eslint",
+    "go", "cargo", "make",
+)
+
+RUN_POLICY = ArgPolicy(command_arg="command", commands=RUN_COMMANDS)
+
+
+def repo_run(command: str, tool_context: ToolContext) -> dict:
+    """Run one command against the team's repository, in a container.
+
+    For checking your own work: run the tests after an edit, run a linter, run
+    a script. The repository is the working directory and your edits are
+    already in it.
+
+    ONE command. No pipes, no `&&`, no redirection, no `$(...)` — those are
+    refused, so run one thing and read its output. There is NO NETWORK, so a
+    command that downloads or installs anything will fail; if a test suite
+    needs dependencies that are not in the image, say so rather than trying to
+    install them.
+
+    A non-zero exit is a normal answer, not an error — read stdout and stderr
+    and say what actually happened. Do not report tests as passing on a
+    non-zero exit.
+
+    Args:
+        command: one command, e.g. "pytest -q" or "ruff check src".
+
+    Returns:
+        exit_code, stdout, stderr, timed_out.
+    """
+    try:
+        checked = check_command(command, RUN_POLICY.commands)
+        root = _root(tool_context)
+    except (CapabilityError, WorkspaceError) as exc:
+        return {"error": str(exc)}
+
+    try:
+        return run_contained(shlex.split(checked), root=root)
+    except SandboxError as exc:
+        return {"error": str(exc)}

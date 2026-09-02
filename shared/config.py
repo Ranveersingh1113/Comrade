@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # so this is an availability bound, not tidiness. Checkouts are always
     # re-clonable, which is what makes eviction safe.
     comrade_workspaces_max_gb: float = 20.0
+    # The image the team's own code runs in. One image for every team for now:
+    # it is a knob a repository must not be able to turn, since "run my tests
+    # in MY image" is just "run my code on your host" with extra steps. A
+    # per-team value belongs in the teams table with an allowlist, not here.
+    comrade_sandbox_image: str = "python:3.12-slim"
     # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the

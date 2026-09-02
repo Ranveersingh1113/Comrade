@@ -10,7 +10,9 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.apps import App
 
 from agent.permission_plugin import ChokepointPlugin
-from agent.repo_tools import repo_glob, repo_grep, repo_guide, repo_read
+from agent.repo_tools import (
+    repo_edit, repo_glob, repo_grep, repo_guide, repo_read,
+)
 from agent.tools import (
     document_read,
     member_send_nudge,
@@ -90,8 +92,14 @@ Reading the team's code:
   and when" and these for "what does it do".
 - You cannot see .git, and you cannot see files holding credentials. That is
   not a gap to work around; say the file is not available and carry on.
-- You can read but not change anything. If a change is needed, say what you
-  would change and where.
+- repo_edit changes a working copy nobody else can see. Give the exact text
+  you are replacing, not a rewritten file: a whole file handed back loses
+  whatever you did not think to retype. If the text you name appears twice the
+  edit is refused rather than guessed at, and if it appears not at all, read
+  the file again rather than rephrasing.
+- Nothing you edit reaches the team until a member approves a pull request.
+  Make the whole change first, then say what you changed and that it is ready
+  to propose.
 
 The team wiki is what the team has decided and recorded — its index is below.
 For anything about decisions, deadlines, scope, or history, read the relevant
@@ -219,6 +227,7 @@ root_agent = LlmAgent(
         repo_read,
         repo_glob,
         repo_grep,
+        repo_edit,
         repo_activity,
         messages_search,
         document_read,

@@ -62,6 +62,15 @@ _SKIP_DIRS = frozenset({
 #: inline so the registry entries and these functions cannot drift apart.
 READ_POLICY = ArgPolicy(path_arg="path", allow=("**",))
 
+#: What the edit tool may change. Same reach, because we do not know a team's
+#: layout and a scope that guesses wrong is a tool that cannot do its job —
+#: containment is the workspace boundary, not a guess about directory names.
+#: The rate limit is the real bound here: a loop that has decided to rewrite
+#: the repository is stopped by arithmetic rather than noticed afterwards.
+EDIT_POLICY = ArgPolicy(
+    path_arg="path", allow=("**",), writable=("**",), max_writes_per_turn=20
+)
+
 
 def _root(tool_context: ToolContext) -> Path:
     """The checkout this turn may read, derived from server-bound state.
@@ -306,3 +315,70 @@ def repo_guide(team_id: str, repo_full_name: str | None) -> str | None:
             + spotlight(text[:GUIDE_CHARS])
         )
     return None
+
+
+def repo_edit(
+    path: str, old_text: str, new_text: str, tool_context: ToolContext
+) -> dict:
+    """Change one exact passage of one file in the team's repository.
+
+    Nothing you write here reaches the team until a member approves a pull
+    request — this edits a working copy. Make the change, then propose the PR.
+
+    Replacement, not rewriting, and that is deliberate: handing back a whole
+    file means silently losing anything you did not think to reproduce, and a
+    file is usually longer than the part you actually mean to change. Give the
+    exact text you are replacing and the exact text replacing it.
+
+    `old_text` must appear EXACTLY ONCE. If it appears several times the edit
+    is refused rather than guessed at — include a surrounding line or two to
+    make it unique. If it appears not at all, the file is not what you think
+    it is: read it again rather than trying a different phrasing.
+
+    To create a new file, pass an empty `old_text`. The file must not exist.
+
+    Args:
+        path: repository-relative path, e.g. "src/auth.py".
+        old_text: the exact text to replace, or "" to create a new file.
+        new_text: what replaces it, or the whole body of the new file.
+    """
+    try:
+        root = _root(tool_context)
+        target = Path(check_path(path, EDIT_POLICY, root=root, writing=True))
+    except (CapabilityError, WorkspaceError) as exc:
+        return {"error": str(exc)}
+
+    rel = _relative(target, root)
+
+    if not old_text:
+        if target.exists():
+            return {
+                "error": f"{rel} already exists. To change it, give the exact"
+                " text you are replacing."
+            }
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(new_text, encoding="utf-8")
+        return {"path": rel, "created": True}
+
+    if not target.is_file():
+        return {"error": f"{rel} is not a file in this repository"}
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"error": f"{rel} could not be read as text: {exc}"}
+
+    occurrences = text.count(old_text)
+    if occurrences == 0:
+        return {
+            "error": f"that text does not appear in {rel}. Read the file again"
+            " — it is not what you expected."
+        }
+    if occurrences > 1:
+        return {
+            "error": f"that text appears {occurrences} times in {rel}, so the"
+            " edit is ambiguous. Include a surrounding line or two to make it"
+            " unique."
+        }
+
+    target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+    return {"path": rel, "created": False, "replaced": True}

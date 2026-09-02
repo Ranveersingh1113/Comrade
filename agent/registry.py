@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from agent.capability import ArgPolicy
-from agent.repo_tools import READ_POLICY
+from agent.repo_tools import EDIT_POLICY, READ_POLICY
 
 Surface = Literal["sandbox", "db", "outbound"]
 
@@ -109,6 +109,19 @@ REGISTRY: dict[str, ToolSpec] = {
     "repo_grep": ToolSpec(
         "sandbox", writes=False, needs_human=False,
         args=ArgPolicy(allow=("**",), derives_paths=True),
+    ),
+    # writes=True, needs_human=False — and those two together are the design.
+    #
+    # An edit changes a WORKING COPY nobody else can see. It reaches the team
+    # only when a member approves the pull request, which is the reviewable
+    # action and is gated by the consent queue. Asking for approval per file
+    # would put a card in someone's inbox for each step of one change, which is
+    # the consent fatigue §5 exists to avoid.
+    #
+    # writes=True is what arms the per-turn write cap in the chokepoint. That
+    # is the bound on this tool: not "may it write", but "how much".
+    "repo_edit": ToolSpec(
+        "sandbox", writes=True, needs_human=False, args=EDIT_POLICY
     ),
 }
 

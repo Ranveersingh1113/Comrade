@@ -15,6 +15,7 @@ def test_tools_registered():
         "repo_read",
         "repo_glob",
         "repo_grep",
+        "repo_edit",
         "repo_activity",
         "member_activity",
         "messages_search",

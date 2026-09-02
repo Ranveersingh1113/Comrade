@@ -40,6 +40,22 @@ def _jwk_client() -> jwt.PyJWKClient:
     return jwt.PyJWKClient(f"{url}/auth/v1/.well-known/jwks.json")
 
 
+#: Tolerance for clock skew between whoever ISSUED a token and us.
+#:
+#: 🔴 Without it, a host running a second behind the auth server rejects
+#: perfectly good tokens with "The token is not yet valid (iat)" — which the
+#: frontend renders as "your session expired", so the user signs in again and
+#: gets the same thing. Observed locally between the API and the Supabase
+#: container; on a real deployment those are different machines and the skew
+#: is guaranteed rather than possible.
+#:
+#: PyJWT applies leeway to exp as well as iat and nbf, so this also accepts a
+#: token up to a minute past expiry. That is the intended trade: a minute of
+#: extra validity on a token that already had an hour, against a login loop
+#: nobody can diagnose from the error message.
+JWT_LEEWAY_SECONDS = 60
+
+
 def _decode(token: str) -> dict:
     """Verify `token` against whichever scheme its header declares."""
     try:
@@ -58,7 +74,8 @@ def _decode(token: str) -> dict:
         key = _jwk_client().get_signing_key_from_jwt(token).key
         # Pinned to the asymmetric list, never widened by the header.
         return jwt.decode(
-            token, key, algorithms=list(_ASYMMETRIC), audience="authenticated"
+            token, key, algorithms=list(_ASYMMETRIC), audience="authenticated",
+            leeway=JWT_LEEWAY_SECONDS,
         )
 
     if not settings.supabase_jwt_secret:
@@ -73,6 +90,7 @@ def _decode(token: str) -> dict:
         settings.supabase_jwt_secret,
         algorithms=["HS256"],
         audience="authenticated",
+        leeway=JWT_LEEWAY_SECONDS,
     )
 
 

@@ -382,3 +382,55 @@ def repo_edit(
 
     target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
     return {"path": rel, "created": False, "replaced": True}
+
+
+def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
+    """Propose the changes you have made as a pull request.
+
+    Call this once, after the whole change is made — not per file. It captures
+    everything you edited in the working copy and puts a card in the member's
+    consent inbox showing the literal diff. If they approve, Comrade pushes a
+    `comrade/...` branch and opens the pull request; nothing is pushed to the
+    team's main branch, ever.
+
+    Nothing you edited reaches the team until that approval. If they reject it,
+    the change is discarded and the reason comes back to you.
+
+    Args:
+        title: one line saying what the change does, as a commit message would
+            — "Fix the expiry countdown off-by-one", not "changes".
+        body: what a reviewer needs to know: what was wrong, what you changed,
+            and anything you were unsure about.
+    """
+    from pipeline.repo_pr import PullRequestError, capture_patch
+    from shared.consent import propose_action
+
+    team_id = tool_context.state.get("team_id")
+    requester_id = tool_context.state.get("requester_id")
+    repo = tool_context.state.get("repo_full_name")
+    if not (team_id and requester_id and repo):
+        return {"error": "this turn has no team repository to propose against."}
+
+    try:
+        patch = capture_patch(str(team_id), str(repo))
+    except (PullRequestError, WorkspaceError) as exc:
+        return {"error": str(exc)}
+
+    return propose_action(
+        team_id=str(team_id),
+        requester_id=str(requester_id),
+        tool_name="repo_open_pr",
+        args={
+            "repo_full_name": str(repo),
+            "title": title,
+            "body": body,
+            # The diff travels in the row rather than being read back from
+            # disk at approve time: sync_repo resets the checkout at the start
+            # of every turn, so by then the tree a member thought they were
+            # approving may be long gone. See pipeline/repo_pr.py.
+            "patch": patch,
+        },
+        source_snippet=f"{title}\n\n{body}"[:2000],
+        # Closing a pull request is one click, and nothing is merged by this.
+        reversible=True,
+    )

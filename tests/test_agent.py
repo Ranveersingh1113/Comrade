@@ -16,6 +16,7 @@ def test_tools_registered():
         "repo_glob",
         "repo_grep",
         "repo_edit",
+        "repo_propose_pr",
         "repo_activity",
         "member_activity",
         "messages_search",

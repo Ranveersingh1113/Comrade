@@ -40,3 +40,19 @@ alter table public.jobs
 -- remote is cloned, so it stays writable only by a member under
 -- au_github_repos_update.
 grant update (last_cloned_at) on public.github_repos to comrade_pipeline;
+
+-- The consent executor opens the pull request (shared/consent.py
+-- _exec_repo_open_pr), and before it pushes anything it re-checks that the
+-- repository is still connected to the team — a repo can be disconnected
+-- between a proposal and its approval, and an old card should not still be
+-- able to push to it.
+--
+-- SELECT only. The executor confirms a connection; it never creates, renames
+-- or removes one. Same shape as ex_memberships_select and ex_teams_select:
+-- read what you must verify, write nothing.
+grant select on public.github_repos to comrade_executor;
+
+drop policy if exists ex_github_repos_select on public.github_repos;
+create policy ex_github_repos_select on public.github_repos
+  for select to comrade_executor
+  using (team_id = public.current_team());

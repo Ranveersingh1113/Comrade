@@ -11,7 +11,7 @@ from google.adk.apps import App
 
 from agent.permission_plugin import ChokepointPlugin
 from agent.repo_tools import (
-    repo_edit, repo_glob, repo_grep, repo_guide, repo_read,
+    repo_edit, repo_glob, repo_grep, repo_guide, repo_propose_pr, repo_read,
 )
 from agent.tools import (
     document_read,
@@ -98,8 +98,10 @@ Reading the team's code:
   edit is refused rather than guessed at, and if it appears not at all, read
   the file again rather than rephrasing.
 - Nothing you edit reaches the team until a member approves a pull request.
-  Make the whole change first, then say what you changed and that it is ready
-  to propose.
+  When the whole change is made, call repo_propose_pr ONCE with a title and a
+  body. It shows the member the literal diff; if they approve, Comrade opens a
+  pull request on a comrade/ branch. Nothing is ever pushed to their main
+  branch. Say you've proposed it, not that it's merged.
 
 The team wiki is what the team has decided and recorded — its index is below.
 For anything about decisions, deadlines, scope, or history, read the relevant
@@ -228,6 +230,7 @@ root_agent = LlmAgent(
         repo_glob,
         repo_grep,
         repo_edit,
+        repo_propose_pr,
         repo_activity,
         messages_search,
         document_read,

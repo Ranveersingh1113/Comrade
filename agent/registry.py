@@ -123,6 +123,12 @@ REGISTRY: dict[str, ToolSpec] = {
     "repo_edit": ToolSpec(
         "sandbox", writes=True, needs_human=False, args=EDIT_POLICY
     ),
+    # Surface `db`, not `sandbox`: this writes a consent row and touches no
+    # file. The git work happens later, in the executor, under a separate role,
+    # after a human has said yes. needs_human=False for the same reason
+    # team_propose_task carries it — the call being made IS the request for
+    # approval, and gating it would deadlock the tool whose whole job is to ask.
+    "repo_propose_pr": ToolSpec("db", writes=True, needs_human=False),
 }
 
 

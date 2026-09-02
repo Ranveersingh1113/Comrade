@@ -354,6 +354,56 @@ def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
+#: How old a checkout may be before the reconciler refreshes it. A push
+#: webhook enqueues a sync immediately, so this is the backstop for the cases
+#: a webhook never arrives for: a repository connected before the App's
+#: webhook was reachable, a delivery GitHub gave up retrying, a worker that
+#: was down when the push happened.
+CHECKOUT_STALE_SECONDS = 900
+
+#: Per tick. A team connecting twenty repositories at once should not enqueue
+#: twenty clones in one breath and starve every other job behind them; the
+#: next tick takes the next batch.
+SYNC_BATCH = 20
+
+
+def sweep_stale_checkouts() -> list[str]:
+    """Clone what has been connected but never fetched, and refresh what is old.
+
+    🔴 WITHOUT THIS, CONNECTING A REPOSITORY DID NOTHING. `enqueue_sync` was
+    written, tested and never called: the row went in, no clone was ever
+    queued, `last_cloned_at` stayed null — and `connected_repo` filters on
+    exactly that column, so the agent went on answering "no repository is
+    connected" to a team looking at their repository listed as connected. Every
+    tool in Phase B through D was unreachable through the product.
+
+    A RECONCILER rather than a hook on the insert, for the reason the orphan
+    sweep gives: connecting is a row write the frontend makes straight to
+    Supabase under RLS, so there is no server-side event to hang a hook on, and
+    a reconciler converges whether the row arrived through the UI, through
+    psql, or while the worker was down.
+    """
+    with connect(Role.ADMIN) as conn:
+        rows = conn.execute(
+            "select team_id, repo_full_name from public.github_repos"
+            " where last_cloned_at is null"
+            "    or last_cloned_at < now() - make_interval(secs => %s)"
+            " order by last_cloned_at nulls first limit %s",
+            (CHECKOUT_STALE_SECONDS, SYNC_BATCH),
+        ).fetchall()
+
+    queued: list[str] = []
+    for team_id, repo_full_name in rows:
+        try:
+            enqueue_sync(str(team_id), repo_full_name)
+            queued.append(f"{team_id}/{repo_full_name}")
+        except Exception:  # noqa: BLE001 - one bad row must not stop the rest
+            logger.exception("could not queue a sync for %s", repo_full_name)
+    if queued:
+        logger.info("queued %d repository sync(s)", len(queued))
+    return queued
+
+
 def sweep_orphan_workspaces() -> list[str]:
     """Delete checkouts belonging to teams that no longer exist.
 

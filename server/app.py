@@ -26,6 +26,7 @@ from starlette.concurrency import run_in_threadpool
 from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
 from pipeline.chat import enqueue_remember
+from pipeline.repo_sync import enqueue_sync
 from pipeline.github import (
     enqueue_github_event, forget_installation,
     resolve_team_for_installation, resolve_team_for_repo,
@@ -313,14 +314,24 @@ def github_install(team_id: str, user_id: CurrentUserId) -> dict:
     return install_url(team_id, user_id)
 
 
-@app.post("/teams/{team_id}/github/installations")
+@app.post("/github/installations")
 def github_record_installation(
-    team_id: str, req: InstallationRequest, user_id: CurrentUserId
+    req: InstallationRequest, user_id: CurrentUserId
 ) -> dict:
-    """Finish an install. `team_id` in the path is NOT trusted — the team comes
-    out of the signed state token, so a request naming a different team in the
-    URL cannot land an installation there."""
-    require_membership(user_id, team_id)
+    """Finish an install.
+
+    NO TEAM IN THE PATH, and that is forced by GitHub rather than chosen: an
+    App has ONE fixed Setup URL, so the redirect cannot carry a team in its
+    path and a route that required one could never be reached by the flow it
+    exists to serve. The team comes out of the signed state token, which is
+    also the only trustworthy place for it — a path parameter is whatever the
+    caller typed.
+
+    So there is no require_membership call here either. The state token binds
+    team AND user, record_installation refuses a session that is not the
+    account that started the install, and the insert runs as that user under
+    RLS. Three checks, none of which a path parameter could have improved.
+    """
     try:
         return record_installation(
             installation_id=req.installation_id, state=req.state,
@@ -666,6 +677,17 @@ async def github_webhook(request: Request) -> dict:
         team_id = await run_in_threadpool(resolve_team_for_repo, full_name)
     if team_id is None:
         return {"status": "ignored"}
+
+    # A push changed the code the agent reads, so refresh the checkout now
+    # rather than waiting for the reconciler's window. Deduped by
+    # enqueue_sync, so a burst of pushes queues one clone. Best-effort: the
+    # activity ingest below is the delivery's actual job, and a sync that
+    # cannot be queued is picked up by sweep_stale_checkouts anyway.
+    if event == "push":
+        try:
+            await run_in_threadpool(enqueue_sync, team_id, full_name)
+        except Exception:  # noqa: BLE001
+            logger.exception("could not queue a sync for %s", full_name)
 
     job_id = await run_in_threadpool(
         enqueue_github_event,

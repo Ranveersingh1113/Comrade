@@ -114,39 +114,6 @@ describe('GitHubConnect', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
-  test('returning from GitHub records the installation and clears the URL', async () => {
-    // 🔴 All three parameters are sent. installation_id alone is an
-    // unauthenticated number in a URL and installation ids are sequential, so
-    // the server needs `state` and `code` to establish who this is.
-    let received: unknown = null;
-    server.use(
-      http.post(`${BASE}/teams/${TEAM}/github/installations`, async ({ request }) => {
-        received = await request.json();
-        return HttpResponse.json({ team_id: TEAM, installation_id: 42, account_login: 'acme' });
-      }),
-      installLink({ configured: true, url: 'https://x' }),
-      repos(ONE_INSTALL),
-    );
-    renderAt('/setup?installation_id=42&state=st&code=cd&setup_action=install');
-
-    await waitFor(() => expect(received).toEqual({
-      installation_id: 42, state: 'st', code: 'cd',
-    }));
-    expect(await screen.findByText(/Connected acme/)).toBeTruthy();
-  });
-
-  test('a refused install shows the reason rather than a blank panel', async () => {
-    server.use(
-      http.post(`${BASE}/teams/${TEAM}/github/installations`, () =>
-        HttpResponse.json({ detail: 'that installation does not belong to an account you can administer.' }, { status: 400 })),
-      installLink({ configured: true, url: 'https://x' }),
-      repos({ installations: [] }),
-    );
-    renderAt('/setup?installation_id=9&state=st&code=cd');
-
-    expect(await screen.findByText(/does not belong to an account/)).toBeTruthy();
-  });
-
   test('one broken installation does not hide the others', async () => {
     // A team that revoked one grant still needs to see and manage the rest.
     server.use(

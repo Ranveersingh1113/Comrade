@@ -124,9 +124,12 @@ def tick() -> int:
 
     # Same contract: best-effort, never fatal. A reconciler that can stop the
     # queue draining is a reconciler that turns a disk problem into an outage.
-    from pipeline.repo_sync import enforce_disk_cap, sweep_orphan_workspaces
+    from pipeline.repo_sync import (
+        enforce_disk_cap, sweep_orphan_workspaces, sweep_stale_checkouts,
+    )
 
     try:
+        sweep_stale_checkouts()
         sweep_orphan_workspaces()
         enforce_disk_cap()
     except Exception:  # noqa: BLE001

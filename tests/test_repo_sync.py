@@ -21,12 +21,12 @@ import pytest
 
 from pipeline.repo_sync import (
     GIT_TIMEOUT_SECONDS, SWEEP_GRACE_SECONDS, RepoSyncError, _auth_header, _run_git, enqueue_sync,
-    handle_sync_repo, sweep_orphan_workspaces, sync_repo,
+    handle_sync_repo, sweep_orphan_workspaces, sweep_stale_checkouts, sync_repo,
 )
 from pipeline.worker import PermanentJobError
 from shared.config import settings
 from shared.workspace import repo_checkout
-from tests._seed import TEAM_A
+from tests._seed import A1, TEAM_A
 
 
 @pytest.fixture
@@ -471,3 +471,69 @@ def test_disconnecting_a_repo_reclaims_its_checkout(
     # The team's workspace itself survives: the team is still live, and only
     # the repository they disconnected went.
     assert checkout.parent.exists()
+
+
+def test_connecting_a_repo_eventually_makes_it_visible_to_the_agent(
+    seeded, workspaces, origin, monkeypatch, admin
+):
+    """🔴 The gap that made every repository tool unreachable through the product.
+
+    `enqueue_sync` was written, tested, and never called from anywhere. So
+    connecting a repository inserted the row and queued nothing; last_cloned_at
+    stayed null; and `connected_repo` filters on exactly that column — so the
+    agent answered "no repository is connected" to a team looking at their
+    repository listed as connected on the setup screen. Phases B, C and D were
+    all complete and all unreachable.
+
+    This walks the whole path a real connection takes, which is the only shape
+    of test that would have noticed: the unit tests for enqueue_sync and for
+    sync_repo both passed the entire time.
+    """
+    from agent.repo_tools import connected_repo
+
+    monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
+    monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(origin))
+    admin.execute("delete from public.github_repos where team_id=%s", (TEAM_A,))
+    admin.execute(
+        "insert into public.github_repos (team_id, repo_full_name) values (%s,%s)",
+        (TEAM_A, "acme/app"),
+    )
+
+    # The symptom, before anything runs: connected, and invisible.
+    assert connected_repo(TEAM_A, A1) is None
+
+    # THROUGH tick(), not by calling the sweep directly. The bug was that
+    # sweep_stale_checkouts' predecessor was never CALLED — enqueue_sync had
+    # its own passing unit test the whole time. A test that reaches past the
+    # worker to the function it is testing would have gone green on the broken
+    # code, which is the entire reason this one exists.
+    from pipeline.worker import run_once, tick
+
+    tick()
+    # BOUNDED. run_once returns True for a job it re-queued after a transient
+    # failure, so `while run_once(): pass` only terminates if every failure
+    # eventually exhausts its attempts — more faith than a loop a test cannot
+    # interrupt deserves.
+    for _ in range(20):
+        if not run_once():
+            break
+
+    assert connected_repo(TEAM_A, A1) == "acme/app"
+    assert (repo_checkout(TEAM_A, "acme/app") / "app.py").exists()
+
+
+def test_a_fresh_checkout_is_not_re_cloned_every_tick(
+    seeded, workspaces, origin, monkeypatch, admin
+):
+    """The reconciler must converge, not thrash. A sweep that re-queued every
+    connected repository on every tick would clone continuously and keep the
+    queue permanently busy."""
+    monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
+    monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(origin))
+    admin.execute("delete from public.github_repos where team_id=%s", (TEAM_A,))
+    admin.execute(
+        "insert into public.github_repos (team_id, repo_full_name, last_cloned_at)"
+        " values (%s,%s, now())",
+        (TEAM_A, "acme/app"),
+    )
+    assert sweep_stale_checkouts() == []

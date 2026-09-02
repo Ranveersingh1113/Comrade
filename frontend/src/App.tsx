@@ -23,6 +23,7 @@ import { Documents } from './screens/Documents';
 import { ConsentInbox } from './screens/ConsentInbox';
 import { Setup } from './screens/Setup';
 import { Team } from './screens/Team';
+import { GitHubCallback } from './screens/GitHubCallback';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { session, loading } = useAuth();
@@ -159,6 +160,16 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<Login />} />
+          {/* A GitHub App has ONE fixed Setup URL, so this route carries no
+              team — the signed state token does, and the server reads it. */}
+          <Route
+            path="/github/setup"
+            element={
+              <RequireAuth>
+                <GitHubCallback />
+              </RequireAuth>
+            }
+          />
           <Route
             path="/teams"
             element={

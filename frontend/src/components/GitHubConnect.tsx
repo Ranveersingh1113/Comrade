@@ -1,5 +1,9 @@
 // Connecting a team's repositories.
 //
+// The install REDIRECT is not handled here — it lands on /github/setup, which
+// is the App's one fixed Setup URL and therefore carries no team in its path.
+// This component only ever shows what is already connected.
+//
 // The picker offers exactly what the installation already grants, and that is
 // the point rather than a convenience: a member chooses from what they have
 // granted us, instead of typing a name we would then have to decide whether to
@@ -13,11 +17,9 @@
 // that also governs anyone posting to PostgREST directly.
 
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
 import {
   agentErrorText,
   githubInstallLink,
-  githubRecordInstallation,
   githubRepositories,
   type InstallationRepos,
 } from '../lib/agentApi';
@@ -29,7 +31,6 @@ interface Props {
 }
 
 export function GitHubConnect({ teamId, isLeader }: Props) {
-  const [params, setParams] = useSearchParams();
   const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [unavailable, setUnavailable] = useState<string | null>(null);
   const [installs, setInstalls] = useState<InstallationRepos[]>([]);
@@ -57,47 +58,9 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
     }
   }, [teamId]);
 
-  // Coming back from GitHub. All three parameters are required: installation_id
-  // on its own is an unauthenticated number in a URL, and installation ids are
-  // small sequential integers, so the server verifies `state` (this install
-  // started with us, for this team, as this person) and `code` (GitHub's own
-  // answer to whether they can administer it).
   useEffect(() => {
-    const installationId = params.get('installation_id');
-    const state = params.get('state');
-    const code = params.get('code');
-    if (!installationId || !state || !code || !teamId) {
-      void load();
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      setBusy(true);
-      try {
-        const out = await githubRecordInstallation(
-          teamId, Number(installationId), state, code,
-        );
-        if (!cancelled) setNote(`Connected ${out.account_login}.`);
-      } catch (e) {
-        if (!cancelled) setNote(agentErrorText(e));
-      } finally {
-        // Clear the parameters either way. Leaving a used state token in the
-        // address bar invites a reload that re-posts it, and the second
-        // attempt fails in a way that reads like the first one did.
-        const next = new URLSearchParams(params);
-        ['installation_id', 'state', 'code', 'setup_action'].forEach((k) => next.delete(k));
-        setParams(next, { replace: true });
-        if (!cancelled) {
-          setBusy(false);
-          await load();
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId]);
+    void load();
+  }, [load]);
 
   const setConnected = async (
     installationId: number,

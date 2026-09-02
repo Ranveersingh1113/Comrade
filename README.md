@@ -31,7 +31,9 @@ Two invariants shape the whole codebase:
 - **Backend:** Supabase (Postgres + Realtime + Auth + Storage)
 - **Frontend:** React + TypeScript + Vite SPA; talks to Postgres directly under RLS,
   and to the FastAPI service only where a key or role must stay server-side
-- **Tools:** ADK native function tools (call the DB under team-scoped worker roles); GitHub integration TBD
+- **Tools:** ADK native function tools (19) — team state, wiki, chat and document
+  search under team-scoped worker roles; and the repository tools, which read,
+  edit and run a team's connected checkout and propose changes as pull requests
 - **Memory:** Gemini two-stage compiler with cited, versioned wiki facts; vector
   retrieval is intentionally not part of the current design
 - **Eval:** deterministic tool-routing checks, with optional live-model smoke tests
@@ -44,7 +46,7 @@ Every worker connects under one of four RLS-bound roles — `agent`, `executor`,
 
 | Path | Purpose |
 |------|---------|
-| `agent/` | Google ADK `LlmAgent`, its four function tools, and the turn runtime |
+| `agent/` | Google ADK `LlmAgent`, its function tools, the capability layer, the container sandbox, and the turn runtime |
 | `server/` | FastAPI service — agent turns, consent resolution, invites, document ingest |
 | `pipeline/` | Job worker, document parsers, and the two-stage memory compiler |
 | `shared/` | Config, RLS-bound DB sessions, consent mechanism, nudges, run logging |
@@ -78,6 +80,16 @@ fails immediately rather than at the first query.
 For the database-backed test suite and workers, also start the local Supabase
 stack, apply migrations, and create the local worker login roles as described
 in [HANDOFF.md](HANDOFF.md#8-running-the-stack-locally).
+
+Connecting a repository needs a GitHub App — the credential is minted per
+installation, scoped by GitHub to the repositories that installation was
+granted, and never stored. `.env.example` lists the four settings that are easy
+to get wrong; the one worth repeating is the **Setup URL**, which must be
+`<frontend>/github/setup`, because an App has only one and it therefore cannot
+carry a team.
+
+Without an App, Comrade still ingests repository history from webhook
+deliveries — that path holds no credential. Only the working copy needs one.
 
 The agent runs a team's own code (`repo_run`) inside a container and never on
 the host, so Docker must be running and the sandbox image must exist:

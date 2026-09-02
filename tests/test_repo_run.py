@@ -34,7 +34,10 @@ needs_docker = pytest.mark.skipif(
     not _docker_up(), reason="Docker is not running; the sandbox needs it"
 )
 
-PROBE_NET = "import socket; socket.create_connection(('1.1.1.1', 53), timeout=5)"
+#: DNS resolution, not a raw TCP connect to somebody else's host. Both fail
+#: under --network none and both work on a bridge, but only one of them stays
+#: true when a public resolver decides to refuse a connection for a minute.
+PROBE_NET = "import socket; print(socket.gethostbyname('example.com'))"
 
 
 def _running_sandboxes() -> int:
@@ -88,16 +91,23 @@ def test_the_container_has_no_network(checkout):
     Asserted rather than assumed, because --network none is one flag and a
     refactor that drops it changes nothing else that anyone would notice.
     """
+    # The control runs FIRST, through the same code path and the same image,
+    # with the flag flipped. Two earlier versions of this got it wrong: one
+    # had no control at all and so also passed on a machine with no internet,
+    # and one reached for 1.1.1.1:53 from a different image, which turned an
+    # unrelated flaky TCP connect into a red security test.
+    #
+    # A control that cannot run is a SKIP, not a failure. On a host with no
+    # outbound network there is nothing to prove here, and saying so is more
+    # useful than a red mark that means "your laptop is offline".
+    control = run_contained(["python", "-c", PROBE_NET], root=checkout,
+                            network=True)
+    if control["exit_code"] != 0:
+        pytest.skip("this host has no outbound network; --network none is"
+                    " unfalsifiable here")
+
     result = run_contained(["python", "-c", PROBE_NET], root=checkout)
     assert result["exit_code"] != 0
-
-    # The negative control. Without it this test also passes on a machine that
-    # simply has no internet, which would make it prove nothing at all.
-    reachable = subprocess.run(
-        ["docker", "run", "--rm", "python:3.12-slim", "python", "-c", PROBE_NET],
-        capture_output=True, timeout=180,
-    ).returncode
-    assert reachable == 0, "this host has no network; the assertion above is vacuous"
 
 
 @needs_docker
@@ -163,7 +173,11 @@ def test_the_containers_own_filesystem_is_read_only(checkout):
         ["python", "-c", "open('/etc/passwd', 'a')"], root=checkout
     )
     assert result["exit_code"] != 0
-    assert "read-only" in result["stderr"].lower().replace(SPACE_MARK, " ")
+    # Either reason is the right answer, and asserting only on "read-only"
+    # made this go red when the image gained a non-root user — the write was
+    # MORE thoroughly refused, and the test called that a regression.
+    reason = result["stderr"].lower().replace(SPACE_MARK, " ")
+    assert "read-only" in reason or "permission denied" in reason
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +232,37 @@ def test_a_command_that_will_not_stop_is_actually_killed(checkout):
     assert result["timed_out"] is True
     assert result["exit_code"] is None
     assert _running_sandboxes() <= before, "a timed-out container survived"
+
+
+@needs_docker
+def test_a_tool_missing_from_the_image_says_so(checkout):
+    """🔴 Docker reports a missing executable as exit 127 with "failed to
+    create shim task: OCI runtime create failed" — a sentence about container
+    internals for a situation with a one-line explanation. An agent handed
+    that debugs the wrong thing, and cannot reach the right response ("this
+    image has no pytest, say so") from it."""
+    from agent.sandbox import SandboxError
+
+    with pytest.raises(SandboxError, match="not installed in the sandbox image"):
+        run_contained(["nosuchtool"], root=checkout)
+
+
+@needs_docker
+def test_an_unbuilt_image_says_how_to_build_it(checkout, monkeypatch):
+    """🔴 Caught a bug in the check above.
+
+    A missing image prints "Unable to find image ... locally" BEFORE the
+    daemon's refusal, so the original `stderr.startswith("docker:")` missed it
+    and returned exit 125 as though the command had run and failed — the exact
+    confusion that branch exists to prevent.
+    """
+    from agent.sandbox import SandboxError
+
+    monkeypatch.setattr(
+        "shared.config.settings.comrade_sandbox_image", "comrade-sandbox:nope"
+    )
+    with pytest.raises(SandboxError, match="has not been built"):
+        run_contained(["python", "-V"], root=checkout)
 
 
 def test_long_output_keeps_both_ends():

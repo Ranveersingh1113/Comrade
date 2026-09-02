@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # it is a knob a repository must not be able to turn, since "run my tests
     # in MY image" is just "run my code on your host" with extra steps. A
     # per-team value belongs in the teams table with an allowlist, not here.
-    comrade_sandbox_image: str = "python:3.12-slim"
+    comrade_sandbox_image: str = "comrade-sandbox:latest"
     # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the

@@ -79,6 +79,18 @@ For the database-backed test suite and workers, also start the local Supabase
 stack, apply migrations, and create the local worker login roles as described
 in [HANDOFF.md](HANDOFF.md#8-running-the-stack-locally).
 
+The agent runs a team's own code (`repo_run`) inside a container and never on
+the host, so Docker must be running and the sandbox image must exist:
+
+```bash
+docker build -f docker/sandbox.Dockerfile -t comrade-sandbox:latest .
+```
+
+Without it `repo_run` refuses with the build command rather than falling back
+to the host — running an arbitrary repository's test suite uncontained would
+hand it the database URL, the GitHub credential and the model key that
+Comrade's own process holds.
+
 ## Run it
 
 Three processes, each in its own terminal:

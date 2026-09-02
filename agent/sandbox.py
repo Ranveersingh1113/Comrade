@@ -178,10 +178,34 @@ def run_contained(
             " outside a container. Start Docker and try again."
         ) from exc
 
-    if proc.returncode == 125:
-        # 125 is docker itself failing (bad image, daemon down) rather than the
-        # command failing. Reporting that as "your tests exited 125" would send
-        # the agent debugging code that never ran.
+    # DOCKER failing to start the container is not the COMMAND failing, and
+    # the two are easy to confuse: a missing executable comes back as exit
+    # 127 with "failed to create shim task: OCI runtime create failed", which
+    # is a sentence about container internals for a situation with a one-line
+    # explanation. An agent handed that debugs the wrong thing -- and the
+    # right response ("this image does not have pytest, say so") is not
+    # reachable from it.
+    # `in`, not `startswith`. A missing image prints "Unable to find image
+    # ... locally" FIRST and only then the daemon's refusal, so a startswith
+    # check silently let that through as exit 125 -- the exact "reported as
+    # the command failing when the container never started" confusion this
+    # branch exists to prevent. A command inside the container that exits 127
+    # on its own has no "docker:" line, which is what makes this the right
+    # discriminator rather than the exit code.
+    if "docker:" in proc.stderr:
+        if "executable file not found" in proc.stderr:
+            raise SandboxError(
+                f"{argv[0]!r} is not installed in the sandbox image"
+                f" ({settings.comrade_sandbox_image}). There is no network in"
+                " here, so it cannot be installed either — say the tool is not"
+                " available rather than trying to work around it."
+            )
+        if "manifest" in proc.stderr or "pull access denied" in proc.stderr:
+            raise SandboxError(
+                f"the sandbox image {settings.comrade_sandbox_image} has not"
+                " been built. Run: docker build -f docker/sandbox.Dockerfile"
+                " -t comrade-sandbox:latest ."
+            )
         raise SandboxError(f"the container could not start: {proc.stderr.strip()[:300]}")
 
     return {

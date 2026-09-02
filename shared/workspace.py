@@ -24,6 +24,9 @@ inside Comrade, and a traversal bug becomes a path to Comrade's own secrets
 rather than to another empty directory. `_assert_outside_comrade` refuses that
 configuration at import rather than trusting nobody sets it.
 """
+import os
+import stat
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -114,6 +117,38 @@ def ensure_workspace(team_id: str) -> Path:
     return path
 
 
+def force_rmtree(path: Path) -> bool:
+    """Delete a tree that git has made partly read-only. Returns whether it went.
+
+    🔴 `shutil.rmtree(path, ignore_errors=True)` DOES NOT DELETE A CHECKOUT.
+    Git marks everything under .git/objects read-only, Windows refuses to
+    unlink a read-only file, and ignore_errors swallows every one of those
+    refusals — so the call returns cleanly having removed the working tree and
+    left .git behind.
+
+    That was silent everywhere it mattered: a departed team's code stayed on
+    disk indefinitely (a retention problem, not a tidiness one), the orphan
+    sweep reported removals that had not happened, and enforce_disk_cap
+    evicted its way around a directory that never got smaller.
+
+    Clearing the write bit and retrying is the documented remedy. Failures are
+    returned rather than raised: one undeletable checkout must not abort a
+    sweep over all the others, and must not be reported as success either.
+    """
+    def _clear_readonly(func, target, _exc):
+        try:
+            os.chmod(target, stat.S_IWRITE)
+            func(target)
+        except OSError:
+            logger.warning("could not remove %s", target)
+
+    try:
+        shutil.rmtree(path, onexc=_clear_readonly)
+    except OSError as exc:
+        logger.warning("could not remove %s: %s", path, exc)
+    return not path.exists()
+
+
 def remove_workspace(team_id: str) -> None:
     """Delete a team's checkout — on repo disconnect, or when a team ends.
 
@@ -123,4 +158,4 @@ def remove_workspace(team_id: str) -> None:
     """
     path = workspace_for(team_id)
     if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+        force_rmtree(path)

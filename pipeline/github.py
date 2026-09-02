@@ -30,6 +30,46 @@ from shared.db import Role, connect, team_session
 logger = logging.getLogger(__name__)
 
 
+def resolve_team_for_installation(installation_id: int) -> str | None:
+    """Which team owns this installation.
+
+    PREFERRED over resolve_team_for_repo, because it cannot be ambiguous:
+    github_installations.installation_id is unique across all teams, while two
+    teams may legitimately connect the same public repository and the name
+    lookup then returns whichever row came back first — silently routing one
+    team's activity into another team's wiki.
+
+    Admin for the same reason resolve_team_for_repo is: there is no team yet
+    to scope the lookup to.
+    """
+    with connect(Role.ADMIN) as conn:
+        row = conn.execute(
+            "select team_id from public.github_installations"
+            " where installation_id = %s",
+            (installation_id,),
+        ).fetchone()
+    return str(row[0]) if row else None
+
+
+def forget_installation(installation_id: int) -> None:
+    """The App was uninstalled. Drop the row, and the repositories connected
+    through it go with it via the foreign key.
+
+    Without this, an uninstalled App leaves rows whose every sync fails with a
+    401 and burns three retries each time — and, worse, leaves a team's UI
+    claiming a repository is connected when nothing can read it.
+    """
+    from shared.github_app import forget
+
+    with connect(Role.ADMIN) as conn:
+        conn.execute(
+            "delete from public.github_installations where installation_id = %s",
+            (installation_id,),
+        )
+        conn.commit()
+    forget(installation_id)
+
+
 def resolve_team_for_repo(full_name: str) -> str | None:
     """Which team registered this repo, keyed by GitHub's `owner/repo` name.
 

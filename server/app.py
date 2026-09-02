@@ -26,7 +26,14 @@ from starlette.concurrency import run_in_threadpool
 from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
 from pipeline.chat import enqueue_remember
-from pipeline.github import enqueue_github_event, resolve_team_for_repo
+from pipeline.github import (
+    enqueue_github_event, forget_installation,
+    resolve_team_for_installation, resolve_team_for_repo,
+)
+from server.github_connect import (
+    ConnectError, connectable_repositories, install_url,
+    record_installation,
+)
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
 from server.webhooks import verify_signature
@@ -282,6 +289,55 @@ def consent_edit_and_approve(
         )
     except ConsentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+# ---------- GitHub ----------
+#
+# Only what the BROWSER CANNOT DO ITSELF is here. Connecting and disconnecting
+# a repository are row writes the frontend makes straight to Supabase, where
+# RLS decides them — au_github_repos_insert requires both team leadership and
+# an installation the same team owns, so a route in front of it would add a
+# second place to get the same rule right. These three exist because they need
+# a credential the browser must never hold.
+
+class InstallationRequest(BaseModel):
+    installation_id: int
+    state: str
+    code: str
+
+
+@app.get("/teams/{team_id}/github/install")
+def github_install(team_id: str, user_id: CurrentUserId) -> dict:
+    """Where to send someone to install the App, or why we cannot."""
+    require_membership(user_id, team_id)
+    return install_url(team_id, user_id)
+
+
+@app.post("/teams/{team_id}/github/installations")
+def github_record_installation(
+    team_id: str, req: InstallationRequest, user_id: CurrentUserId
+) -> dict:
+    """Finish an install. `team_id` in the path is NOT trusted — the team comes
+    out of the signed state token, so a request naming a different team in the
+    URL cannot land an installation there."""
+    require_membership(user_id, team_id)
+    try:
+        return record_installation(
+            installation_id=req.installation_id, state=req.state,
+            code=req.code, session_user_id=user_id,
+        )
+    except ConnectError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@app.get("/teams/{team_id}/github/repositories")
+def github_repositories(team_id: str, user_id: CurrentUserId) -> dict:
+    """What this team's installations can reach — the picker's contents."""
+    require_membership(user_id, team_id)
+    try:
+        return connectable_repositories(team_id, user_id)
+    except ConnectError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 # ---------- teams ----------
@@ -581,18 +637,40 @@ async def github_webhook(request: Request) -> dict:
         logger.warning("github webhook: signed body was not JSON")
         return {"status": "ignored", "reason": "unparseable"}
 
+    event = request.headers.get("X-GitHub-Event", "")
+    installation_id = (body.get("installation") or {}).get("id")
+
+    # An uninstall is the one delivery that must be acted on even though it
+    # names no repository. Without it the rows survive, every later sync fails
+    # on a revoked credential and burns its three retries, and the team's UI
+    # goes on claiming a repository is connected that nothing can read.
+    if event == "installation" and body.get("action") in ("deleted", "suspend"):
+        if installation_id:
+            await run_in_threadpool(forget_installation, int(installation_id))
+        return {"status": "disconnected"}
+
     full_name = (body.get("repository") or {}).get("full_name")
     if not full_name:
         return {"status": "ignored", "reason": "no repository"}
 
-    team_id = await run_in_threadpool(resolve_team_for_repo, full_name)
+    # BY INSTALLATION FIRST. Two teams may legitimately connect the same public
+    # repository, and the name lookup returns whichever row came back first —
+    # which would route one team's activity into another team's wiki. The
+    # installation id is unique across all teams, so it cannot be ambiguous.
+    team_id = None
+    if installation_id:
+        team_id = await run_in_threadpool(
+            resolve_team_for_installation, int(installation_id)
+        )
+    if team_id is None:
+        team_id = await run_in_threadpool(resolve_team_for_repo, full_name)
     if team_id is None:
         return {"status": "ignored"}
 
     job_id = await run_in_threadpool(
         enqueue_github_event,
         team_id,
-        request.headers.get("X-GitHub-Event", ""),
+        event,
         request.headers.get("X-GitHub-Delivery"),
         body,
     )

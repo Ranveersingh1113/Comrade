@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     github_app_id: str = ""
     github_app_private_key: str = ""      # PEM, escaped-newline PEM, or base64
     github_app_slug: str = ""             # for the https://github.com/apps/<slug> link
+    # "Request user authorization (OAuth) during installation" on the App.
+    # These verify that whoever finishes an install can actually ADMINISTER
+    # the installation they are claiming — GitHub sends installation_id back
+    # as an unauthenticated number in a URL, and installation ids are small
+    # sequential integers. See server/github_connect.py.
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
 
     # LOCAL SINGLE-TENANT ESCAPE HATCH, and nothing more.
     #

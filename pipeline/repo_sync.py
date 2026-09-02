@@ -26,11 +26,15 @@ so even if some future git version cached something there, it is not reachable.
 Git history reaches the model through `repo_activity` instead — already built,
 already datamarked.
 
-`_token_for` is a seam. Today it hands back the single PAT, which is fine while
-the only connected repo is our own and unacceptable the moment a second team
-connects one: one identity, one blast radius, no expiry. A GitHub App
-installation token — one hour, scoped to that installation's repositories —
-replaces the body of this one function and nothing else.
+THE CREDENTIAL BELONGS TO THE TEAM, NOT TO US
+-----------------------------------------------
+`_token_for(team_id, repo_full_name)` once ignored both arguments and returned
+one process-wide PAT — one identity, one blast radius, no expiry — so a team's
+checkout was fetched with a credential scoped to every repository its owner
+could reach. It now mints a GitHub App installation token: one hour, scoped by
+GitHub to the repositories that installation was granted. The PAT survives only
+as a single-tenant local escape hatch and refuses itself once a second team has
+connected anything.
 """
 import logging
 import subprocess
@@ -44,7 +48,8 @@ from shared.config import settings
 from shared.db import Role, connect, team_session
 from shared.github_app import GitHubAppError, installation_token
 from shared.workspace import (
-    ensure_workspace, remove_workspace, repo_checkout, workspaces_root,
+    ensure_workspace, force_rmtree, remove_workspace, repo_checkout,
+    workspaces_root,
 )
 
 logger = logging.getLogger(__name__)
@@ -329,6 +334,22 @@ def _live_team_ids(conn) -> set[str]:
     }
 
 
+def _live_checkouts(conn) -> set[tuple[str, str]]:
+    """(team_id, checkout directory name) for every repository still connected.
+
+    Disconnecting a repository is a row delete the frontend does directly under
+    RLS, so nothing server-side hears about it. The checkout would otherwise
+    sit on disk indefinitely holding a copy of code the team has told us to
+    stop reading — which is the part that matters, more than the bytes.
+    """
+    return {
+        (str(team_id), repo_checkout(str(team_id), name).name)
+        for team_id, name in conn.execute(
+            "select team_id, repo_full_name from public.github_repos"
+        ).fetchall()
+    }
+
+
 def _dir_size(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
@@ -360,6 +381,7 @@ def sweep_orphan_workspaces() -> list[str]:
         return []
     with connect(Role.ADMIN) as conn:
         live = _live_team_ids(conn)
+        connected = _live_checkouts(conn)
 
     removed: list[str] = []
     cutoff = time.time() - SWEEP_GRACE_SECONDS
@@ -373,10 +395,27 @@ def sweep_orphan_workspaces() -> list[str]:
             # deletes what it does not recognise is how a reconciler eats a
             # directory somebody was using.
             continue
-        if team_id in live or entry.stat().st_mtime > cutoff:
+        if team_id not in live:
+            if entry.stat().st_mtime > cutoff:
+                continue
+            remove_workspace(team_id)
+            removed.append(team_id)
             continue
-        remove_workspace(team_id)
-        removed.append(team_id)
+
+        # The team is live, but individual repositories inside it may have been
+        # disconnected. Same two guards as above, one level down: only
+        # directories we would have created, and nothing inside the grace
+        # window — a checkout being cloned right now has no github_repos row
+        # visible to the snapshot this sweep took.
+        for checkout in entry.iterdir():
+            if not checkout.is_dir():
+                continue
+            if (team_id, checkout.name) in connected:
+                continue
+            if checkout.stat().st_mtime > cutoff:
+                continue
+            force_rmtree(checkout)
+            removed.append(f"{team_id}/{checkout.name}")
     if removed:
         logger.info("removed %d orphaned workspace(s)", len(removed))
     return removed

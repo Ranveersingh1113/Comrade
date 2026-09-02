@@ -11,6 +11,7 @@ The obvious clone URL embeds the credential and git persists the remote URL in
 `.git/config`, which would leave a live token inside the exact tree the agent
 is about to read.
 """
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ import pytest
 
 from pipeline.repo_sync import (
     GIT_TIMEOUT_SECONDS, SWEEP_GRACE_SECONDS, RepoSyncError, _auth_header, _run_git, enqueue_sync,
-    handle_sync_repo, sync_repo,
+    handle_sync_repo, sweep_orphan_workspaces, sync_repo,
 )
 from pipeline.worker import PermanentJobError
 from shared.config import settings
@@ -424,3 +425,49 @@ def test_an_empty_repo_is_named_as_empty_not_as_a_missing_ref(
     from pipeline.repo_sync import default_branch
     with pytest.raises(RepoSyncError, match="no commits yet"):
         default_branch(TEAM_A, "acme/empty")
+
+
+def test_disconnecting_a_repo_reclaims_its_checkout(
+    seeded, workspaces, origin, monkeypatch, admin
+):
+    """🔴 Nothing server-side hears about a disconnect.
+
+    Removing a repository is a row delete the frontend makes straight to
+    Supabase under RLS. The checkout would otherwise sit on disk indefinitely
+    holding a copy of code the team has told us to stop reading — which is the
+    part that matters, rather than the bytes.
+
+    Reclaimed by the SWEEP rather than by a delete hook, for the same reason
+    the team-level orphan case is: a reconciler converges whether the row went
+    away through the UI, through psql, or while the worker was down.
+    """
+    monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
+    monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(origin))
+    admin.execute("delete from public.github_repos where team_id=%s", (TEAM_A,))
+    admin.execute(
+        "insert into public.github_repos (team_id, repo_full_name) values (%s,%s)",
+        (TEAM_A, "acme/app"),
+    )
+    checkout = sync_repo(TEAM_A, "acme/app")
+    assert (checkout / "app.py").exists()
+
+    # Age it past the grace window: a checkout being cloned right now has no
+    # row visible to the snapshot the sweep takes, and deleting it would race
+    # the clone that is still writing it.
+    old = time.time() - SWEEP_GRACE_SECONDS - 60
+    os.utime(checkout, (old, old))
+
+    # Still connected -> untouched, so the test below is about the row and not
+    # about the grace window.
+    sweep_orphan_workspaces()
+    assert checkout.exists()
+
+    admin.execute(
+        "delete from public.github_repos where team_id=%s and repo_full_name=%s",
+        (TEAM_A, "acme/app"),
+    )
+    sweep_orphan_workspaces()
+    assert not checkout.exists()
+    # The team's workspace itself survives: the team is still live, and only
+    # the repository they disconnected went.
+    assert checkout.parent.exists()

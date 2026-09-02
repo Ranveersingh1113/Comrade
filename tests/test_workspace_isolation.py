@@ -1,3 +1,4 @@
+import subprocess
 """One team's agent reaches one team's checkout. Nothing else.
 
 This is a tenant boundary, not a safety rail, and it is held to the standard
@@ -21,7 +22,7 @@ import pytest
 from agent.capability import ArgPolicy, CapabilityError, check_path
 from shared.workspace import (
     COMRADE_ROOT, WorkspaceError, ensure_workspace, remove_workspace,
-    workspace_for, workspaces_root,
+    repo_checkout, workspace_for, workspaces_root,
 )
 
 TEAM_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -178,3 +179,37 @@ def test_a_workspace_is_a_plain_directory(workspaces):
     assert a.is_dir()
     assert a.name == TEAM_A
     assert a.parent == Path(workspaces_root())
+
+
+def test_a_git_checkout_is_actually_deleted(tmp_path, monkeypatch):
+    """🔴 Silently true everywhere it mattered, for as long as this existed.
+
+    `shutil.rmtree(path, ignore_errors=True)` does NOT delete a checkout. Git
+    marks everything under .git/objects read-only, Windows refuses to unlink a
+    read-only file, and ignore_errors swallows every refusal — so the call
+    returns cleanly having removed the working tree and left .git behind.
+
+    Nothing noticed. A departed team's code stayed on disk indefinitely, which
+    is a retention problem rather than a tidiness one; the orphan sweep
+    reported removals that had not happened; and enforce_disk_cap evicted its
+    way around directories that never got smaller.
+
+    Asserted on a REAL git repository, because an empty directory deletes
+    cleanly and would have proved nothing.
+    """
+    monkeypatch.setattr(
+        "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
+    )
+    root = repo_checkout(TEAM_A, "acme/app")
+    root.mkdir(parents=True)
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", *a], cwd=root, check=True, capture_output=True
+    )
+    run("init", "-q")
+    (root / "app.py").write_text("print('x')\n")
+    run("add", "-A")
+    run("-c", "user.email=t@t.dev", "-c", "user.name=T", "commit", "-qm", "x")
+    assert any((root / ".git" / "objects").rglob("*"))
+
+    remove_workspace(TEAM_A)
+    assert not workspace_for(TEAM_A).exists()

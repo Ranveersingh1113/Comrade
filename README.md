@@ -141,6 +141,33 @@ response starts, so a non-member gets a real 403 and an over-budget team a real 
 Every turn is recorded to `public.agent_runs` — one row per turn, one step per tool
 call, tool result, and text chunk — for observability and crash recovery.
 
+## Before merging
+
+```bash
+scripts/gates.sh              # everything except the destructive migration check
+scripts/gates.sh --quick      # skip the browser and real-GitHub lanes
+scripts/gates.sh --with-reset # also rebuild the database from migrations
+```
+
+It is a script rather than a list of commands because `pytest -q | tail && …`
+gates on nothing: the pipe makes the exit status `tail`'s, which is always 0.
+It also refuses to run while a `pipeline.worker` is up, since a live worker
+drains the queue the queue tests are draining and the resulting failures point
+nowhere near their cause.
+
+Two lanes are excluded from the default `pytest` run and included here:
+
+| marker | what it does |
+|---|---|
+| `live` | talks to Gemini — paid and nondeterministic |
+| `realgithub` | clones and opens a real pull request, then closes it and deletes the branch |
+
+`realgithub` is the one that does not fake its dependencies. Everything else
+drives git against a local bare repository through the `_url_for` and
+`_create_pr` seams — which is exactly where the empty-repo, CRLF and
+force-with-lease bugs hid. It skips itself when no credential is configured,
+and `COMRADE_E2E_REPO` picks the scratch repository.
+
 ## Architecture
 
 [docs/architecture.md](docs/architecture.md) traces every flow function by function:

@@ -25,6 +25,22 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_secret_key: str = ""
+    # A GitHub App is how a team's repositories are reached. The App's private
+    # key is the ONE long-lived secret: every repository credential is minted
+    # from it on demand, scoped by GitHub to that installation, and held only
+    # in memory (shared/github_app.py).
+    github_app_id: str = ""
+    github_app_private_key: str = ""      # PEM, escaped-newline PEM, or base64
+    github_app_slug: str = ""             # for the https://github.com/apps/<slug> link
+
+    # LOCAL SINGLE-TENANT ESCAPE HATCH, and nothing more.
+    #
+    # This used to be THE credential, returned by _token_for for every team
+    # regardless of which team asked — so it was scoped to everything its
+    # owner could reach, including other teams' private repositories. It is
+    # kept only so a solo developer can run the harness before registering an
+    # App, and pipeline/repo_sync.py refuses to use it the moment a second
+    # team has connected a repository.
     github_pat: str = ""
     # Shared secret GitHub signs webhook deliveries with. EMPTY REFUSES EVERY
     # DELIVERY — server/webhooks.py fails closed rather than accepting unsigned

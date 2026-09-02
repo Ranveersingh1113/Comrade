@@ -42,6 +42,7 @@ from pathlib import Path
 from pipeline.worker import PermanentJobError, register
 from shared.config import settings
 from shared.db import Role, connect, team_session
+from shared.github_app import GitHubAppError, installation_token
 from shared.workspace import (
     ensure_workspace, remove_workspace, repo_checkout, workspaces_root,
 )
@@ -61,19 +62,76 @@ class RepoSyncError(Exception):
     """A repository could not be cloned or refreshed."""
 
 
-def _token_for(team_id: str, repo_full_name: str) -> str:
-    """The credential to fetch this team's repository with.
+def _installation_for(team_id: str, repo_full_name: str) -> int | None:
+    """Which installation reaches this team's copy of this repository.
 
-    The seam the GitHub App slots into. See the module header for why the PAT
-    behind it is a stopgap and not an acceptable end state.
+    Joined rather than looked up by name: `github_repos.installation_id` is
+    constrained by RLS to an installation the SAME team owns, so reading it
+    back through team_session is what carries that guarantee into the token we
+    then mint. A lookup keyed on repo_full_name alone would find another
+    team's row, and two teams may legitimately connect the same public repo.
     """
-    if not settings.github_pat:
-        raise PermanentJobError(
-            "no GitHub credential is configured, so no repository can be"
-            " fetched. Set GITHUB_PAT, or install the GitHub App once it"
-            " exists."
-        )
-    return settings.github_pat
+    with team_session(Role.PIPELINE, team_id) as conn:
+        row = conn.execute(
+            "select r.installation_id from public.github_repos r"
+            " join public.github_installations i"
+            "   on i.installation_id = r.installation_id"
+            " where r.team_id = %s and r.repo_full_name = %s",
+            (team_id, repo_full_name),
+        ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _pat_is_still_single_tenant() -> bool:
+    """Whether the local PAT can be used without becoming a cross-tenant hole.
+
+    The PAT is scoped to everything its owner can reach, so the moment a
+    SECOND team has a repository connected it stops being "my own credential
+    for my own repo" and becomes "one team's agent holding another team's
+    access". Counted rather than assumed, and refused rather than warned
+    about: a warning in a log is not a boundary.
+    """
+    with connect(Role.ADMIN) as conn:
+        teams = conn.execute(
+            "select count(distinct team_id) from public.github_repos"
+        ).fetchone()[0]
+    return teams <= 1
+
+
+def _token_for(team_id: str, repo_full_name: str) -> str:
+    """The credential to fetch THIS team's copy of THIS repository with.
+
+    Both arguments are now load-bearing. They were not: this returned one
+    process-wide PAT for every caller, so a team's checkout was fetched with a
+    credential scoped to every repository its owner could reach. See the
+    module header and 20260902120000_github_app.sql.
+    """
+    installation_id = _installation_for(team_id, repo_full_name)
+    if installation_id is not None:
+        try:
+            return installation_token(installation_id)
+        except GitHubAppError as exc:
+            # A revoked or suspended installation is not worth three attempts:
+            # nothing about retrying makes a removed grant come back, and the
+            # team has to reinstall the App either way.
+            raise PermanentJobError(str(exc)) from exc
+
+    if settings.github_pat:
+        if not _pat_is_still_single_tenant():
+            raise PermanentJobError(
+                f"{repo_full_name} is connected without a GitHub App"
+                " installation, and the local GITHUB_PAT cannot be used once"
+                " more than one team has connected a repository — it is scoped"
+                " to everything its owner can reach, including the other"
+                " team's. Install the GitHub App for this team."
+            )
+        return settings.github_pat
+
+    raise PermanentJobError(
+        f"no GitHub credential reaches {repo_full_name}. Install the Comrade"
+        " GitHub App on the account that owns it and connect the repository"
+        " again."
+    )
 
 
 #: Flags on EVERY git invocation, not a tuning knob.

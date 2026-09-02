@@ -8,6 +8,7 @@ import {
 import { consentPhase } from '../lib/consentModel';
 import { countdown, messageTime, shortHash } from '../lib/format';
 import type { ConsentItem } from '../lib/types';
+import { DiffView } from './DiffView';
 
 /**
  * A warrant card. Hard design rule: always the LITERAL tool name, LITERAL
@@ -201,7 +202,17 @@ export function ConsentCard({
               {Object.entries(item.tool_args).map(([k, v]) => (
                 <div key={k}>
                   <span style={{ color: 'var(--peach)' }}>{k}</span>{' '}
-                  {typeof v === 'string' ? v : JSON.stringify(v)}
+                  {/* A patch is the one argument that is not a value to glance
+                      at — it IS the thing being approved, and rendered on one
+                      line with literal 
+ it cannot be read at all. */}
+                  {k === 'patch' && typeof v === 'string' ? (
+                    <DiffView patch={v} />
+                  ) : typeof v === 'string' ? (
+                    v
+                  ) : (
+                    JSON.stringify(v)
+                  )}
                 </div>
               ))}
               <div>

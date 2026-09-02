@@ -276,3 +276,76 @@ export async function rememberMessage(
 ): Promise<{ job_id: string }> {
   return request(`/teams/${teamId}/messages/${messageId}/remember`);
 }
+
+// ---------- GitHub ----------
+//
+// Only what the browser cannot do itself lives behind these. Connecting and
+// disconnecting a repository are writes straight to Supabase, because RLS is
+// what decides them (au_github_repos_insert requires team leadership AND an
+// installation the same team owns) — routing them through the API would be a
+// second place to get the same rule right, and the weaker place, since anyone
+// can post to PostgREST directly.
+
+async function getJson<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { Authorization: await authHeader() },
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const j = (await res.json()) as { detail?: string };
+      if (j.detail) detail = j.detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new AgentApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+export interface InstallLink {
+  configured: boolean;
+  url?: string;
+  reason?: string;
+}
+
+/** Where to send someone to install the App, or why this deployment cannot. */
+export function githubInstallLink(teamId: string) {
+  return getJson<InstallLink>(`/teams/${teamId}/github/install`);
+}
+
+export interface ConnectableRepo {
+  full_name: string;
+  connected: boolean;
+}
+
+export interface InstallationRepos {
+  installation_id: number;
+  account_login: string;
+  repositories: ConnectableRepo[];
+  error?: string;
+}
+
+/** What this team's installations can reach — the picker's contents. */
+export function githubRepositories(teamId: string) {
+  return getJson<{ installations: InstallationRepos[] }>(
+    `/teams/${teamId}/github/repositories`,
+  );
+}
+
+/**
+ * Finish an install. `state` and `code` come back from GitHub in the redirect;
+ * both are required, because installation_id alone is an unauthenticated
+ * number in a URL and installation ids are sequential.
+ */
+export function githubRecordInstallation(
+  teamId: string,
+  installationId: number,
+  state: string,
+  code: string,
+) {
+  return request<{ team_id: string; installation_id: number; account_login: string }>(
+    `/teams/${teamId}/github/installations`,
+    { installation_id: installationId, state, code },
+  );
+}

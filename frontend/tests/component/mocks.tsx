@@ -28,6 +28,7 @@ export const supaState = {
   tables: {} as Record<string, unknown[]>,
   inserts: [] as WriteRecord[],
   updates: [] as WriteRecord[],
+  deletes: [] as WriteRecord[],
   /** set to make the next insert into a table fail */
   insertErrors: {} as Record<string, string>,
 };
@@ -36,6 +37,7 @@ export function resetSupa(): void {
   supaState.tables = {};
   supaState.inserts = [];
   supaState.updates = [];
+  supaState.deletes = [];
   supaState.insertErrors = {};
 }
 
@@ -61,6 +63,23 @@ function makeQuery(table: string) {
         return Promise.resolve({ data: null, error: null });
       },
     }),
+    // Deletes chain through any number of .eq() calls and settle on await, so
+    // `.delete().eq(a).eq(b)` works the way the real client does.
+    delete: () => {
+      const d: Record<string, unknown> = {};
+      const filters: Record<string, unknown> = {};
+      Object.assign(d, {
+        eq: (col: string, val: unknown) => {
+          filters[col] = val;
+          return d;
+        },
+        then: (resolve: (v: { data: null; error: null }) => unknown) => {
+          supaState.deletes.push({ table, values: filters });
+          return Promise.resolve({ data: null, error: null }).then(resolve);
+        },
+      });
+      return d;
+    },
     then: (resolve: (v: { data: unknown[]; error: null; count: number }) => unknown) =>
       Promise.resolve({ data: rows(), error: null, count: rows().length }).then(resolve),
   });

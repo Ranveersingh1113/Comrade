@@ -176,4 +176,49 @@ describe('GitHubConnect', () => {
     expect(screen.getByText(/no GitHub credential reaches/)).toBeTruthy();
     expect(screen.queryByText('CONNECTED')).toBeNull();
   });
+
+  test('a clone in flight is polled until it finishes', async () => {
+    // 🔴 The screen loaded once on mount, so it said CLONING… until somebody
+    // reloaded. A clone that finished in four seconds was indistinguishable
+    // from one that had hung, and the honest state read as a broken one.
+    let call = 0;
+    server.use(
+      installLink({ configured: true, url: 'https://x' }),
+      http.get(`${BASE}/teams/${TEAM}/github/repositories`, () => {
+        call += 1;
+        const done = call > 1;
+        return HttpResponse.json({
+          installations: [{
+            installation_id: 42, account_login: 'acme',
+            repositories: [{
+              full_name: 'acme/app', connected: true,
+              cloned_at: done ? '2026-09-02T10:00:00Z' : null,
+              sync_error: null,
+            }],
+          }],
+        });
+      }),
+    );
+    renderAt('/setup');
+    expect(await screen.findByText('CLONING…')).toBeTruthy();
+    expect(await screen.findByText('CONNECTED', {}, { timeout: 8000 })).toBeTruthy();
+  }, 12000);
+
+  test('a settled screen stops asking', async () => {
+    // Polling forever would be a request every four seconds per open tab, for
+    // a state that cannot change on its own.
+    let calls = 0;
+    server.use(
+      installLink({ configured: true, url: 'https://x' }),
+      http.get(`${BASE}/teams/${TEAM}/github/repositories`, () => {
+        calls += 1;
+        return HttpResponse.json(ONE_INSTALL);
+      }),
+    );
+    renderAt('/setup');
+    await screen.findByText('CONNECTED');
+    const after = calls;
+    await new Promise((r) => setTimeout(r, 5000));
+    expect(calls).toBe(after);
+  }, 12000);
 });

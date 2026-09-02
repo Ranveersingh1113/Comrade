@@ -91,14 +91,23 @@ def _pat_is_still_single_tenant() -> bool:
     """Whether the local PAT can be used without becoming a cross-tenant hole.
 
     The PAT is scoped to everything its owner can reach, so the moment a
-    SECOND team has a repository connected it stops being "my own credential
-    for my own repo" and becomes "one team's agent holding another team's
-    access". Counted rather than assumed, and refused rather than warned
-    about: a warning in a log is not a boundary.
+    SECOND team would be reached with it, it stops being "my own credential for
+    my own repo" and becomes "one team's agent holding another team's access".
+    Counted rather than assumed, and refused rather than warned about: a
+    warning in a log is not a boundary.
+
+    Counts teams that would FALL THROUGH TO THE PAT, not teams with a
+    repository. A team whose repositories all have an installation never
+    reaches this credential, so counting them would have one team's completed
+    migration to the App switch off another team's local development — a
+    refusal with no one on the other side of it. Found when a real connected
+    repository in a developer's own database started failing a test about a
+    credential it does not use.
     """
     with connect(Role.ADMIN) as conn:
         teams = conn.execute(
             "select count(distinct team_id) from public.github_repos"
+            " where installation_id is null"
         ).fetchone()[0]
     return teams <= 1
 
@@ -366,6 +375,19 @@ CHECKOUT_STALE_SECONDS = 900
 #: next tick takes the next batch.
 SYNC_BATCH = 20
 
+#: 🔴 How long to leave a FAILED sync alone. Without this the worker spins.
+#:
+#: tick() drains the queue and then sweeps. A sync that fails is no longer
+#: 'pending', so enqueue_sync's dedupe stops applying and the sweep queues it
+#: again immediately — and because tick() processed something, main() skips its
+#: sleep and goes straight round again. One repository nobody can clone
+#: therefore pins a CPU at full speed and fills the jobs table: four failed
+#: attempts inside one second, observed, from a single misconfigured repo.
+#:
+#: A reconciler must converge, and one that retries a permanent failure as fast
+#: as the machine allows converges on nothing but heat.
+SYNC_RETRY_BACKOFF_SECONDS = 300
+
 
 def sweep_stale_checkouts() -> list[str]:
     """Clone what has been connected but never fetched, and refresh what is old.
@@ -385,11 +407,21 @@ def sweep_stale_checkouts() -> list[str]:
     """
     with connect(Role.ADMIN) as conn:
         rows = conn.execute(
-            "select team_id, repo_full_name from public.github_repos"
-            " where last_cloned_at is null"
-            "    or last_cloned_at < now() - make_interval(secs => %s)"
-            " order by last_cloned_at nulls first limit %s",
-            (CHECKOUT_STALE_SECONDS, SYNC_BATCH),
+            "select r.team_id, r.repo_full_name from public.github_repos r"
+            " where (r.last_cloned_at is null"
+            "        or r.last_cloned_at < now() - make_interval(secs => %s))"
+            # Leave a recent failure alone. See SYNC_RETRY_BACKOFF_SECONDS:
+            # without this the sweep re-queues a failing clone the instant it
+            # fails, and the worker never sleeps.
+            "   and not exists ("
+            "     select 1 from public.jobs j"
+            "      where j.team_id = r.team_id"
+            "        and j.job_type = 'sync_repo'"
+            "        and j.status = 'failed'"
+            "        and j.payload->>'repo_full_name' = r.repo_full_name"
+            "        and j.finished_at > now() - make_interval(secs => %s))"
+            " order by r.last_cloned_at nulls first limit %s",
+            (CHECKOUT_STALE_SECONDS, SYNC_RETRY_BACKOFF_SECONDS, SYNC_BATCH),
         ).fetchall()
 
     queued: list[str] = []

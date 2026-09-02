@@ -62,6 +62,27 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
     void load();
   }, [load]);
 
+  // POLL WHILE A CLONE IS IN FLIGHT, and only then.
+  //
+  // A repository row exists the moment it is connected; the clone happens on
+  // the worker afterwards. Loading once on mount meant the screen said
+  // CLONING… until someone thought to reload — so a clone that finished in
+  // four seconds looked indistinguishable from one that had hung, and the
+  // honest state read as a broken one.
+  //
+  // Stops as soon as nothing is pending, so a settled screen makes no
+  // requests. A failed clone is settled too: it has an answer, and repeating
+  // the question will not change it before the reconciler's own backoff.
+  const cloning = installs
+    .flatMap((i) => i.repositories)
+    .some((r) => r.connected && !r.cloned_at && !r.sync_error);
+
+  useEffect(() => {
+    if (!cloning) return undefined;
+    const id = setInterval(() => void load(), 4000);
+    return () => clearInterval(id);
+  }, [cloning, load]);
+
   const setConnected = async (
     installationId: number,
     fullName: string,

@@ -139,10 +139,20 @@ def tick() -> int:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    # Handlers register at import time.
+    # Handlers register at import time, so this list IS the wiring — a module
+    # missing here is a job type that fails three times and gives up, with
+    # "no handler registered" as the only trace.
+    #
+    # 🔴 repo_sync was missing, and every test passed: pytest imports it, so
+    # the handler was registered in the test process and nowhere else. A team
+    # connected a repository, four sync jobs failed in under a second, and the
+    # setup screen sat on CLONING… for good. tests/test_worker_handlers.py
+    # now checks this list against the job types the database permits, in a
+    # subprocess, because only a fresh interpreter can tell the difference.
     import pipeline.chat  # noqa: F401
     import pipeline.compiler  # noqa: F401
     import pipeline.github  # noqa: F401
+    import pipeline.repo_sync  # noqa: F401
 
     logger.info("worker up: polling every %.0fs", POLL_SECONDS)
     while True:

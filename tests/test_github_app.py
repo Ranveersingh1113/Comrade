@@ -208,3 +208,29 @@ def test_one_installation_belongs_to_exactly_one_team(seeded, admin):
     _install(admin, TEAM_A, INSTALL_A, "team-a")
     with pytest.raises(psycopg.errors.UniqueViolation):
         _install(admin, TEAM_B, INSTALL_A, "team-a")
+
+
+def test_a_team_on_the_app_does_not_block_another_teams_local_pat(
+    seeded, admin, monkeypatch
+):
+    """🔴 A refusal with nobody on the other side of it.
+
+    The guard counted teams with a repository. But a team whose repositories
+    all have an installation never reaches the PAT at all — so a team
+    completing its migration to the GitHub App would switch off an unrelated
+    developer's local credential, protecting them from a sharing that was not
+    happening.
+
+    Found the way these things are: a real connected repository in a
+    developer's own database started failing a test about a credential it does
+    not use.
+    """
+    monkeypatch.setattr("shared.config.settings.github_pat", "ghp_local")
+    _connect_repo_no_install(admin, TEAM_A, REPO_A)
+    assert _token_for(TEAM_A, REPO_A) == "ghp_local"
+
+    # Team B is fully on the App. That must change nothing for team A.
+    _install(admin, TEAM_B, INSTALL_B, "team-b")
+    _connect_repo(admin, TEAM_B, REPO_B, INSTALL_B)
+    assert _pat_is_still_single_tenant() is True
+    assert _token_for(TEAM_A, REPO_A) == "ghp_local"

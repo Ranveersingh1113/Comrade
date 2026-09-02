@@ -21,7 +21,8 @@ import pytest
 
 from pipeline.repo_sync import (
     GIT_TIMEOUT_SECONDS, SWEEP_GRACE_SECONDS, RepoSyncError, _auth_header, _run_git, enqueue_sync,
-    handle_sync_repo, sweep_orphan_workspaces, sweep_stale_checkouts, sync_repo,
+    SYNC_RETRY_BACKOFF_SECONDS, handle_sync_repo, sweep_orphan_workspaces,
+    sweep_stale_checkouts, sync_repo,
 )
 from pipeline.worker import PermanentJobError
 from shared.config import settings
@@ -43,6 +44,18 @@ def admin():
 def workspaces(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
+    )
+    # The single-tenant PAT guard counts repositories across ALL teams, which
+    # is the point of it — but it therefore reads rows this suite does not own.
+    # A developer who has connected their own repository locally is a second
+    # team, and every git test here would start failing on a credential
+    # decision none of them are about.
+    #
+    # Neutralised rather than worked around: which credential _token_for picks,
+    # and when it refuses the PAT, is tested properly in test_github_app.py
+    # against rows that suite creates and deletes. These tests are about git.
+    monkeypatch.setattr(
+        "pipeline.repo_sync._pat_is_still_single_tenant", lambda: True
     )
     return tmp_path
 
@@ -537,3 +550,47 @@ def test_a_fresh_checkout_is_not_re_cloned_every_tick(
         (TEAM_A, "acme/app"),
     )
     assert sweep_stale_checkouts() == []
+
+
+def test_a_failing_clone_is_not_retried_at_full_speed(
+    seeded, workspaces, monkeypatch, admin
+):
+    """🔴 A reconciler that retries a permanent failure as fast as the machine
+    allows converges on nothing but heat.
+
+    tick() drains the queue and THEN sweeps. A failed sync is no longer
+    'pending', so enqueue_sync's dedupe stops applying and the sweep re-queues
+    it at once — and because tick() processed something, the worker skips its
+    sleep and goes straight round again. Four failed attempts inside one second
+    were observed from a single misconfigured repository, which is a CPU pinned
+    and a jobs table filling for as long as nobody notices.
+    """
+    from psycopg.types.json import Json
+
+    admin.execute("delete from public.github_repos where team_id=%s", (TEAM_A,))
+    admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+    admin.execute(
+        "insert into public.github_repos (team_id, repo_full_name) values (%s,%s)",
+        (TEAM_A, "acme/broken"),
+    )
+    # It would be queued right now, with nothing having failed yet.
+    assert sweep_stale_checkouts()
+
+    admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+    admin.execute(
+        "insert into public.jobs"
+        " (team_id, job_type, payload, status, last_error, finished_at)"
+        " values (%s,'sync_repo',%s,'failed','no credential', now())",
+        (TEAM_A, Json({"repo_full_name": "acme/broken"})),
+    )
+    assert sweep_stale_checkouts() == [], "a just-failed clone was retried immediately"
+
+    # And it IS retried once the backoff has passed — a reconciler that gives
+    # up permanently is not a reconciler.
+    admin.execute(
+        "update public.jobs set finished_at = now() - make_interval(secs => %s)"
+        " where team_id=%s",
+        (SYNC_RETRY_BACKOFF_SECONDS + 60, TEAM_A),
+    )
+    assert sweep_stale_checkouts(), "the clone was never retried after the backoff"
+    admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))

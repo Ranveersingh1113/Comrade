@@ -57,6 +57,31 @@ if command -v powershell.exe >/dev/null 2>&1; then
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# The stack the tests talk to
+# ---------------------------------------------------------------------------
+# 🔴 A realtime test failed mid-run with "no realtime event within 5s" and
+# passed on the next attempt. The container reported healthy throughout: the
+# database had been restarted earlier, which invalidates the logical
+# replication slot realtime reads from, and nothing about that is visible from
+# `docker ps`.
+#
+# A flaky gate is a gate people learn to ignore, which is the same failure as
+# one that does not gate. Checked as a PRECONDITION so an unready stack says so
+# up front, instead of surfacing four minutes in as a test that looks broken.
+#
+# Only the containers the suite actually needs. edge_runtime and vector are not
+# among them, and failing on those would block a legitimate run.
+for svc in db realtime rest auth storage; do
+  name="supabase_${svc}_Comrade"
+  status="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+  if [ "$status" != "running" ]; then
+    echo "supabase_${svc} is '${status}', not running. Start the stack with" >&2
+    echo "  npx supabase start" >&2
+    exit 1
+  fi
+done
+
 step "backend (pytest)"
 uv run pytest -q
 

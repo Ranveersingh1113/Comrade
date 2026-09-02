@@ -171,3 +171,39 @@ def test_the_write_cap_is_per_turn_not_global(monkeypatch):
     args = {"path": "tests/test_agent.py"}
     assert _gate("write_test", args, _Ctx()) is None
     assert _gate("write_test", args, _Ctx()) is None
+
+
+def test_a_tool_that_checks_its_own_paths_may_say_so(monkeypatch):
+    """FORGOTTEN and DECLARED are different, and the gate has to tell them apart.
+
+    A glob takes a pattern and a grep takes a search string. Neither is a path,
+    and resolving one as a path is nonsense — `repo_grep("../old_name")` is a
+    fine search for a literal string that a path check would refuse for
+    containing "..". But `path_arg=None` alone means "unscopable", which is
+    what the fail-closed rule above exists to catch.
+
+    So `derives_paths` is the declaration: this tool produces paths itself and
+    checks each one (agent/repo_tools.py:_resolve). It is a claim a reviewer
+    can go and verify, which an absence is not.
+    """
+    from agent.capability import ArgPolicy
+
+    monkeypatch.setitem(
+        REGISTRY, "self_checking",
+        ToolSpec("sandbox", writes=False, needs_human=False,
+                 args=ArgPolicy(allow=("**",), derives_paths=True)),
+    )
+    assert _gate("self_checking", {"pattern": "../not-a-path"}) is None
+
+
+def test_declaring_nothing_is_still_refused(monkeypatch):
+    """The flag is an escape hatch for a real case, not a way around the rule."""
+    from agent.capability import ArgPolicy
+
+    monkeypatch.setitem(
+        REGISTRY, "forgot",
+        ToolSpec("sandbox", writes=False, needs_human=False, args=ArgPolicy()),
+    )
+    refusal = _gate("forgot", {"path": "anything"})
+    assert isinstance(refusal, dict)
+    assert "derives_paths" in refusal["reason"]

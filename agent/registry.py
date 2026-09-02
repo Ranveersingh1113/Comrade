@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from agent.capability import ArgPolicy
+from agent.repo_tools import READ_POLICY
 
 Surface = Literal["sandbox", "db", "outbound"]
 
@@ -80,6 +81,35 @@ REGISTRY: dict[str, ToolSpec] = {
     # §13.7). Declared outbound so the asymmetry is visible in the table
     # rather than only in a doc.
     "member_send_nudge": ToolSpec("outbound", writes=True, needs_human=False),
+    # The team's checked-out repository (agent/repo_tools.py). Surface is
+    # `sandbox` because these touch this machine's filesystem — which is what
+    # makes the chokepoint inspect their arguments rather than wave them
+    # through. Reads only: nothing here writes, so Phase C's edit tool is a
+    # separate declaration with a separate policy.
+    #
+    # The scope is the whole checkout minus what capability.py denies
+    # absolutely (secrets, .git). It is deliberately not narrower: an agent
+    # asked "why is this failing" cannot know in advance which directory holds
+    # the answer, and a scope that guesses wrong is a tool that cannot do its
+    # job. Containment is the workspace boundary, not a guess about layout.
+    "repo_read": ToolSpec(
+        "sandbox", writes=False, needs_human=False, args=READ_POLICY
+    ),
+    # Neither takes a PATH. A glob takes a pattern and a grep takes a search
+    # string, and resolving either as a path is nonsense — `repo_grep("../old")`
+    # is a fine search for a literal string and must not be refused for
+    # containing "..". They declare derives_paths instead, which says out loud
+    # that they check every path they produce (agent/repo_tools.py:_resolve)
+    # and lets the chokepoint tell that apart from a tool whose author simply
+    # forgot to declare a scope.
+    "repo_glob": ToolSpec(
+        "sandbox", writes=False, needs_human=False,
+        args=ArgPolicy(allow=("**",), derives_paths=True),
+    ),
+    "repo_grep": ToolSpec(
+        "sandbox", writes=False, needs_human=False,
+        args=ArgPolicy(allow=("**",), derives_paths=True),
+    ),
 }
 
 

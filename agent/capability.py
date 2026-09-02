@@ -98,6 +98,18 @@ class ArgPolicy:
     #: Which argument holds the path / the command, for the gate to find.
     path_arg: str | None = None
     command_arg: str | None = None
+    #: "This tool takes no single path argument; it DERIVES paths and checks
+    #: each one itself." True for a glob or a grep, whose arguments are a
+    #: pattern and a search string — neither of which is a path, and both of
+    #: which would be nonsense to resolve. `repo_grep("../old_name")` is a
+    #: perfectly good search for a literal string and must not be refused for
+    #: containing "..".
+    #:
+    #: This exists so the chokepoint can tell FORGOTTEN from DECLARED. A
+    #: sandbox tool with neither a path_arg nor this flag is unscopable by
+    #: omission and is refused; one carrying this flag has said out loud that
+    #: it does its own checking, and a reviewer can go and look.
+    derives_paths: bool = False
     #: Writes permitted per turn. The RATE dimension: a loop that has decided
     #: to rewrite the repository should be stopped by arithmetic, not noticed
     #: afterwards.
@@ -136,14 +148,28 @@ def check_path(raw: str, policy: ArgPolicy, *, root: Path, writing: bool) -> str
         ) from None
 
     if relative.parts and relative.parts[0] == ".git":
-        # Read-only even inside a writable scope, the same carve-out Codex
-        # makes for .git/.codex/.agents. History is how a change is reviewed
-        # and reverted; an agent that can rewrite it can erase what it did.
-        if writing:
-            raise CapabilityError(
-                f"{raw!r} is inside .git, which is never writable. Change files"
-                " and let the commit be made for you."
-            )
+        # Neither readable nor writable, which is stricter than Codex — it
+        # keeps .git read-only rather than closed. Two reasons for the extra
+        # step, and a correction:
+        #
+        # WRITING: history is how a change gets reviewed and reverted. An agent
+        # that can rewrite it can erase what it did.
+        #
+        # READING: .git is where a git credential would be cached if one ever
+        # were. pipeline/repo_sync.py deliberately keeps the token out of the
+        # remote URL and has a test that greps the whole directory for it — but
+        # that is one version of one tool behaving as documented today, and
+        # `.git` holds nothing an agent needs. Branch and history reach the
+        # model through repo_activity, already built and already datamarked.
+        #
+        # This was written as write-only first, while two other files claimed
+        # `.git` was "denied entirely". A read test caught the gap. Closing it
+        # is cheaper than keeping three files agreeing about a carve-out.
+        raise CapabilityError(
+            f"{raw!r} is inside .git, which is not readable or writable."
+            " Repository history reaches you through repo_activity; change"
+            " files and let the commit be made for you."
+        )
 
     if _is_secret(resolved):
         raise CapabilityError(

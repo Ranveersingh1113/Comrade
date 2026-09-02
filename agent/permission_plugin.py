@@ -88,7 +88,7 @@ class ChokepointPlugin(BasePlugin):
         """
         policy = spec.args
         try:
-            if not policy.path_arg and not policy.command_arg:
+            if not policy.path_arg and not policy.command_arg and not policy.derives_paths:
                 # 🔴 Caught by its own test. Without this, a sandbox tool that
                 # named no inspectable argument fell through every branch below
                 # and was allowed — the exact fail-OPEN this layer exists to
@@ -100,10 +100,11 @@ class ChokepointPlugin(BasePlugin):
                 # it is "unscopable", and unscopable means refused — the same
                 # inversion registry.UNKNOWN makes for an undeclared tool.
                 raise CapabilityError(
-                    f"{name} runs on this machine but declares no path_arg or"
-                    " command_arg, so nothing about it can be scoped. Name the"
-                    " argument that carries the path or the command in"
-                    " agent/registry.py."
+                    f"{name} runs on this machine but declares no path_arg,"
+                    " command_arg or derives_paths, so nothing about it can be"
+                    " scoped. Name the argument that carries the path or the"
+                    " command in agent/registry.py — or set derives_paths if"
+                    " the tool checks the paths it produces itself."
                 )
             if policy.path_arg and policy.path_arg in tool_args:
                 # DERIVED from team_id, never read from tool_args and never

@@ -347,7 +347,7 @@ export function githubRecordInstallation(
   state: string,
   code: string,
 ) {
-  // No team in the path. A GitHub App has ONE fixed Setup URL, so the redirect
+  // No team in the path. A GitHub App has ONE fixed Callback URL, so the redirect
   // cannot carry a team — and the signed state token is the only trustworthy
   // place for it anyway. The response says which team it landed in.
   return request<{ team_id: string; installation_id: number; account_login: string }>(

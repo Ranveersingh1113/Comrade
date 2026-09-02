@@ -1,7 +1,7 @@
 // Connecting a team's repositories.
 //
 // The install REDIRECT is not handled here — it lands on /github/setup, which
-// is the App's one fixed Setup URL and therefore carries no team in its path.
+// is the App's one fixed Callback URL and therefore carries no team in its path.
 // This component only ever shows what is already connected.
 //
 // The picker offers exactly what the installation already grants, and that is

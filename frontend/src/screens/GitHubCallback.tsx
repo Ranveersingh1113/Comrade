@@ -1,6 +1,6 @@
 // Where GitHub sends someone after they install the App.
 //
-// A GitHub App has ONE fixed Setup URL. It cannot carry a team in its path, so
+// A GitHub App has ONE fixed Callback URL. It cannot carry a team in its path, so
 // this route knows nothing about which team it is completing an install for —
 // the signed `state` token does, and the server reads the team out of it and
 // tells us where to go next.
@@ -8,6 +8,11 @@
 // That is why this is its own screen rather than something the setup page
 // handles: a component under /t/:teamId could never have been reached by this
 // redirect, because there is no team in the URL GitHub sends people to.
+//
+// It is the CALLBACK URL rather than the Setup URL, and that is GitHub's rule
+// rather than a preference: ticking "Request user authorization (OAuth) during
+// installation" — which is what sends the `code` this flow depends on —
+// disables the Setup URL field outright.
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';

@@ -321,7 +321,7 @@ def github_record_installation(
     """Finish an install.
 
     NO TEAM IN THE PATH, and that is forced by GitHub rather than chosen: an
-    App has ONE fixed Setup URL, so the redirect cannot carry a team in its
+    App has ONE fixed Callback URL, so the redirect cannot carry a team in its
     path and a route that required one could never be reached by the flow it
     exists to serve. The team comes out of the signed state token, which is
     also the only trustworthy place for it — a path parameter is whatever the

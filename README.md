@@ -83,10 +83,12 @@ in [HANDOFF.md](HANDOFF.md#8-running-the-stack-locally).
 
 Connecting a repository needs a GitHub App — the credential is minted per
 installation, scoped by GitHub to the repositories that installation was
-granted, and never stored. `.env.example` lists the four settings that are easy
-to get wrong; the one worth repeating is the **Setup URL**, which must be
-`<frontend>/github/setup`, because an App has only one and it therefore cannot
-carry a team.
+granted, and never stored. `.env.example` lists the settings that are easy to get
+wrong; the one worth repeating is the **Callback URL**, which must be exactly
+`<frontend>/github/setup`. Not the Setup URL — ticking "Request user
+authorization (OAuth) during installation" disables that field, and GitHub
+redirects to the Callback URL instead. The path carries no team because an App
+has only one such URL; the signed state token carries it.
 
 Without an App, Comrade still ingests repository history from webhook
 deliveries — that path holds no credential. Only the working copy needs one.

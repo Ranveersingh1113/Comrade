@@ -364,3 +364,63 @@ def test_under_budget_nothing_is_evicted(seeded, workspaces):
     (keep / "small.txt").write_text("x")
     assert enforce_disk_cap() == []
     assert keep.exists()
+
+
+def test_a_repo_cloned_while_empty_recovers_once_it_has_commits(
+    workspaces, tmp_path, monkeypatch
+):
+    """🔴 Found on the first real run against github.com, and permanent.
+
+    A team connects a repository they just created on GitHub. It has no
+    commits, so `git clone` succeeds with a warning and writes NO
+    refs/remotes/origin/HEAD. They push their first commit an hour later.
+
+    Every turn from then on failed. `origin/HEAD` is written by `git clone`
+    and NEVER by `git fetch`, so the checkout could not repair itself — the
+    only fix was deleting the workspace by hand, and nothing in the product
+    told anyone that. "unknown revision origin/HEAD" is also not a sentence
+    that suggests it.
+
+    Asking the remote for its default branch needs no local ref, so the same
+    checkout heals on the next sync.
+    """
+    monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
+    empty = tmp_path / "late.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(empty)],
+                   check=True, capture_output=True)
+    monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(empty))
+
+    sync_repo(TEAM_A, "acme/late")           # cloned while empty
+
+    seed = tmp_path / "seed"
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", *a], cwd=seed, check=True, capture_output=True
+    )
+    subprocess.run(["git", "clone", "-q", str(empty), str(seed)],
+                   check=True, capture_output=True)
+    run("config", "user.email", "t@test.dev")
+    run("config", "user.name", "Test")
+    (seed / "app.py").write_text("print('late')\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "first commit, an hour later")
+    run("push", "-q", "origin", "main")
+
+    checkout = sync_repo(TEAM_A, "acme/late")
+    assert (checkout / "app.py").read_text() == "print('late')\n"
+
+
+def test_an_empty_repo_is_named_as_empty_not_as_a_missing_ref(
+    workspaces, tmp_path, monkeypatch
+):
+    """The message a human has to act on. "no commits yet" tells them what to
+    do; "unknown revision origin/HEAD" tells them to open a bug."""
+    monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
+    empty = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(empty)],
+                   check=True, capture_output=True)
+    monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(empty))
+    sync_repo(TEAM_A, "acme/empty")
+
+    from pipeline.repo_sync import default_branch
+    with pytest.raises(RepoSyncError, match="no commits yet"):
+        default_branch(TEAM_A, "acme/empty")

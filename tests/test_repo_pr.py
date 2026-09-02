@@ -291,3 +291,37 @@ def _A1() -> str:
     from tests._seed import A1
 
     return A1
+
+
+def test_an_empty_repository_says_so_plainly(tmp_path, monkeypatch):
+    """🔴 Found the first time this met a real repository.
+
+    A brand-new GitHub repo has no commits, so no default branch. The old code
+    guessed "main", and `git fetch origin main` then failed with "couldn't find
+    remote ref main" — a message about the wrong thing entirely, surfacing from
+    three functions away, for a situation with a perfectly clear explanation.
+
+    A team connecting a repository they just created is not an exotic case, and
+    GitHub cannot open a pull request against an empty repository either.
+    """
+    monkeypatch.setattr(
+        "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
+    )
+    monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
+
+    empty = tmp_path / "empty.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(empty)],
+                   check=True, capture_output=True)
+    monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(empty))
+    from pipeline.repo_sync import sync_repo
+
+    sync_repo(TEAM_A, REPO)
+    with pytest.raises(PullRequestError, match="no commits yet"):
+        default_branch(TEAM_A, REPO)
+
+
+def test_the_default_branch_is_asked_of_the_remote_not_guessed(checkout, origin):
+    """`ls-remote --symref` is authoritative and works on a shallow clone,
+    where refs/remotes/origin/HEAD is not set locally — which is exactly the
+    clone sync_repo makes."""
+    assert default_branch(TEAM_A, REPO) == "main"

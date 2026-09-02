@@ -44,6 +44,7 @@ import httpx
 
 from pipeline.repo_sync import (
     GIT_TIMEOUT_SECONDS, RepoSyncError, _auth_header, _token_for, _run_git,
+    default_branch as _remote_default_branch,
 )
 from shared.workspace import repo_checkout
 
@@ -109,17 +110,13 @@ def capture_patch(team_id: str, repo_full_name: str) -> str:
 
 
 def default_branch(team_id: str, repo_full_name: str) -> str:
-    """What the PR should target. Read from the clone, not assumed to be main."""
-    checkout = repo_checkout(team_id, repo_full_name)
+    """What the PR should target. One implementation, in repo_sync — `sync_repo`
+    needed the same answer and guessed differently, which is how a repository
+    cloned while it was empty stayed broken forever."""
     try:
-        ref = _git_out(
-            ["symbolic-ref", "refs/remotes/origin/HEAD"], checkout
-        ).strip()
-        return ref.rsplit("/", 1)[-1]
-    except PullRequestError:
-        # A shallow clone of a repo with no remote HEAD set. Falling back is
-        # better than failing: the PR API rejects a bad base loudly.
-        return "main"
+        return _remote_default_branch(team_id, repo_full_name)
+    except RepoSyncError as exc:
+        raise PullRequestError(str(exc)) from exc
 
 
 def _create_pr(

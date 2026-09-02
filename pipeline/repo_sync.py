@@ -107,6 +107,43 @@ def _run_git(args: list[str], cwd: Path | None, token: str) -> None:
         # header is in argv, so git echoing a failing command would otherwise
         # print the credential.
         raise RepoSyncError(err.replace(token, "<redacted>")[:800])
+    return proc.stdout
+
+
+def default_branch(team_id: str, repo_full_name: str) -> str:
+    """The branch the remote's HEAD points at. ASKED, never assumed.
+
+    Two functions used to guess this and both were wrong in the same way, so
+    the answer lives in one place now.
+
+      * `sync_repo` reset to `origin/HEAD`. That ref is written by `git clone`
+        and never by `git fetch` — so a checkout cloned while the repository
+        was still empty has no `origin/HEAD` and can NEVER recover on its own.
+        Every later turn fails on a repo that has been fine for weeks.
+      * `open_pull_request` fell back to the literal string "main", so a repo
+        whose default branch is `master` — or one with no commits at all —
+        failed with "couldn't find remote ref main", a message about the wrong
+        thing entirely.
+
+    `ls-remote --symref` asks the remote, which is authoritative, needs no
+    local ref, and works on the shallow clone `sync_repo` makes. A repository
+    with no HEAD has no commits, and that is worth saying out loud rather than
+    guessing a branch name into a confusing failure three functions away.
+    """
+    checkout = repo_checkout(team_id, repo_full_name)
+    out = _run_git(
+        ["ls-remote", "--symref", "origin", "HEAD"],
+        checkout,
+        _token_for(team_id, repo_full_name),
+    )
+    for line in out.splitlines():
+        if line.startswith("ref:"):
+            return line.split()[1].rsplit("/", 1)[-1]
+    raise RepoSyncError(
+        f"{repo_full_name} has no commits yet, so there is no branch to work"
+        " from. Push an initial commit first — GitHub cannot open a pull"
+        " request against an empty repository either."
+    )
 
 
 def sync_repo(team_id: str, repo_full_name: str) -> Path:
@@ -124,8 +161,11 @@ def sync_repo(team_id: str, repo_full_name: str) -> Path:
 
     try:
         if (checkout / ".git").exists():
-            _run_git(["fetch", "--depth", CLONE_DEPTH, "origin"], checkout, token)
-            _run_git(["reset", "--hard", "origin/HEAD"], checkout, token)
+            base = default_branch(team_id, repo_full_name)
+            _run_git(
+                ["fetch", "--depth", CLONE_DEPTH, "origin", base], checkout, token
+            )
+            _run_git(["reset", "--hard", "FETCH_HEAD"], checkout, token)
             _run_git(["clean", "-fd"], checkout, token)
         else:
             _run_git(

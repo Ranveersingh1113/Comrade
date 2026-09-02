@@ -276,3 +276,41 @@ def test_an_uninstall_disconnects_the_repositories_with_it(seeded, admin):
     assert admin.execute(
         "select count(*) from public.github_repos where team_id=%s", (TEAM_A,)
     ).fetchone()[0] == 0
+
+
+def test_a_failed_clone_is_reported_to_the_member(seeded, admin, github, monkeypatch):
+    """🔴 The state a member had no way to see.
+
+    A clone can fail for reasons only the team can fix — a revoked
+    installation, a repository they renamed. The failure is recorded on the
+    `jobs` row, and members have no grant on `jobs` at all: the queue is
+    infrastructure, not team data. So the setup screen said CONNECTED, the
+    agent said no repository was connected, and nothing anywhere named the
+    reason.
+    """
+    from psycopg.types.json import Json
+    from server.github_connect import _sync_failures
+
+    admin.execute(
+        "insert into public.github_installations"
+        " (team_id, installation_id, account_login) values (%s,%s,%s)",
+        (TEAM_A, INSTALL_A, "acme"),
+    )
+    admin.execute(
+        "insert into public.github_repos"
+        " (team_id, repo_full_name, installation_id) values (%s,%s,%s)",
+        (TEAM_A, "acme/app", INSTALL_A),
+    )
+    admin.execute(
+        "insert into public.jobs"
+        " (team_id, job_type, payload, status, last_error, finished_at)"
+        " values (%s,'sync_repo',%s,'failed',%s, now())",
+        (TEAM_A, Json({"repo_full_name": "acme/app"}),
+         "no GitHub credential reaches acme/app."),
+    )
+    try:
+        assert _sync_failures(TEAM_A)["acme/app"].startswith("no GitHub credential")
+        # Another team's failures are not this team's business.
+        assert _sync_failures(TEAM_B) == {}
+    finally:
+        admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))

@@ -35,7 +35,7 @@ import httpx
 import jwt
 
 from shared.config import settings
-from shared.db import user_session
+from shared.db import Role, connect, user_session
 from shared.github_app import GitHubAppError, configured, repositories
 
 logger = logging.getLogger(__name__)
@@ -247,11 +247,12 @@ def connectable_repositories(team_id: str, user_id: str) -> dict:
             (team_id,),
         ).fetchall()
         connected = {
-            r[0] for r in conn.execute(
-                "select repo_full_name from public.github_repos"
+            name: cloned for name, cloned in conn.execute(
+                "select repo_full_name, last_cloned_at from public.github_repos"
                 " where team_id = %s", (team_id,)
             ).fetchall()
         }
+    failures = _sync_failures(team_id)
 
     out = []
     for installation_id, account in installs:
@@ -270,7 +271,41 @@ def connectable_repositories(team_id: str, user_id: str) -> dict:
             "installation_id": int(installation_id),
             "account_login": account,
             "repositories": [
-                {"full_name": n, "connected": n in connected} for n in names
+                {
+                    "full_name": n,
+                    "connected": n in connected,
+                    # Three states, not two. "Connected" alone was a lie
+                    # whenever the clone had failed: the setup screen said
+                    # CONNECTED while the agent said no repository was
+                    # connected, and nothing anywhere named the credential
+                    # error that caused it.
+                    "cloned_at": connected[n].isoformat() if connected.get(n) else None,
+                    "sync_error": failures.get(n),
+                }
+                for n in names
             ],
         })
     return {"installations": out}
+
+
+def _sync_failures(team_id: str) -> dict[str, str]:
+    """The last error for each repository whose sync failed.
+
+    Read on the control-plane connection because members have no grant on
+    `jobs` at all — the queue is infrastructure and not team data. Scoped to
+    this team explicitly, and reached only after require_membership, which is
+    the same shape resolve_team_for_repo uses for the same reason.
+
+    Only failures matter here: a job that succeeded is described better by
+    last_cloned_at, which is on the row the member can already see.
+    """
+    with connect(Role.ADMIN) as conn:
+        rows = conn.execute(
+            "select distinct on (payload->>'repo_full_name')"
+            "       payload->>'repo_full_name', last_error"
+            "  from public.jobs"
+            " where team_id = %s and job_type = 'sync_repo' and status = 'failed'"
+            " order by payload->>'repo_full_name', finished_at desc",
+            (team_id,),
+        ).fetchall()
+    return {name: (err or "the clone failed")[:300] for name, err in rows if name}

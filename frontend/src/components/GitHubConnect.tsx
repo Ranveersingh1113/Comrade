@@ -125,7 +125,25 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
               }}
             >
               <span style={{ flex: 1 }}>{repo.full_name}</span>
-              {repo.connected && (
+              {/* THREE states, not two. "Connected" on its own was a lie
+                  whenever the clone had failed: this screen said CONNECTED
+                  while the agent said no repository was connected, and
+                  nothing anywhere named the credential error behind it. */}
+              {repo.connected && repo.sync_error && (
+                <span
+                  className="mono"
+                  title={repo.sync_error}
+                  style={{ fontSize: 10, color: 'var(--terracotta)' }}
+                >
+                  COULD NOT CLONE
+                </span>
+              )}
+              {repo.connected && !repo.sync_error && !repo.cloned_at && (
+                <span className="mono" style={{ fontSize: 10, color: 'var(--faint)' }}>
+                  CLONING…
+                </span>
+              )}
+              {repo.connected && !repo.sync_error && repo.cloned_at && (
                 <span className="mono" style={{ fontSize: 10, color: 'var(--sage, #6b8f71)' }}>
                   CONNECTED
                 </span>
@@ -171,6 +189,15 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
           Only a team lead can connect or disconnect a repository.
         </div>
       )}
+
+      {installs.flatMap((i) => i.repositories).filter((r) => r.sync_error).map((r) => (
+        <div
+          key={`err-${r.full_name}`}
+          style={{ fontSize: 12, color: 'var(--terracotta)', marginTop: 8, lineHeight: 1.5 }}
+        >
+          {r.full_name}: {r.sync_error}
+        </div>
+      ))}
 
       {note && (
         <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 10 }}>{note}</div>

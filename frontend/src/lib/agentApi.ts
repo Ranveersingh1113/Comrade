@@ -317,6 +317,10 @@ export function githubInstallLink(teamId: string) {
 export interface ConnectableRepo {
   full_name: string;
   connected: boolean;
+  /** null until the first successful clone. */
+  cloned_at: string | null;
+  /** Why the last clone failed, if it did. */
+  sync_error: string | null;
 }
 
 export interface InstallationRepos {

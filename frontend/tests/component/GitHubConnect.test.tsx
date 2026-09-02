@@ -35,8 +35,13 @@ const ONE_INSTALL = {
       installation_id: 42,
       account_login: 'acme',
       repositories: [
-        { full_name: 'acme/app', connected: false },
-        { full_name: 'acme/site', connected: true },
+        { full_name: 'acme/app', connected: false, cloned_at: null, sync_error: null },
+        {
+          full_name: 'acme/site',
+          connected: true,
+          cloned_at: '2026-09-02T10:00:00Z',
+          sync_error: null,
+        },
       ],
     },
   ],
@@ -120,7 +125,7 @@ describe('GitHubConnect', () => {
       installLink({ configured: true, url: 'https://x' }),
       repos({
         installations: [
-          { installation_id: 1, account_login: 'broken', repositories: [], error: 'GitHub refused a token' },
+          { installation_id: 1, account_login: 'broken', repositories: [], error: 'GitHub refused a token' },  // eslint-disable-line
           ONE_INSTALL.installations[0],
         ],
       }),
@@ -129,5 +134,46 @@ describe('GitHubConnect', () => {
 
     expect(await screen.findByText(/GitHub refused a token/)).toBeTruthy();
     expect(screen.getByText('acme/app')).toBeTruthy();
+  });
+
+  test('a connected repository that has not cloned yet says so', async () => {
+    // 🔴 CONNECTED on its own was a lie in exactly the state people hit first.
+    // Between connecting and the reconciler's next tick, this screen said
+    // CONNECTED while the agent said no repository was connected.
+    server.use(
+      installLink({ configured: true, url: 'https://x' }),
+      repos({
+        installations: [{
+          installation_id: 42, account_login: 'acme',
+          repositories: [
+            { full_name: 'acme/app', connected: true, cloned_at: null, sync_error: null },
+          ],
+        }],
+      }),
+    );
+    renderAt('/setup');
+    expect(await screen.findByText('CLONING…')).toBeTruthy();
+    expect(screen.queryByText('CONNECTED')).toBeNull();
+  });
+
+  test('a clone that failed names the reason instead of claiming success', async () => {
+    // The failure that matters most is a credential one, and it is invisible
+    // from anywhere else a member can look: they have no grant on `jobs`.
+    server.use(
+      installLink({ configured: true, url: 'https://x' }),
+      repos({
+        installations: [{
+          installation_id: 42, account_login: 'acme',
+          repositories: [{
+            full_name: 'acme/app', connected: true, cloned_at: null,
+            sync_error: 'no GitHub credential reaches acme/app.',
+          }],
+        }],
+      }),
+    );
+    renderAt('/setup');
+    expect(await screen.findByText('COULD NOT CLONE')).toBeTruthy();
+    expect(screen.getByText(/no GitHub credential reaches/)).toBeTruthy();
+    expect(screen.queryByText('CONNECTED')).toBeNull();
   });
 });

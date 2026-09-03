@@ -490,7 +490,18 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     except (CapabilityError, WorkspaceError) as exc:
         return {"error": str(exc)}
 
+    # The dependency volume, if this repository has a manifest and the sync
+    # pipeline has installed from it. None when it does not, which is the
+    # stdlib-only case run_contained has always handled.
+    from pipeline.repo_deps import volume_for
+
+    state = tool_context.state
     try:
-        return run_contained(shlex.split(checked), root=root)
+        deps = volume_for(state["team_id"], state.get("repo_full_name"))
+    except (KeyError, WorkspaceError):
+        deps = None
+
+    try:
+        return run_contained(shlex.split(checked), root=root, deps=deps)
     except SandboxError as exc:
         return {"error": str(exc)}

@@ -26,6 +26,7 @@ configuration at import rather than trusting nobody sets it.
 """
 import os
 import stat
+import hashlib
 import logging
 import re
 import shutil
@@ -108,6 +109,24 @@ def repo_checkout(team_id: str, repo_full_name: str) -> Path:
             " a checkout directory."
         )
     return workspace_for(team_id) / name.replace("/", "__")
+
+
+def deps_volume(team_id: str, repo_full_name: str) -> str:
+    """The Docker volume holding this checkout's installed dependencies.
+
+    A VOLUME, not a directory inside the checkout. A `.venv/` in the working
+    tree would be swept up by `git add -A` in capture_patch and land in
+    somebody's pull request — and a repository whose .gitignore happens not to
+    list it is not an exotic case.
+
+    Hashed rather than spelled out: a volume name may only contain
+    [a-zA-Z0-9_.-], while `owner/repo` contains a slash and a team id is long.
+    Hashing both together also means one team's volume name cannot collide
+    with another's for the same public repository, which is the same tenancy
+    rule the checkout path already follows.
+    """
+    key = hashlib.sha256(f"{team_id}/{repo_full_name}".encode()).hexdigest()[:16]
+    return f"comrade-deps-{key}"
 
 
 def ensure_workspace(team_id: str) -> Path:

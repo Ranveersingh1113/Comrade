@@ -62,6 +62,23 @@ PIDS_LIMIT = "256"
 #: agent should never learn where on our disk a team's code lives.
 MOUNT = "/workspace"
 
+#: Where a checkout's installed dependencies are mounted. A Docker volume, not
+#: a directory in the working tree — see shared.workspace.deps_volume.
+DEPS_MOUNT = "/deps"
+VENV = f"{DEPS_MOUNT}/venv"
+
+#: The properties that make this a container rather than a subprocess, in ONE
+#: place because there are now two entry points and they must not drift.
+#: `run_contained` runs the agent's commands; `run_setup` installs a repo's
+#: dependencies and differs in exactly three declared ways — network, root, and
+#: a writable volume. Every other guarantee is shared, and a reader can see
+#: that by reading one tuple.
+_SECURITY_FLAGS = (
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--memory", MEMORY, "--cpus", CPUS, "--pids-limit", PIDS_LIMIT,
+)
+
 
 class SandboxError(Exception):
     """The command could not be run at all. Distinct from a command that ran
@@ -104,6 +121,7 @@ def run_contained(
     root: Path,
     timeout: int = TIMEOUT_SECONDS,
     network: bool = False,
+    deps: str | None = None,
 ) -> dict:
     """Run `argv` against the checkout at `root`, inside a container.
 
@@ -143,15 +161,21 @@ def run_contained(
         # own test suite, so a build script with a `rm -rf` in it destroys a
         # tmpfs rather than the checkout every later turn depends on.
         "--tmpfs", f"{MOUNT}/.git",
-        "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges",
-        "--memory", MEMORY, "--cpus", CPUS, "--pids-limit", PIDS_LIMIT,
+        *_SECURITY_FLAGS,
         # ponytail: runs as the image's user, root in most images. Harmless on
         # Docker Desktop, where the bind mount is uid-agnostic. On a Linux host
         # this leaves root-owned files in the checkout, so add
         # --user <uid>:<gid> there before this runs anywhere but a laptop.
         "-v", f"{root}:{MOUNT}",
         "-w", MOUNT,
+        # READ-ONLY. The run phase uses what setup installed and never adds to
+        # it: a test suite that can write to site-packages can change what the
+        # next run imports, which turns one compromised dependency into a
+        # persistent one. Installing is a separate phase with the network, and
+        # it is the only thing that may write here.
+        *(["-v", f"{deps}:{DEPS_MOUNT}:ro",
+           "-e", f"PATH={VENV}/bin:/usr/local/bin:/usr/bin:/bin",
+           "-e", f"VIRTUAL_ENV={VENV}"] if deps else []),
         settings.comrade_sandbox_image,
         *argv,
     ]
@@ -214,3 +238,92 @@ def run_contained(
         "stderr": spotlight(_clip(proc.stderr)),
         "timed_out": False,
     }
+
+
+#: An install is slow in a way a command is not — a cold pip resolve over the
+#: network is minutes, not seconds. It runs on the worker, never inside a chat
+#: turn, so nobody is watching a cursor blink while it happens.
+SETUP_TIMEOUT_SECONDS = 600
+
+
+def run_setup(argv: list[str], *, root: Path, deps: str, timeout: int = SETUP_TIMEOUT_SECONDS) -> dict:
+    """Install a repository's dependencies. THE ONLY PLACE THE NETWORK IS ON.
+
+    Everything else in this module exists to keep a team's code away from the
+    network, so this function is the exception and it is worth being explicit
+    about what it gives up and what it does not.
+
+    GIVES UP, deliberately and only these three:
+      * `--network bridge`. Installing means fetching, and there is no way to
+        fetch without reaching a registry.
+      * root inside the container, because a fresh Docker volume is owned by
+        root and a non-root user cannot create the venv in it.
+      * a WRITABLE dependency volume, which the run phase then mounts read-only.
+
+    KEEPS everything else: _SECURITY_FLAGS, the read-only rootfs, .git masked,
+    and — the one that matters most — no environment. Comrade's database URL,
+    GitHub credential and model key are as absent here as anywhere else, which
+    is the whole reason a network-enabled phase is survivable at all.
+
+    WHAT THIS HONESTLY DOES NOT SOLVE. `pip install` runs setup.py; `npm
+    install` runs postinstall scripts. Installing a dependency is arbitrary
+    code execution with a network connection, here and in every CI system
+    there has ever been. The container is the boundary, the same as it is for
+    repo_run, and the argument is the same: nothing of ours is inside it.
+
+    NOT REACHABLE BY THE MODEL. There is no tool that calls this. It runs from
+    the sync pipeline against the repository's own manifest, so the agent
+    cannot ask for the network — and a capability the model cannot name is one
+    it cannot be talked into naming.
+    """
+    if not root.exists():
+        raise SandboxError("this team's repository is not checked out.")
+
+    name = f"comrade-setup-{uuid.uuid4().hex}"
+    docker = [
+        "docker", "run", "--rm", "--name", name,
+        "--network", "bridge",
+        "--read-only", "--tmpfs", "/tmp",
+        # Only when there is something to mask. Docker has to CREATE the
+        # mountpoint for a tmpfs, and it cannot create one inside a bind
+        # mounted read-only — so an unconditional mask fails the whole
+        # container on any checkout without a .git, which is every test
+        # fixture and any tree restored from an archive. The read-only mount
+        # is what actually protects .git here; this hides it as well.
+        *(["--tmpfs", f"{MOUNT}/.git"] if (root / ".git").exists() else []),
+        *_SECURITY_FLAGS,
+        # root: a fresh volume belongs to root and the image's user is 10001.
+        "--user", "0:0",
+        # The checkout is READ-ONLY here. Setup reads a manifest and writes to
+        # the volume; a package that decides to edit the working tree during
+        # installation is doing something nobody asked for, and letting it
+        # would put those edits in the next pull request.
+        "-v", f"{root}:{MOUNT}:ro",
+        "-v", f"{deps}:{DEPS_MOUNT}",
+        "-w", MOUNT,
+        # pip wants a cache and the rootfs is read-only; /tmp is the tmpfs.
+        "-e", "PIP_CACHE_DIR=/tmp/pip",
+        "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1",
+        settings.comrade_sandbox_image,
+        *argv,
+    ]
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
+            docker, capture_output=True, text=True, timeout=timeout,
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        _kill(name)
+        return {"exit_code": None, "stdout": "", "stderr": "",
+                "timed_out": True}
+    except FileNotFoundError as exc:
+        raise SandboxError("Docker is not available.") from exc
+
+    if "docker:" in proc.stderr:
+        raise SandboxError(f"the container could not start: {proc.stderr.strip()[:300]}")
+
+    # NOT datamarked, unlike run_contained's output. This never reaches the
+    # model — it goes to a log and a job row for a human — and marking it would
+    # make a pip error unreadable to the person who has to fix it.
+    return {"exit_code": proc.returncode, "stdout": _clip(proc.stdout),
+            "stderr": _clip(proc.stderr), "timed_out": False}

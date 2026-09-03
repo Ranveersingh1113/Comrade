@@ -43,7 +43,7 @@ from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
     reject_consent,
 )
-from shared.db import Role, team_session, user_session
+from shared.db import Role, connect, team_session, user_session
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,36 @@ class RejectRequest(TeamScoped):
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(response: Response) -> dict[str, str]:
+    """Alive AND able to reach the database.
+
+    🔴 This returned {"status": "ok"} unconditionally, without touching
+    anything. So an instance whose connection pool held dead handles — every
+    request failing with `could not receive data from server` — reported
+    itself healthy. A deploy check passes, a load balancer keeps routing to
+    it, an orchestrator never restarts it, and the only symptom is that
+    nothing works.
+
+    Found when a browser journey failed to execute an approved consent item
+    while /health said 200. It is the same shape as the rest of this
+    codebase's worst bugs: a signal reporting success for something it never
+    checked.
+
+    THE TRADE, stated because it is a real one: coupling liveness to a
+    dependency means a database blip can restart healthy app instances. At
+    this scale that is the better failure — an API that cannot reach Postgres
+    can serve no endpoint here except this one, so reporting it alive is a
+    lie with no upside. A deployment that autoscales on liveness should split
+    this into /health and /ready before relying on it.
+    """
+    try:
+        with connect(Role.ADMIN) as conn:
+            conn.execute("select 1")
+    except Exception as exc:  # noqa: BLE001 - any failure to reach it counts
+        logger.warning("health check could not reach the database: %s", exc)
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "degraded", "database": "unreachable"}
+    return {"status": "ok", "database": "ok"}
 
 
 # ---------- agent ----------

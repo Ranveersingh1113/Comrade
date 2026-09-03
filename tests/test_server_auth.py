@@ -64,7 +64,11 @@ def _turn(client, headers=None):
 
 
 def test_health_needs_no_token(client):
-    assert client.get("/health").json() == {"status": "ok"}
+    """Its subject is the absence of auth, not the shape of the body — the
+    body now also reports whether the database is reachable."""
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
 
 
 def test_turn_without_token_is_rejected(client):
@@ -205,3 +209,29 @@ def test_a_long_expired_token_is_still_refused(monkeypatch):
     now = int(time.time())
     with pytest.raises(jwt.ExpiredSignatureError):
         _decode(_skewed({"iat": now - 7200, "exp": now - 600}))
+
+
+def test_health_reports_the_database_it_cannot_reach(monkeypatch):
+    """🔴 /health returned {"status": "ok"} without touching anything.
+
+    So an instance whose pool held dead handles — every request failing with
+    "could not receive data from server" — reported itself healthy. A deploy
+    check passes, a load balancer keeps routing to it, an orchestrator never
+    restarts it, and the only symptom is that nothing works.
+
+    Found when a browser journey could not execute an approved consent item
+    while /health said 200.
+    """
+    def dead(_role):
+        raise RuntimeError("could not receive data from server")
+
+    monkeypatch.setattr("server.app.connect", dead)
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["database"] == "unreachable"
+
+
+def test_health_is_ok_when_the_database_answers():
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "database": "ok"}

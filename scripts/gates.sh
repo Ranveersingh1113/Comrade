@@ -95,6 +95,28 @@ step "frontend integration"
 (cd frontend && npm run test:integration)
 
 if [ "$QUICK" -eq 0 ]; then
+  # 🔴 The browser journeys drive the real API, and one of them failed because
+  # the API's connection pool still held handles to a database that a previous
+  # `--with-reset` had dropped and recreated. Every request failed with "could
+  # not receive data from server" while /health returned 200, because /health
+  # returned {"status":"ok"} without touching anything.
+  #
+  # /health now reports the database, so asking it is worth something. A long-
+  # running API must be restarted after a reset, and this is what says so
+  # instead of letting a journey fail on a dependency the test never mentions.
+  api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
+  case "$api_health" in
+    *'"database":"ok"'*) ;;
+    '')
+      echo "the API on :8000 is not answering; the browser journeys need it." >&2
+      echo "  uv run uvicorn server.app:app --port 8000" >&2
+      exit 1 ;;
+    *)
+      echo "the API is up but cannot reach the database: $api_health" >&2
+      echo "restart it — a pool opened before a db reset holds dead handles." >&2
+      exit 1 ;;
+  esac
+
   step "browser journeys (playwright)"
   (cd frontend && npm run test:e2e)
 

@@ -1,5 +1,5 @@
 """Live smoke: compile a small document into memory facts + a diff card.
-Makes real Gemini (extract) + embedding calls.
+Makes real Gemini extraction and consolidation calls.
 
 Run: uv run python scripts/smoke_pipeline.py
 """

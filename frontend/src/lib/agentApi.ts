@@ -1,4 +1,4 @@
-// HTTP surface of the FastAPI agent runtime (built in parallel — see repo HANDOFF).
+// HTTP surface of the FastAPI agent runtime.
 // Every request carries the Supabase session JWT; identity comes from the token.
 
 import { supabase } from './supabase';
@@ -59,21 +59,6 @@ export function agentErrorText(e: unknown): string {
     return `Can't reach Comrade's runtime at ${BASE} — is the backend running?`;
   }
   return e instanceof Error ? e.message : 'Send failed';
-}
-
-export interface AgentTurnResult {
-  run_id: string;
-  reply: string;
-  user_message_id: string;
-  reply_message_id: string;
-}
-
-export function agentTurn(
-  teamId: string,
-  text: string,
-  threadType: 'private' | 'group',
-): Promise<AgentTurnResult> {
-  return request('/agent/turn', { team_id: teamId, text, thread_type: threadType });
 }
 
 export interface ConsentActionResult {

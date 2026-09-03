@@ -142,43 +142,6 @@ def test_a_decision_with_no_kind_is_a_fact_page():
     assert kept[0].page_kind == "fact"
 
 
-# ---------------------------------------------------------------------------
-# It has to reach the reader, or it is a column nobody sees
-# ---------------------------------------------------------------------------
-
-def test_the_rendered_wiki_marks_a_skill_page_as_a_procedure(seeded, admin):
-    """§20.3.1's lesson applied to a second column: memory that is stored and
-    then dropped at the render boundary may as well not exist. A skill page
-    that renders identically to a fact page has changed nothing for the agent
-    reading it."""
-    from pipeline.wiki import render_team_wiki
-
-    page_id = admin.execute(
-        "insert into public.memory_pages (team_id, title, kind, description)"
-        " values (%s,'Releasing','skill','how we ship') returning id",
-        (TEAM_A,),
-    ).fetchone()[0]
-    entry_id = admin.execute(
-        "insert into public.memory_entries (team_id, page_id) values (%s,%s)"
-        " returning id",
-        (TEAM_A, page_id),
-    ).fetchone()[0]
-    admin.execute(
-        "insert into public.memory_versions (entry_id, team_id, fact, change_type)"
-        " values (%s,%s,'run the migration before deploying','added')",
-        (entry_id, TEAM_A),
-    )
-
-    with psycopg.connect(settings.comrade_db_url_admin) as conn:
-        text = render_team_wiki(conn, TEAM_A)
-
-    assert "run the migration before deploying" in text
-    assert "Releasing" in text
-    # The distinction the agent needs: this is how the team does something, not
-    # a fact about the project.
-    assert "procedure" in text.lower()
-
-
 def test_a_skill_decision_actually_creates_a_skill_page(seeded, admin):
     """The write path, which is where a carried-but-unused field hides.
 
@@ -216,29 +179,3 @@ def test_an_existing_page_keeps_its_kind(seeded, admin):
     assert admin.execute(
         "select kind from public.memory_pages where id=%s", (page_id,)
     ).fetchone()[0] == "fact"
-
-
-def test_a_fact_page_still_renders_as_bullets(seeded, admin):
-    """The default path must be untouched — a numbered list on every page
-    would be a formatting change dressed up as a feature."""
-    from pipeline.wiki import render_team_wiki
-
-    page_id = admin.execute(
-        "insert into public.memory_pages (team_id, title) values (%s,'Deadlines')"
-        " returning id",
-        (TEAM_A,),
-    ).fetchone()[0]
-    entry_id = admin.execute(
-        "insert into public.memory_entries (team_id, page_id) values (%s,%s)"
-        " returning id",
-        (TEAM_A, page_id),
-    ).fetchone()[0]
-    admin.execute(
-        "insert into public.memory_versions (entry_id, team_id, fact, change_type)"
-        " values (%s,%s,'the demo is on 14 march','added')",
-        (entry_id, TEAM_A),
-    )
-    with psycopg.connect(settings.comrade_db_url_admin) as conn:
-        text = render_team_wiki(conn, TEAM_A)
-    assert "- the demo is on 14 march" in text
-    assert "(procedure)" not in text

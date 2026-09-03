@@ -134,8 +134,8 @@ if [ "$RESET" -eq 1 ]; then
 
   # 🔴 The reset drops comrade_authenticator and the passwords on the other
   # three worker roles, because they are created by a SCRIPT rather than by a
-  # migration. HANDOFF has said "after a db reset" beside that step for as long
-  # as the roles have existed — but this gate did not do it, so the first
+  # migration. The local setup instructions say "after a db reset" beside that
+  # step — but this gate did not do it, so the first
   # --with-reset run reported a wall of failures that read as 45 migrations
   # having broken the schema. They had not: the migrations applied cleanly and
   # the suite could simply no longer log in.

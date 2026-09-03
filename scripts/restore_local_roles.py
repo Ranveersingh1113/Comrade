@@ -1,8 +1,8 @@
 """Re-create the local worker LOGIN roles after `supabase db reset`.
 
 🔴 `supabase db reset` drops `comrade_authenticator` and the passwords on the
-other three. HANDOFF has said "after a db reset" next to this step since the
-roles existed, and every human who read it did the right thing — but the merge
+other three. The local setup instructions say "after a db reset" next to this
+step, but the merge
 gate did not, so `--with-reset` reported a wall of failures that looked like 45
 migrations had broken the schema. They had not: the migrations applied cleanly
 and the suite could simply no longer log in.

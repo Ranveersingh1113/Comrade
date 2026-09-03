@@ -11,8 +11,6 @@ vi.mock('../../src/state/TeamContext', () => makeTeamMock());
 import { Setup } from '../../src/screens/Setup';
 
 const BASE = 'http://localhost:8000';
-const TEAM = 'team-1';
-
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());

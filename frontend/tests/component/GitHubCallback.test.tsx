@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { http, HttpResponse } from 'msw';
 import { makeSupabaseMock, makeTeamMock, server } from './mocks';

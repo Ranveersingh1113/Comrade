@@ -79,7 +79,7 @@ fails immediately rather than at the first query.
 
 For the database-backed test suite and workers, also start the local Supabase
 stack, apply migrations, and create the local worker login roles as described
-in [HANDOFF.md](HANDOFF.md#8-running-the-stack-locally).
+in [AGENTS.md](AGENTS.md#local-database).
 
 Connecting a repository needs a GitHub App — the credential is minted per
 installation, scoped by GitHub to the repositories that installation was

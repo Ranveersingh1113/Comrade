@@ -1,11 +1,7 @@
 """HTTP entrypoint for the Comrade agent.
 
-Most of the product talks to Postgres directly from the browser under RLS. This
-service exists only for the things RLS cannot express:
-
-  * running an agent turn (needs the Gemini key and the agent's DB role),
-  * executing an approved consent item (needs the separate executor role),
-  * enqueuing a document job (members deliberately cannot write `jobs`).
+Most product data is accessed directly from the browser under RLS. This
+service holds server-only capabilities and credentials.
 
 Identity always comes from the verified Supabase JWT (see server/auth.py); the
 model never receives team_id / requester_id as tool arguments.

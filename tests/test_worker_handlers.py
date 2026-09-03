@@ -123,3 +123,56 @@ def test_a_handler_with_no_job_type_is_also_wrong():
         f"handlers registered for job types the database rejects:"
         f" {sorted(registered - allowed)}"
     )
+
+
+def test_the_entry_point_runs_where_the_handlers_were_registered():
+    """🔴 The bug a four-person simulation found and every test missed.
+
+    `python -m pipeline.worker` executes worker.py as the module `__main__`.
+    When a handler module then does `from pipeline.worker import register`,
+    Python does not find that name imported yet, so it LOADS THE FILE A SECOND
+    TIME as `pipeline.worker`. Two module objects, each with its own
+    `_HANDLERS`: register() writes to one, and the loop in `__main__` reads the
+    other — empty.
+
+    Every job type failed with "no handler registered": parse_document,
+    compile_memory, ingest_github, compile_github, sync_repo,
+    build_environment. The entire queue, in the documented way of starting it.
+
+    Every existing test calls tick() or run_once() in a process where
+    pipeline.worker was imported normally and there is exactly one copy, so
+    none of them could see it. This one observes from the LOOP's side: it
+    replaces `pipeline.worker.tick` with a spy and runs the module as
+    `__main__`. If main() executes in the canonical module the spy fires; if it
+    executes in `__main__` it calls `__main__.tick` instead and the spy never
+    runs, which is precisely the split.
+    """
+    src = (
+        "import runpy, sys\n"
+        "import pipeline.worker as canonical\n"
+        "fired = []\n"
+        "canonical.tick = lambda: (fired.append(sorted(canonical._HANDLERS)), 0)[1]\n"
+        "import time\n"
+        "time.sleep = lambda *a: (_ for _ in ()).throw(SystemExit(0))\n"
+        "try:\n"
+        "    runpy.run_module('pipeline.worker', run_name='__main__')\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "print('FIRED' if fired else 'SPLIT')\n"
+        "print(fired[0] if fired else [])\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", src], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=180,
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    lines = proc.stdout.strip().splitlines()
+    assert lines and lines[0] == "FIRED", (
+        "the worker's loop ran in a different module object than the one"
+        " register() wrote to — every job type would fail with 'no handler"
+        " registered'. The __main__ block must import main from"
+        " pipeline.worker rather than calling the local one."
+        f" Output: {proc.stdout!r} {proc.stderr[-300:]!r}"
+    )
+    seen = ast.literal_eval(lines[1])
+    assert "sync_repo" in seen and "compile_memory" in seen, seen

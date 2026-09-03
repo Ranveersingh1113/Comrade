@@ -169,4 +169,27 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    # 🔴 NOT `main()`. THE HANDLER TABLE SPLITS IN TWO IF YOU CALL IT DIRECTLY.
+    #
+    # `python -m pipeline.worker` — the command in the README — executes this
+    # file as the module `__main__`. When a handler module then does
+    # `from pipeline.worker import register`, Python does not find that name
+    # already imported, so it LOADS THIS FILE A SECOND TIME as
+    # `pipeline.worker`. Two module objects, each with its own `_HANDLERS`
+    # dict: register() writes to one and the loop reads the other.
+    #
+    # Every job type failed with "no handler registered" — parse_document,
+    # compile_memory, ingest_github, compile_github, sync_repo,
+    # build_environment. The whole queue, silently, in the documented way of
+    # running it.
+    #
+    # Nothing caught it because every test calls tick() or run_once() in a
+    # process where `pipeline.worker` was imported normally and there is only
+    # one copy. The bug exists only under `-m`, which is exactly and only how
+    # production starts.
+    #
+    # Importing main from the canonical module means the loop runs in the same
+    # module object register() writes to.
+    from pipeline.worker import main as _main
+
+    _main()

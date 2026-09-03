@@ -37,7 +37,7 @@ import logging
 import subprocess
 
 from pipeline.repo_deps import (
-    environment_key, has_lockfile, install, manifest_for,
+    LOCKFILES, environment_key, has_lockfile, install, manifest_for,
 )
 from pipeline.worker import PermanentJobError, register
 from shared.config import settings
@@ -175,12 +175,28 @@ def handle_build_environment(team_id: str, payload: dict) -> None:
                     error="no requirements.txt or pyproject.toml in this repository")
         return
 
+    lock = has_lockfile(root)
+    if settings.comrade_require_lockfile and lock is None:
+        # Refused rather than built-and-warned. An unpinned install resolves to
+        # whatever the registry serves today, so "it worked yesterday" is not
+        # evidence about tomorrow — and a deployment that turned this on did so
+        # to stop exactly that.
+        _set_status(
+            team_id, name, "failed",
+            error=(
+                f"{manifest} is not pinned by a lockfile"
+                f" ({', '.join(LOCKFILES)}), and this deployment requires one."
+                " An unpinned install resolves to whatever the registry serves"
+                " at the time, so the environment would not be reproducible."
+            ),
+        )
+        return
+
     key = environment_key(root, manifest)
     _set_status(team_id, name, "building", key=None)
 
     outcome = install(team_id, name)
     if outcome["status"] in ("installed", "current"):
-        lock = has_lockfile(root)
         logger.info("environment ready for %s from %s%s", name, manifest,
                     f" (pinned by {lock})" if lock else " (no lockfile)")
         _set_status(team_id, name, "ready", key=key)

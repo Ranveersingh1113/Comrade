@@ -106,6 +106,15 @@ class Settings(BaseSettings):
     # manifest, which is what makes eviction safe here in the way it is for
     # checkouts.
     comrade_env_max_gb: float = 10.0
+    # Refuse to build an environment from an unpinned manifest.
+    #
+    # OFF by default, and that is a judgement rather than laziness: an
+    # unhashed requirements.txt is the norm in Python, so requiring a lockfile
+    # would exclude most repositories that need this and the feature would
+    # simply go unused. A deployment that hosts other people's code should turn
+    # it on — an unpinned install resolves to whatever the registry serves
+    # today, which is both irreproducible and the supply-chain surface.
+    comrade_require_lockfile: bool = False
     # The image the team's own code runs in. One image for every team for now:
     # it is a knob a repository must not be able to turn, since "run my tests
     # in MY image" is just "run my code on your host" with extra steps. A

@@ -240,6 +240,31 @@ def run_contained(
     }
 
 
+#: THE EGRESS POLICY FOR run_setup, DECIDED AND NOT YET ENFORCED.
+#:
+#: Named PLANNED_ because a config value that silently does nothing is the
+#: exact failure this codebase keeps finding: a signal that reports something
+#: it never checked. Nothing reads this list today, and `run_setup` reaches the
+#: open internet.
+#:
+#: It is written down because the DECISION is portable and the MECHANISM is
+#: not. Restricting egress on Docker means a proxy on an internal network or
+#: iptables rules — plumbing that a managed sandbox replaces with a config
+#: field, so building it here would be work thrown away. The hosts a dependency
+#: install legitimately needs do not change with the platform, and choosing
+#: them under time pressure during a migration is how an allowlist ends up as
+#: `*`.
+#:
+#: tests/test_repo_deps.py pins the current behaviour, so whoever enforces this
+#: has to change that test on purpose rather than discovering the difference.
+PLANNED_SETUP_EGRESS_ALLOWLIST = (
+    "pypi.org", "files.pythonhosted.org",          # pip
+    "registry.npmjs.org",                           # npm, when it is supported
+    "proxy.golang.org", "sum.golang.org",           # go modules
+    "crates.io", "static.crates.io",                # cargo
+)
+
+
 #: An install is slow in a way a command is not — a cold pip resolve over the
 #: network is minutes, not seconds. It runs on the worker, never inside a chat
 #: turn, so nobody is watching a cursor blink while it happens.

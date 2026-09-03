@@ -352,3 +352,52 @@ def test_nothing_is_evicted_while_under_budget(seeded, connected, admin,
     )
     monkeypatch.setattr("shared.config.settings.comrade_env_max_gb", 10.0)
     assert repo_env.enforce_env_disk_cap() == []
+
+
+def test_an_unpinned_manifest_is_refused_when_the_deployment_requires_pinning(
+    seeded, connected, admin, monkeypatch
+):
+    """🔴 Refused, not built-with-a-warning.
+
+    An unpinned install resolves to whatever the registry serves at the time,
+    so "it worked yesterday" is not evidence about tomorrow — and a deployment
+    that turned this on did so to stop exactly that. Building anyway and
+    logging a warning would give them the irreproducibility they asked to
+    prevent, plus a log line nobody reads.
+
+    OFF by default, because an unhashed requirements.txt is the norm in Python
+    and requiring a lockfile would leave the feature unused by the repositories
+    that need it most.
+    """
+    monkeypatch.setattr("shared.config.settings.comrade_require_lockfile", True)
+    _enable(admin)
+
+    handle_build_environment(TEAM_A, {"repo_full_name": REPO})
+
+    status, error = admin.execute(
+        "select env_status, env_error from public.github_repos"
+        " where team_id = %s and repo_full_name = %s", (TEAM_A, REPO)
+    ).fetchone()
+    assert status == "failed"
+    assert "not pinned by a lockfile" in error
+    assert "uv.lock" in error, "the message should name what would satisfy it"
+
+
+def test_a_lockfile_satisfies_the_requirement(seeded, connected, admin,
+                                              monkeypatch):
+    """And the refusal is about the lockfile rather than about the flag: with
+    one present the build proceeds past the check."""
+    monkeypatch.setattr("shared.config.settings.comrade_require_lockfile", True)
+    monkeypatch.setattr(
+        "pipeline.repo_env.install",
+        lambda *a: {"status": "installed", "manifest": "requirements.txt"},
+    )
+    (connected / "uv.lock").write_text("version = 1\n")
+    _enable(admin)
+
+    handle_build_environment(TEAM_A, {"repo_full_name": REPO})
+    status, = admin.execute(
+        "select env_status from public.github_repos"
+        " where team_id = %s and repo_full_name = %s", (TEAM_A, REPO)
+    ).fetchone()
+    assert status == "ready"

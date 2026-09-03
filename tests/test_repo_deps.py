@@ -326,3 +326,36 @@ def test_nothing_installs_dependencies_automatically():
             " as a side effect of connecting or syncing a repository — it needs"
             " an explicit per-repository opt-in first."
         )
+
+
+@needs_docker
+def test_the_setup_phase_reaches_the_open_internet_today(checkout, reclaim):
+    """🔴 PINS WHAT IS TRUE, NOT WHAT WE WANT.
+
+    `run_setup` has unrestricted egress. agent.sandbox names the allowlist it
+    should eventually have — PLANNED_SETUP_EGRESS_ALLOWLIST — and nothing reads
+    it, because the Docker mechanism for enforcing it is plumbing a managed
+    sandbox replaces with a config field.
+
+    Asserting the CURRENT behaviour rather than the intended one is the point.
+    A constant that looks like a control and enforces nothing is the same
+    false-signal bug as a health check that never queried its database; this
+    test is what stops the list being mistaken for a boundary. Whoever enforces
+    it has to come here and change this on purpose.
+    """
+    from agent.sandbox import PLANNED_SETUP_EGRESS_ALLOWLIST, run_setup
+
+    assert PLANNED_SETUP_EGRESS_ALLOWLIST, "the policy should still be recorded"
+
+    reclaim(deps_volume(TEAM_A, "probe/egress"))
+    result = run_setup(
+        ["python", "-c",
+         "import socket; print(socket.gethostbyname('example.com'))"],
+        root=checkout, deps=deps_volume(TEAM_A, "probe/egress"), timeout=120,
+    )
+    if result["exit_code"] != 0:
+        pytest.skip("this host has no outbound network; nothing to pin")
+    assert result["exit_code"] == 0, (
+        "setup egress is now restricted — good. Update this test and remove"
+        " the PLANNED_ prefix from the allowlist it references."
+    )

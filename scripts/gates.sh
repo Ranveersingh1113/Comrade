@@ -109,6 +109,22 @@ fi
 if [ "$RESET" -eq 1 ]; then
   step "migrations from empty"
   npx supabase db reset
+
+  # 🔴 The reset drops comrade_authenticator and the passwords on the other
+  # three worker roles, because they are created by a SCRIPT rather than by a
+  # migration. HANDOFF has said "after a db reset" beside that step for as long
+  # as the roles have existed — but this gate did not do it, so the first
+  # --with-reset run reported a wall of failures that read as 45 migrations
+  # having broken the schema. They had not: the migrations applied cleanly and
+  # the suite could simply no longer log in.
+  #
+  # A documented manual step an automated check forgets is the same shape as a
+  # handler registered on import that main() never imports: two places that
+  # must agree, failing somewhere other than where it is caused.
+  step "worker login roles (the reset drops them)"
+  uv run python scripts/restore_local_roles.py
+
+  step "backend against a database built only from migrations"
   uv run pytest -q
 fi
 

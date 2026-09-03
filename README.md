@@ -149,6 +149,13 @@ scripts/gates.sh --quick      # skip the browser and real-GitHub lanes
 scripts/gates.sh --with-reset # also rebuild the database from migrations
 ```
 
+`--with-reset` rebuilds the database from every migration and re-runs the
+suite. It also restores the worker LOGIN roles afterwards
+(`scripts/restore_local_roles.py`), because `supabase db reset` drops
+`comrade_authenticator` and the passwords on the other three — they are created
+by a script, not a migration, and without that step the whole suite fails on
+authentication in a way that reads like broken migrations.
+
 It is a script rather than a list of commands because `pytest -q | tail && …`
 gates on nothing: the pipe makes the exit status `tail`'s, which is always 0.
 It also refuses to run while a `pipeline.worker` is up, since a live worker

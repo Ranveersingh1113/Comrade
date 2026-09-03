@@ -32,7 +32,8 @@ Frontend (your work)
 
 Backend (built)
   ├─ server/app.py         FastAPI: POST /agent/turn, GET /health
-  ├─ agent/                ADK LlmAgent (Gemini 2.5 Flash), 4 tools, propose-only
+  ├─ agent/                ADK LlmAgent (Gemini 2.5 Flash), 19 tools, propose-only
+  │                        + capability layer and container sandbox
   ├─ pipeline/             compiler (two-stage), wiki projection, chat→memory, job worker
   └─ shared/               db roles (RLS), consent engine, nudges, config
 ```
@@ -168,7 +169,10 @@ the resource (findings §16.2). **For non-code actions nothing replaces it** —
 there is no forced second pair of eyes on a non-code action, and nothing currently plans one
 (findings §24.1). Recorded deliberately rather than left to be rediscovered.
 
-Full detail: memory + `docs/comrade-platform-findings.md`.
+Full detail lives in the assistant's memory directory, not in this repo. Two
+platform-findings documents were cited by name here for months and never
+existed as files; naming them again — even to say they are missing — only
+makes the next reader look for them.
 
 ## 8. Running the stack locally
 
@@ -190,8 +194,11 @@ Local DB: `127.0.0.1:54322`; Studio: `127.0.0.1:54323`. Tests seed/clean their o
 1. `README.md` — repo layout.
 2. `supabase/migrations/20260612094142_init.sql` — the whole data model, well-commented.
 3. `...095500_rls.sql` + `...120000_action_consent.sql` + `...110000_memory_pages.sql` — permissions ground truth.
-4. `docs/comrade-platform-findings.md` — platform direction, security model, roadmap.
-5. `docs/comrade-memory-ingestion-findings.md` (heed the 2026-07-15 supersession banner) — memory design history.
+4. `AGENTS.md` — the five rules this codebase learned the hard way, and how to
+   run its gates. Read before changing anything.
+5. `docs/agent-architecture-findings-2026-08-12.md` — the audit the agent's
+   shape came out of. (Two findings docs were cited here for months and never
+   existed in the repo; that history is in the assistant's memory instead.)
 6. `pipeline/wiki.py`, `pipeline/chat.py`, `shared/consent.py` — reference semantics for wiki view, chat capture, consent flow.
 7. `docs/superpowers/plans/` — how prior slices were specced/executed.
 

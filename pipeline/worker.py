@@ -131,11 +131,12 @@ def tick() -> int:
     # Environments a team ASKED for and does not have. Fires only where a
     # leader set env_enabled — the entire difference between this and the
     # version that installed a manifest the moment a repo was connected.
-    from pipeline.repo_env import sweep_environments
+    from pipeline.repo_env import enforce_env_disk_cap, sweep_environments
 
     try:
         sweep_stale_checkouts()
         sweep_environments()
+        enforce_env_disk_cap()
         sweep_orphan_workspaces()
         enforce_disk_cap()
     except Exception:  # noqa: BLE001

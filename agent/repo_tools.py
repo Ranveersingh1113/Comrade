@@ -27,6 +27,7 @@ WHY THERE IS NO `repo_list_files`
 than two where the second exists only to enumerate. An agent that wants the
 tree asks for `**/*`.
 """
+import logging
 import shlex
 from pathlib import Path
 
@@ -39,6 +40,8 @@ from agent.sandbox import SandboxError, run_contained
 from pipeline.parsers import spotlight
 from shared.db import user_session
 from shared.workspace import WorkspaceError, repo_checkout
+
+logger = logging.getLogger(__name__)
 
 #: One file's worth of content per call. A repository file is unbounded and
 #: every result is pasted into the next LLM call, so an uncapped read is an
@@ -496,15 +499,31 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     state = tool_context.state
     team_id = state.get("team_id")
     repo = state.get("repo_full_name")
-    try:
-        deps = volume_for(team_id, repo) if team_id and repo else None
-    except (KeyError, WorkspaceError):
-        deps = None
+
+    # STATUS FIRST, because it decides whether to mount at all.
+    #
+    # A failed build leaves a PARTIAL venv on the volume — the install script
+    # wipes and rebuilds, so a run that dies half way through leaves whatever
+    # resolved before it did. Mounting that is worse than mounting nothing: a
+    # subset of the dependencies imports and the rest do not, which reads as a
+    # broken repository rather than a broken environment.
+    #
+    # `stale` is still mounted. It is out of date, not absent, and refusing
+    # would replace a caveated answer with none at all.
+    environment = {"status": "unknown", "detail": ""}
+    deps = None
+    if team_id and repo:
+        try:
+            environment = status_for(team_id, repo, state["requester_id"])
+            if environment["status"] in ("ready", "stale"):
+                deps = volume_for(team_id, repo)
+        except (KeyError, WorkspaceError) as exc:
+            logger.debug("could not resolve the environment: %s", exc)
 
     try:
         result = run_contained(shlex.split(checked), root=root, deps=deps)
     except SandboxError as exc:
-        return {"error": str(exc)}
+        return {"error": str(exc), "environment": environment}
 
     # 🔴 EVERY RESULT CARRIES THE ENVIRONMENT'S STATE, including the successful
     # ones.
@@ -517,9 +536,5 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     #
     # On success too, because a PASS from a stale environment is the more
     # dangerous report — it is the one somebody acts on.
-    if team_id and repo:
-        try:
-            result["environment"] = status_for(team_id, repo, state["requester_id"])
-        except Exception:  # noqa: BLE001 - never fail a run over its own label
-            result["environment"] = {"status": "unknown", "detail": ""}
+    result["environment"] = environment
     return result

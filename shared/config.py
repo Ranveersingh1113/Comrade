@@ -100,6 +100,12 @@ class Settings(BaseSettings):
     # so this is an availability bound, not tidiness. Checkouts are always
     # re-clonable, which is what makes eviction safe.
     comrade_workspaces_max_gb: float = 20.0
+    # Total across every dependency environment. A node_modules or a torch
+    # install is gigabytes, and a handful of enabled repositories fills a disk
+    # that Postgres is also on. Volumes are always rebuildable from the
+    # manifest, which is what makes eviction safe here in the way it is for
+    # checkouts.
+    comrade_env_max_gb: float = 10.0
     # The image the team's own code runs in. One image for every team for now:
     # it is a knob a repository must not be able to turn, since "run my tests
     # in MY image" is just "run my code on your host" with extra steps. A

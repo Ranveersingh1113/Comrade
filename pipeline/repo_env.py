@@ -34,11 +34,13 @@ This is automatic in the way the earlier version was NOT: it fires only for a
 repository whose leader has explicitly turned it on.
 """
 import logging
+import subprocess
 
 from pipeline.repo_deps import (
     environment_key, has_lockfile, install, manifest_for,
 )
 from pipeline.worker import PermanentJobError, register
+from shared.config import settings
 from shared.db import Role, connect, team_session
 from shared.workspace import deps_volume, repo_checkout
 
@@ -226,3 +228,111 @@ def sweep_environments() -> list[str]:
     if queued:
         logger.info("queued %d environment build(s)", len(queued))
     return queued
+
+
+#: Docker reports volume sizes as human strings ("1.234GB"), SI units, from
+#: go-units. Parsed rather than measured with a container per volume, which
+#: would be one container start each on every tick.
+_UNITS = {"B": 1, "KB": 10**3, "MB": 10**6, "GB": 10**9, "TB": 10**12}
+
+
+def _bytes_from(text: str) -> int:
+    """Docker's human size as bytes, or 0 if it cannot be read.
+
+    ZERO ON FAILURE, and the direction is the point: an unparseable size makes
+    the total look SMALLER, so nothing is evicted. Guessing high would delete a
+    team's environment because a format changed.
+    """
+    value = (text or "").strip().upper().replace("IB", "B")
+    for unit in ("TB", "GB", "MB", "KB", "B"):
+        if value.endswith(unit):
+            try:
+                return int(float(value[: -len(unit)].strip()) * _UNITS[unit])
+            except ValueError:
+                return 0
+    return 0
+
+
+def _environment_volumes() -> dict[str, int]:
+    """Every dependency volume and its size, in one call."""
+    import json
+
+    try:
+        out = subprocess.run(  # noqa: S603 - fixed argv
+            ["docker", "system", "df", "-v", "--format", "{{json .Volumes}}"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if out.returncode != 0:
+        return {}
+    try:
+        volumes = json.loads(out.stdout or "[]") or []
+    except ValueError:
+        return {}
+    return {
+        v["Name"]: _bytes_from(v.get("Size", ""))
+        for v in volumes
+        if str(v.get("Name", "")).startswith("comrade-deps-")
+    }
+
+
+def enforce_env_disk_cap() -> list[str]:
+    """Evict least-recently-built environments until the total is under budget.
+
+    Availability, not tidiness: these volumes sit on the same disk as Postgres,
+    and a `torch` or a `node_modules` is gigabytes. Eviction is safe in the way
+    it is for checkouts — a volume is rebuildable from the manifest, and the
+    reconciler rebuilds it if the team still wants one.
+
+    🔴 EVICTING CLEARS env_status. A volume removed while the row still says
+    'ready' is the database asserting something that is not true — the agent
+    would mount an environment that no longer exists, and the member would be
+    told their tests failed rather than that their environment was reclaimed.
+    Every other silent-success bug on this branch had this shape.
+
+    Least-recently-BUILT, not least-recently-used: Docker does not track access
+    time on a volume, and env_updated_at is the honest approximation. Said
+    plainly rather than described as LRU, which it is not.
+    """
+    budget = int(settings.comrade_env_max_gb * 1024**3)
+    sizes = _environment_volumes()
+    total = sum(sizes.values())
+    if not sizes or total <= budget:
+        return []
+
+    with connect(Role.ADMIN) as conn:
+        rows = conn.execute(
+            "select team_id, repo_full_name, env_updated_at"
+            "  from public.github_repos"
+            " where env_status is not null"
+            " order by env_updated_at nulls first"
+        ).fetchall()
+
+    evicted: list[str] = []
+    for team_id, name, _updated in rows:
+        if total <= budget:
+            break
+        volume = deps_volume(str(team_id), name)
+        size = sizes.get(volume)
+        if size is None:
+            continue
+        removed = subprocess.run(  # noqa: S603
+            ["docker", "volume", "rm", "-f", volume],
+            capture_output=True, timeout=120,
+        ).returncode == 0
+        if not removed:
+            # In use by a running container, most likely. Say so; a silent
+            # skip here is how a disk fills while a sweep reports success.
+            logger.warning("could not evict environment volume %s", volume)
+            continue
+        _set_status(str(team_id), name, None, key=None,
+                    error="the environment was reclaimed for disk space and"
+                          " will be rebuilt")
+        total -= size
+        evicted.append(f"{team_id}/{name}")
+
+    if evicted:
+        logger.info("evicted %d environment(s) to stay under %.1fGB",
+                    len(evicted), settings.comrade_env_max_gb)
+    return evicted

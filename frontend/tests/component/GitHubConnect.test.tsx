@@ -41,6 +41,7 @@ const ONE_INSTALL = {
           connected: true,
           cloned_at: '2026-09-02T10:00:00Z',
           sync_error: null,
+          environment: { status: 'disabled', detail: 'no dependency environment' },
         },
       ],
     },
@@ -221,4 +222,59 @@ describe('GitHubConnect', () => {
     await new Promise((r) => setTimeout(r, 5000));
     expect(calls).toBe(after);
   }, 12000);
+
+  test('a connected repository shows its environment state', async () => {
+    // 🔴 An environment that silently is not there turns every red test suite
+    // into a mystery. The team has to be able to see whether one exists.
+    server.use(installLink({ configured: true, url: 'https://x' }), repos(ONE_INSTALL));
+    renderAt('/setup');
+    expect(await screen.findByText('DISABLED')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /set up environment/i })).toBeTruthy();
+  });
+
+  test('turning it on is a write to env_enabled, not a route', async () => {
+    // RLS decides it: au_github_repos_update already requires team leadership
+    // and a matching installation, so the rule lives in the policy rather than
+    // in an endpoint anyone could post around.
+    server.use(installLink({ configured: true, url: 'https://x' }), repos(ONE_INSTALL));
+    renderAt('/setup');
+    await userEvent.click(
+      await screen.findByRole('button', { name: /set up environment/i }),
+    );
+    await waitFor(() => expect(supaState.updates.length).toBe(1));
+    expect(supaState.updates[0]).toEqual({
+      table: 'github_repos', values: { env_enabled: true },
+    });
+  });
+
+  test('a member who is not a lead cannot turn it on', async () => {
+    server.use(installLink({ configured: true, url: 'https://x' }), repos(ONE_INSTALL));
+    renderAt('/setup', false);
+    const button = await screen.findByRole('button', { name: /set up environment/i });
+    expect(button).toHaveProperty('disabled', true);
+  });
+
+  test('a stale environment is surfaced, not hidden', async () => {
+    // 🔴 A PASS from a stale environment is the more dangerous result, because
+    // it is the one somebody acts on.
+    server.use(
+      installLink({ configured: true, url: 'https://x' }),
+      repos({
+        installations: [{
+          installation_id: 42, account_login: 'acme',
+          repositories: [{
+            full_name: 'acme/site', connected: true,
+            cloned_at: '2026-09-02T10:00:00Z', sync_error: null,
+            environment: {
+              status: 'stale',
+              detail: 'the environment is out of date with the current code',
+            },
+          }],
+        }],
+      }),
+    );
+    renderAt('/setup');
+    expect(await screen.findByText('STALE')).toBeTruthy();
+    expect(screen.getByText(/out of date with the current code/)).toBeTruthy();
+  });
 });

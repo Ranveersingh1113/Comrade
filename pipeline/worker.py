@@ -128,8 +128,14 @@ def tick() -> int:
         enforce_disk_cap, sweep_orphan_workspaces, sweep_stale_checkouts,
     )
 
+    # Environments a team ASKED for and does not have. Fires only where a
+    # leader set env_enabled — the entire difference between this and the
+    # version that installed a manifest the moment a repo was connected.
+    from pipeline.repo_env import sweep_environments
+
     try:
         sweep_stale_checkouts()
+        sweep_environments()
         sweep_orphan_workspaces()
         enforce_disk_cap()
     except Exception:  # noqa: BLE001
@@ -152,6 +158,7 @@ def main() -> None:
     import pipeline.chat  # noqa: F401
     import pipeline.compiler  # noqa: F401
     import pipeline.github  # noqa: F401
+    import pipeline.repo_env  # noqa: F401
     import pipeline.repo_sync  # noqa: F401
 
     logger.info("worker up: polling every %.0fs", POLL_SECONDS)

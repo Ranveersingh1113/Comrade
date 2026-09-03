@@ -321,6 +321,23 @@ export interface ConnectableRepo {
   cloned_at: string | null;
   /** Why the last clone failed, if it did. */
   sync_error: string | null;
+  /**
+   * The dependency environment, for connected repositories only.
+   *
+   * Derived on the SERVER, not from the row: "stale" is the stored key against
+   * what the checkout would produce now, and the checkout is on the server.
+   * A status computed in the browser could say "ready" about an environment
+   * built from code two weeks old.
+   */
+  environment?: RepoEnvironment;
+}
+
+export type RepoEnvironmentStatus =
+  | 'disabled' | 'none' | 'building' | 'ready' | 'failed' | 'stale' | 'unknown';
+
+export interface RepoEnvironment {
+  status: RepoEnvironmentStatus;
+  detail: string;
 }
 
 export interface InstallationRepos {

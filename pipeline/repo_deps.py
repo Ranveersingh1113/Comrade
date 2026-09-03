@@ -97,6 +97,72 @@ def manifest_hash(root: Path, name: str) -> str:
     return hashlib.sha256((root / name).read_bytes()).hexdigest()[:32]
 
 
+#: Bump when `_install_script` changes what it builds. Without it, a volume
+#: built by an older recipe keeps a key that still matches and is never
+#: rebuilt — the environment silently keeps whatever layout the old script
+#: produced, which is the kind of staleness that surfaces as an inexplicable
+#: import error months later.
+RECIPE_VERSION = "1"
+
+#: Hashed into the key when present. A lockfile pins the RESOLVED set, so it
+#: changing means the installed packages change even when the manifest that
+#: named them did not.
+LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "requirements.lock")
+
+
+def _head_sha(root: Path) -> str | None:
+    """The commit this checkout is on, or None if that cannot be read."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv
+            ["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD"],
+            cwd=str(root), capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def environment_key(root: Path, manifest: str) -> str:
+    """What an environment was built FROM. Comparing it is how staleness is
+    answered without storing a second copy of it.
+
+    🔴 THE COMMIT IS IN THE KEY ONLY WHEN THE REPOSITORY'S OWN PACKAGE IS
+    INSTALLED, and that asymmetry is the point rather than an oversight.
+
+    The pyproject path runs `pip install /workspace`, which installs the repo
+    itself — so a commit that changes source without touching pyproject.toml
+    leaves a STALE BUILD installed, and the tests then run against code that is
+    not in the checkout. Keying on the manifest alone, as the first version
+    did, makes that invisible.
+
+    The requirements.txt path installs only third-party packages, so folding
+    the commit in would rebuild a venv on every push and never change a byte of
+    what it contains. A cache key that is too specific is not merely wasteful;
+    an environment that rebuilds for three minutes on every commit is one a
+    team turns off.
+    """
+    parts = [f"recipe={RECIPE_VERSION}", f"manifest={manifest}",
+             f"mhash={manifest_hash(root, manifest)}"]
+    for lock in LOCKFILES:
+        if (root / lock).is_file():
+            digest = hashlib.sha256((root / lock).read_bytes()).hexdigest()[:16]
+            parts.append(f"lock={lock}:{digest}")
+    if manifest == "pyproject.toml":
+        parts.append(f"commit={_head_sha(root) or 'unknown'}")
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+def has_lockfile(root: Path) -> str | None:
+    """Which lockfile this repository pins with, if any. Surfaced rather than
+    enforced: an unhashed requirements.txt is the norm in Python, and refusing
+    to build without a lockfile would exclude most repositories that need
+    this. A deployment that wants to require one can, on this."""
+    for lock in LOCKFILES:
+        if (root / lock).is_file():
+            return lock
+    return None
+
+
 def _install_script(name: str, digest: str) -> str:
     """Compare-then-install, in one container.
 

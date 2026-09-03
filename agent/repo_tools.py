@@ -490,18 +490,36 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     except (CapabilityError, WorkspaceError) as exc:
         return {"error": str(exc)}
 
-    # The dependency volume, if this repository has a manifest and the sync
-    # pipeline has installed from it. None when it does not, which is the
-    # stdlib-only case run_contained has always handled.
     from pipeline.repo_deps import volume_for
+    from pipeline.repo_env import status_for
 
     state = tool_context.state
+    team_id = state.get("team_id")
+    repo = state.get("repo_full_name")
     try:
-        deps = volume_for(state["team_id"], state.get("repo_full_name"))
+        deps = volume_for(team_id, repo) if team_id and repo else None
     except (KeyError, WorkspaceError):
         deps = None
 
     try:
-        return run_contained(shlex.split(checked), root=root, deps=deps)
+        result = run_contained(shlex.split(checked), root=root, deps=deps)
     except SandboxError as exc:
         return {"error": str(exc)}
+
+    # 🔴 EVERY RESULT CARRIES THE ENVIRONMENT'S STATE, including the successful
+    # ones.
+    #
+    # Without it the agent cannot tell "your tests failed" from "I had nothing
+    # to run them in", and those need different sentences: one is a finding
+    # about the team's code, the other is a fact about Comrade's setup that
+    # nobody has been told. An import error with no environment is not evidence
+    # of anything.
+    #
+    # On success too, because a PASS from a stale environment is the more
+    # dangerous report — it is the one somebody acts on.
+    if team_id and repo:
+        try:
+            result["environment"] = status_for(team_id, repo, state["requester_id"])
+        except Exception:  # noqa: BLE001 - never fail a run over its own label
+            result["environment"] = {"status": "unknown", "detail": ""}
+    return result

@@ -25,6 +25,19 @@ import {
 } from '../lib/agentApi';
 import { supabase } from '../lib/supabase';
 
+/** Colour per environment state. `stale` and `failed` are warned about rather
+ *  than merely reported: a PASS from a stale environment is the more dangerous
+ *  result, because it is the one somebody acts on. */
+const ENV_COLOUR: Record<string, string> = {
+  ready: 'var(--sage, #6b8f71)',
+  building: 'var(--faint)',
+  none: 'var(--faint)',
+  disabled: 'var(--faint)',
+  stale: 'var(--peach)',
+  failed: 'var(--terracotta)',
+  unknown: 'var(--faint)',
+};
+
 interface Props {
   teamId: string;
   isLeader: boolean;
@@ -73,15 +86,41 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
   // Stops as soon as nothing is pending, so a settled screen makes no
   // requests. A failed clone is settled too: it has an answer, and repeating
   // the question will not change it before the reconciler's own backoff.
+  const building = installs
+    .flatMap((i) => i.repositories)
+    .some((r) => r.environment?.status === 'building'
+              || r.environment?.status === 'none');
+
   const cloning = installs
     .flatMap((i) => i.repositories)
     .some((r) => r.connected && !r.cloned_at && !r.sync_error);
 
   useEffect(() => {
-    if (!cloning) return undefined;
+    if (!cloning && !building) return undefined;
     const id = setInterval(() => void load(), 4000);
     return () => clearInterval(id);
-  }, [cloning, load]);
+  }, [cloning, building, load]);
+
+  /** Turn the dependency environment on or off for one repository.
+   *
+   * A direct Supabase write, like connect/disconnect: au_github_repos_update
+   * already requires team leadership and a matching installation, so the rule
+   * lives in the policy rather than in a route that anyone could post around.
+   * The worker holds only a COLUMN grant on the status fields and cannot set
+   * this — it reports what the environment is doing, never whether the team
+   * asked for one. */
+  const setEnvEnabled = async (fullName: string, enabled: boolean) => {
+    setBusy(true);
+    setNote(null);
+    const { error } = await supabase
+      .from('github_repos')
+      .update({ env_enabled: enabled })
+      .eq('team_id', teamId)
+      .eq('repo_full_name', fullName);
+    if (error) setNote(error.message);
+    setBusy(false);
+    await load();
+  };
 
   const setConnected = async (
     installationId: number,
@@ -135,8 +174,8 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
             <div style={{ fontSize: 12, color: 'var(--terracotta)' }}>{inst.error}</div>
           )}
           {inst.repositories.map((repo) => (
+            <div key={repo.full_name}>
             <div
-              key={repo.full_name}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -184,6 +223,58 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
               >
                 {repo.connected ? 'disconnect' : 'connect'}
               </button>
+            </div>
+            {/* The dependency environment, for connected repositories only.
+                Installing runs the repo's own build hooks with network access,
+                so it is never implied by connecting — a team turns it on, and
+                then needs to be able to see what it is doing. An environment
+                that silently is not there turns every red test suite into a
+                mystery. */}
+            {repo.connected && repo.environment && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '0 0 7px 14px',
+                  fontSize: 11.5,
+                  color: 'var(--muted)',
+                }}
+              >
+                <span className="mono" style={{ fontSize: 10, color: 'var(--faint)' }}>
+                  ENV
+                </span>
+                <span
+                  className="mono"
+                  title={repo.environment.detail}
+                  style={{ fontSize: 10, color: ENV_COLOUR[repo.environment.status] }}
+                >
+                  {repo.environment.status.toUpperCase()}
+                </span>
+                <span style={{ flex: 1, fontSize: 11.5 }}>
+                  {repo.environment.detail}
+                </span>
+                <button
+                  type="button"
+                  disabled={busy || !isLeader}
+                  onClick={() =>
+                    void setEnvEnabled(
+                      repo.full_name, repo.environment?.status === 'disabled',
+                    )
+                  }
+                  style={{
+                    fontSize: 10.5,
+                    padding: '2px 8px',
+                    cursor: busy || !isLeader ? 'default' : 'pointer',
+                    opacity: busy || !isLeader ? 0.5 : 1,
+                  }}
+                >
+                  {repo.environment.status === 'disabled'
+                    ? 'set up environment'
+                    : 'turn off'}
+                </button>
+              </div>
+            )}
             </div>
           ))}
         </div>

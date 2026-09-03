@@ -281,11 +281,34 @@ def connectable_repositories(team_id: str, user_id: str) -> dict:
                     # error that caused it.
                     "cloned_at": connected[n].isoformat() if connected.get(n) else None,
                     "sync_error": failures.get(n),
+                    # The DERIVED environment state, computed here rather than
+                    # in the browser: "stale" is env_key against what the
+                    # CHECKOUT would produce now, and the checkout is on this
+                    # machine. A status the frontend derived from the row alone
+                    # could say "ready" about an environment built from code two
+                    # weeks old.
+                    **({"environment": _environment(team_id, n, user_id)}
+                       if n in connected else {}),
                 }
                 for n in names
             ],
         })
     return {"installations": out}
+
+
+def _environment(team_id: str, repo_full_name: str, user_id: str) -> dict:
+    """This repository's environment state, or a quiet unknown.
+
+    Never raises: one repository whose checkout has gone missing must not take
+    down the picker, which is the only place to fix it.
+    """
+    from pipeline.repo_env import status_for
+
+    try:
+        return status_for(team_id, repo_full_name, user_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("could not read environment status for %s", repo_full_name)
+        return {"status": "unknown", "detail": ""}
 
 
 def _sync_failures(team_id: str) -> dict[str, str]:

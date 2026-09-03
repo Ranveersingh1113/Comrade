@@ -57,12 +57,30 @@ function makeQuery(table: string) {
       supaState.inserts.push({ table, values });
       return Promise.resolve({ data: null, error: null });
     },
-    update: (values: unknown) => ({
-      eq: () => {
-        supaState.updates.push({ table, values });
-        return Promise.resolve({ data: null, error: null });
-      },
-    }),
+    // 🔴 Chains through ANY number of .eq() calls, like the real client's
+    // filter builder. It used to resolve after exactly one — so
+    // `.update(...).eq(a).eq(b)` threw "eq is not a function" while the test
+    // still PASSED, because the row had already been recorded by the first
+    // .eq(). A mock that is easier to satisfy than the real client turns a
+    // broken call into a green test.
+    update: (values: unknown) => {
+      const u: Record<string, unknown> = {};
+      let recorded = false;
+      const record = () => {
+        if (!recorded) {
+          supaState.updates.push({ table, values });
+          recorded = true;
+        }
+      };
+      Object.assign(u, {
+        eq: () => u,
+        then: (resolve: (v: { data: null; error: null }) => unknown) => {
+          record();
+          return Promise.resolve({ data: null, error: null }).then(resolve);
+        },
+      });
+      return u;
+    },
     // Deletes chain through any number of .eq() calls and settle on await, so
     // `.delete().eq(a).eq(b)` works the way the real client does.
     delete: () => {

@@ -12,6 +12,19 @@ import pytest
 from agent.tools import fetch_repo_activity
 from shared.config import settings
 from tests._seed import A1, TEAM_A, TEAM_B
+from pipeline.parsers import SPACE_MARK
+
+def unmarked(value):
+    """Tool results are datamarked — spaces become SPACE_MARK — so a test that
+    looks for ordinary prose has to undo the marking first.
+
+    Added 2026-09-02 when spotlight() was extended from document_read to every
+    read path. These assertions are about WHICH rows come back and what they
+    say, not about the marking; the marking itself is asserted once, in
+    test_datamarking.py, where it is the subject rather than the medium.
+    """
+    return value.replace(SPACE_MARK, " ") if isinstance(value, str) else value
+
 
 
 @pytest.fixture
@@ -57,7 +70,7 @@ def test_it_returns_this_teams_repository_activity(seeded, admin):
     assert rows[0]["repo"] == "acme/widgets"
     assert rows[0]["node_type"] == "merge"
     assert rows[0]["author"] == "maya"
-    assert "Rewrite the auth flow" in rows[0]["summary"]
+    assert "Rewrite the auth flow" in unmarked(rows[0]["summary"])
 
 
 def test_a_member_of_both_teams_still_sees_only_this_team(seeded, admin):
@@ -83,7 +96,7 @@ def test_a_member_of_both_teams_still_sees_only_this_team(seeded, admin):
 
     rows = fetch_repo_activity(TEAM_A, A1)
     assert [r["repo"] for r in rows] == ["acme/widgets"]
-    assert all("team B work" not in r["summary"] for r in rows)
+    assert all("team B work" not in unmarked(r["summary"]) for r in rows)
 
 
 def test_it_is_capped_and_flags_truncation(seeded, admin):
@@ -110,7 +123,7 @@ def test_newest_first(seeded, admin):
     _event(admin, TEAM_A, repo_id, payload='{"title": "newer"}',
            occurred_at="2026-08-25T10:00:00+00:00")
     rows = fetch_repo_activity(TEAM_A, A1)
-    assert "newer" in rows[0]["summary"]
+    assert "newer" in unmarked(rows[0]["summary"])
 
 
 def test_an_empty_repo_history_is_not_an_error(seeded):

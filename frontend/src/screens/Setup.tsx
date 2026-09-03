@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 import { AgentApiError, ingestDocument } from '../lib/agentApi';
 import type { DocumentKind, DocumentRow, Profile } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
+import { GitHubConnect } from '../components/GitHubConnect';
 
 const STORAGE_BUCKET = 'documents';
 
@@ -181,26 +182,23 @@ export function Setup() {
                 2
               </span>
               <span style={{ fontSize: 14, fontWeight: 700 }}>Connect GitHub</span>
-              <span
-                className="mono"
-                style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--faint)', letterSpacing: '0.08em' }}
-              >
-                COMING SOON
-              </span>
             </div>
             <div
               style={{
                 fontSize: 12.5,
                 color: 'var(--muted)',
-                marginTop: 7,
+                margin: '7px 0 13px',
                 lineHeight: 1.55,
                 paddingLeft: 35,
               }}
             >
-              Comrade reads merged PRs, reviews and issues to keep the wiki and contribution
-              tracking honest — it never writes to the repo, and it only compiles work a human
-              verified. (Ingestion is built; connecting a repo from here is not.)
+              Comrade reads merged PRs, reviews and issues to keep the wiki honest, and
+              reads the code itself to answer questions about it. It can also propose
+              changes — those arrive as a pull request on a comrade/ branch that a member
+              approves after seeing the diff, and nothing is ever pushed to your default
+              branch.
             </div>
+            <GitHubConnect teamId={teamId} isLeader={isLeader} />
           </div>
 
           <div className="card" style={{ padding: '19px 21px' }}>

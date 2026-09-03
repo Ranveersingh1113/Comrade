@@ -30,6 +30,19 @@ from agent.tools import (
 from pipeline.parsers import SPACE_MARK
 from shared.config import settings
 from tests._seed import A1, A2, B1, TEAM_A, TEAM_B, as_user, count
+from pipeline.parsers import SPACE_MARK
+
+def unmarked(value):
+    """Tool results are datamarked — spaces become SPACE_MARK — so a test that
+    looks for ordinary prose has to undo the marking first.
+
+    Added 2026-09-02 when spotlight() was extended from document_read to every
+    read path. These assertions are about WHICH rows come back and what they
+    say, not about the marking; the marking itself is asserted once, in
+    test_datamarking.py, where it is the subject rather than the medium.
+    """
+    return value.replace(SPACE_MARK, " ") if isinstance(value, str) else value
+
 
 # A token that appears nowhere in the seed, so a hit is always one we planted.
 TOKEN = "kumquat"
@@ -74,7 +87,7 @@ def _document(admin, team_id=TEAM_A, text="the demo is on Friday", **over):
 
 
 def _bodies(results):
-    return [r["body"] for r in results]
+    return [unmarked(r["body"]) for r in results]
 
 
 def _join_team_b(admin, user_id):
@@ -93,7 +106,7 @@ def _join_team_b(admin, user_id):
 def test_search_finds_a_group_message(seeded):
     results = search_messages(TEAM_A, A1, "hello")
     assert any("hello team A" in b for b in _bodies(results))
-    hit = next(r for r in results if "hello team A" in r["body"])
+    hit = next(r for r in results if "hello team A" in unmarked(r["body"]))
     assert hit["sender"] == "A2"      # who said it
     assert hit["thread"] == "group"   # where
     assert hit["created_at"]          # and when
@@ -102,7 +115,9 @@ def test_search_finds_a_group_message(seeded):
 def test_search_finds_the_requesters_own_private_message(seeded):
     results = search_messages(TEAM_A, A1, "private note")
     assert any("A1 private note" in b for b in _bodies(results))
-    assert next(r for r in results if "A1 private" in r["body"])["thread"] == "private"
+    assert next(
+        r for r in results if "A1 private" in unmarked(r["body"])
+    )["thread"] == "private"
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +281,7 @@ def _ctx(team_id=TEAM_A, requester_id=A1):
 
 def test_the_search_wrapper_reads_ids_from_state(seeded):
     results = messages_search("hello", _ctx())
-    assert any("hello team A" in r["body"] for r in results)
+    assert any("hello team A" in unmarked(r["body"]) for r in results)
 
 
 def test_the_document_wrapper_reads_ids_from_state(seeded, admin):

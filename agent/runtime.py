@@ -20,6 +20,7 @@ from starlette.concurrency import run_in_threadpool
 
 from agent.agent import APP_NAME, app
 from agent.history import recent_turns
+from agent.repo_tools import connected_repo
 from shared.agent_runs import append_step, finish_run, start_run
 from shared.db import room_lock
 from shared.config import settings
@@ -150,6 +151,9 @@ async def stream_turn(
                 recent_turns, team_id, requester_id, thread_type,
                 settings.agent_history_turns, exclude_message_id,
             )
+            # Resolved once per turn rather than per tool call: it is a DB read
+            # and it cannot change mid-turn.
+            repo = await run_in_threadpool(connected_repo, team_id, requester_id)
             for attempt in range(1, EMPTY_TURN_ATTEMPTS + 1):
                 # Runner(app=...), not InMemoryRunner: the App is what carries
                 # the chokepoint plugin, and InMemoryRunner is ADK's dev-mode
@@ -164,7 +168,15 @@ async def stream_turn(
                 runner = Runner(app=app, session_service=InMemorySessionService())
                 session = await runner.session_service.create_session(
                     app_name=APP_NAME, user_id=requester_id,
-                    state={"team_id": team_id, "requester_id": requester_id},
+                    state={
+                        "team_id": team_id,
+                        "requester_id": requester_id,
+                        # Server-bound like the two above. The repo tools
+                        # derive the checkout path from these; the model names
+                        # neither, so it cannot ask to work in another team's
+                        # tree or another team's repository.
+                        "repo_full_name": repo,
+                    },
                 )
                 for content in history:
                     # A model-role event must be authored by this agent, or ADK

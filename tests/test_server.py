@@ -41,9 +41,12 @@ def _stub_persistence(monkeypatch, recorder=None):
 
 
 def test_health_ok():
+    """Healthy now means reachable AND able to see the database — it used to
+    mean only that a process was listening, which it reported cheerfully while
+    every real request failed on a dead connection pool."""
     resp = TestClient(app).get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    assert resp.json() == {"status": "ok", "database": "ok"}
 
 
 def test_agent_turn_returns_reply(client, monkeypatch):

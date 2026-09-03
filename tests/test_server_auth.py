@@ -3,12 +3,15 @@
 These tests deliberately avoid the database — they assert that requests are
 rejected *before* any handler logic runs, which is the property that matters.
 """
+import time
+
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
 from server.app import app
+from server.auth import _decode
 from shared.config import settings
 
 SECRET = "test-jwt-secret-at-least-32-characters-long"
@@ -61,7 +64,11 @@ def _turn(client, headers=None):
 
 
 def test_health_needs_no_token(client):
-    assert client.get("/health").json() == {"status": "ok"}
+    """Its subject is the absence of auth, not the shape of the body — the
+    body now also reports whether the database is reachable."""
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
 
 
 def test_turn_without_token_is_rejected(client):
@@ -152,3 +159,79 @@ def test_cors_allows_the_frontend_origin(client):
         },
     )
     assert resp.headers.get("access-control-allow-origin") == origin
+
+
+def _skewed(claims: dict) -> str:
+    """A token whose time claims we control.
+
+    NOT named _token: this file already has one, and appending a second
+    definition silently replaced it — three unrelated tests started failing on
+    a helper they had used correctly for months. A shadowed name is the
+    quietest way to break a test file.
+    """
+    return jwt.encode(
+        {"sub": "u1", "aud": "authenticated", **claims},
+        settings.supabase_jwt_secret, algorithm="HS256",
+    )
+
+
+def test_a_token_from_a_slightly_fast_clock_is_accepted(monkeypatch):
+    """🔴 An intermittent 401 nobody can diagnose from its message.
+
+    The auth server and the API are different machines, so one of them is
+    always a little ahead. Without leeway the API rejects a perfectly good
+    token with "The token is not yet valid (iat)" — which the frontend renders
+    as "your session expired", so the user signs in again and is handed
+    another token from the same fast clock.
+
+    Found by a real agent turn returning 401 between the API and the Supabase
+    container on one laptop.
+    """
+    monkeypatch.setattr("shared.config.settings.supabase_jwt_secret", "s" * 40)
+    now = int(time.time())
+    claims = _decode(_skewed({"iat": now + 20, "exp": now + 3600}))
+    assert claims["sub"] == "u1"
+
+
+def test_a_token_from_the_distant_future_is_still_refused(monkeypatch):
+    """Leeway is tolerance for skew, not for forgery. A token issued an hour
+    from now is not a clock being a second fast."""
+    monkeypatch.setattr("shared.config.settings.supabase_jwt_secret", "s" * 40)
+    now = int(time.time())
+    with pytest.raises(jwt.ImmatureSignatureError):
+        _decode(_skewed({"iat": now + 3600, "exp": now + 7200}))
+
+
+def test_a_long_expired_token_is_still_refused(monkeypatch):
+    """The leeway applies to exp too, so this pins the boundary: a minute of
+    grace, not an open door."""
+    monkeypatch.setattr("shared.config.settings.supabase_jwt_secret", "s" * 40)
+    now = int(time.time())
+    with pytest.raises(jwt.ExpiredSignatureError):
+        _decode(_skewed({"iat": now - 7200, "exp": now - 600}))
+
+
+def test_health_reports_the_database_it_cannot_reach(monkeypatch):
+    """🔴 /health returned {"status": "ok"} without touching anything.
+
+    So an instance whose pool held dead handles — every request failing with
+    "could not receive data from server" — reported itself healthy. A deploy
+    check passes, a load balancer keeps routing to it, an orchestrator never
+    restarts it, and the only symptom is that nothing works.
+
+    Found when a browser journey could not execute an approved consent item
+    while /health said 200.
+    """
+    def dead(_role):
+        raise RuntimeError("could not receive data from server")
+
+    monkeypatch.setattr("server.app.connect", dead)
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 503
+    assert resp.json()["database"] == "unreachable"
+
+
+def test_health_is_ok_when_the_database_answers():
+    resp = TestClient(app).get("/health")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok", "database": "ok"}

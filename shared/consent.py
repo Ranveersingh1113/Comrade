@@ -44,6 +44,12 @@ _TOOL_TIER_FLOORS = {
     # Affects exactly one member -- the one holding the key. See
     # _exec_member_depart for why those are always the same person.
     "member_depart": "T1",
+    # T2 -- shared and reversible. A pull request is visible to the whole team
+    # and closable by any of them, which is the definition the tier carries.
+    # Not T1: it lands on the team's repository, not on one member. Not
+    # anything higher, because T3 was removed (§10) and because for CODE,
+    # branch protection is a stronger second key than a tier ever was (§16.2).
+    "repo_open_pr": "T2",
 }
 DEFAULT_TIER = "T2"
 
@@ -420,15 +426,72 @@ def _exec_member_depart(conn, team_id, requester_id, args) -> dict:
     return {"user_id": str(requester_id)}
 
 
+def _precheck_repo_open_pr(conn, team_id, requester_id, args) -> None:
+    if not (args.get("patch") or "").strip():
+        raise ConsentError("the proposal carries no change")
+    if not (args.get("repo_full_name") or "").strip():
+        raise ConsentError("the proposal names no repository")
+
+
+def _exec_repo_open_pr(conn, team_id, requester_id, args) -> dict:
+    """Push the approved change to a branch and open a pull request.
+
+    NETWORK I/O INSIDE THE CAS TRANSACTION, and there is no way around it: the
+    thing being executed lives at GitHub. execute_consent claims the row and
+    calls this inside one Postgres transaction, so a push that succeeds before
+    a rollback leaves a branch the row denies.
+
+    The answer is not a cleverer transaction. It is an action that is safe to
+    repeat: pipeline/repo_pr.py derives the branch from the action_hash, starts
+    every apply from a clean base, and returns an already-open PR rather than
+    opening a second one. A retry converges on the same pull request.
+
+    The patch travels in the consent row rather than being read from disk at
+    this moment, because by now `sync_repo` may have reset the checkout several
+    times — see repo_pr's header. What a member approved is what applies.
+    """
+    from pipeline.repo_pr import PullRequestError, open_pull_request
+
+    row = conn.execute(
+        "select 1 from public.github_repos where team_id=%s and repo_full_name=%s",
+        (team_id, args["repo_full_name"]),
+    ).fetchone()
+    if row is None:
+        raise ConsentError(
+            f"{args['repo_full_name']} is no longer connected to this team"
+        )
+
+    # Recomputed rather than threaded through: execute_consent has already
+    # verified that this exact value matches the stored action_hash, so it is
+    # the same string by construction — and the alternative is a fifth
+    # parameter on every executor for the sake of one.
+    action_hash = compute_hash("repo_open_pr", team_id, requester_id, args)
+
+    try:
+        result = open_pull_request(
+            team_id=team_id,
+            repo_full_name=args["repo_full_name"],
+            title=args.get("title") or "Change proposed by Comrade",
+            body=args.get("body") or "",
+            patch=args["patch"],
+            action_hash=action_hash,
+        )
+    except PullRequestError as exc:
+        raise ConsentError(str(exc)) from exc
+    return result
+
+
 _PRECHECKS = {
     "task_create": _precheck_task_create,
     "task_update": _precheck_task_update,
     "member_depart": _precheck_member_depart,
+    "repo_open_pr": _precheck_repo_open_pr,
 }
 _EXECUTORS = {
     "task_create": _exec_task_create,
     "task_update": _exec_task_update,
     "member_depart": _exec_member_depart,
+    "repo_open_pr": _exec_repo_open_pr,
 }
 
 # What the MODEL may name in a proposal, which is not the same set as what can
@@ -444,4 +507,22 @@ _EXECUTORS = {
 # leave the team" is not a card this product puts in anyone's inbox, and
 # because the pending-hash index means such a card would block the real one a
 # teammate tried to send.
-AGENT_PROPOSABLE = frozenset({"task_create", "task_update"})
+AGENT_PROPOSABLE = frozenset({"task_create", "task_update", "repo_open_pr"})
+#
+# THE THIRD ENTRY, AND THE ARGUMENT THE COMMENT ABOVE ASKED FOR.
+#
+# The bar this set sets is not "is the action safe" — every executor is gated
+# by a human key. It is "should the MODEL be able to name this". member_depart
+# fails that bar: it executes, but "Comrade suggests you leave the team" is not
+# a card this product puts in anyone's inbox.
+#
+# repo_open_pr passes it, and passes it more cleanly than either task tool.
+# Proposing a change and having a human approve it is the ENTIRE POINT of the
+# capability — an agent that can edit a working copy but cannot ask for the
+# change to be reviewed has done nothing. It is team-visible, it is reversible
+# (close the PR), and the approval is a member reading a diff, which is a
+# better review than a consent card usually gets.
+#
+# What keeps it bounded is not this set. It is that the executor pushes only to
+# a comrade/ branch, never to a default branch, so the worst an approval can do
+# is create a pull request somebody then declines to merge.

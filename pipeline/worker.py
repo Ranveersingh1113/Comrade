@@ -121,15 +121,38 @@ def tick() -> int:
             logger.info("chat sweep enqueued %d compile job(s)", len(swept))
     except Exception:  # noqa: BLE001 - sweep is best-effort by design
         logger.exception("chat sweep failed; queue drain unaffected")
+
+    # Same contract: best-effort, never fatal. A reconciler that can stop the
+    # queue draining is a reconciler that turns a disk problem into an outage.
+    from pipeline.repo_sync import (
+        enforce_disk_cap, sweep_orphan_workspaces, sweep_stale_checkouts,
+    )
+
+    try:
+        sweep_stale_checkouts()
+        sweep_orphan_workspaces()
+        enforce_disk_cap()
+    except Exception:  # noqa: BLE001
+        logger.exception("workspace sweep failed; queue drain unaffected")
     return processed
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    # Handlers register at import time.
+    # Handlers register at import time, so this list IS the wiring — a module
+    # missing here is a job type that fails three times and gives up, with
+    # "no handler registered" as the only trace.
+    #
+    # 🔴 repo_sync was missing, and every test passed: pytest imports it, so
+    # the handler was registered in the test process and nowhere else. A team
+    # connected a repository, four sync jobs failed in under a second, and the
+    # setup screen sat on CLONING… for good. tests/test_worker_handlers.py
+    # now checks this list against the job types the database permits, in a
+    # subprocess, because only a fresh interpreter can tell the difference.
     import pipeline.chat  # noqa: F401
     import pipeline.compiler  # noqa: F401
     import pipeline.github  # noqa: F401
+    import pipeline.repo_sync  # noqa: F401
 
     logger.info("worker up: polling every %.0fs", POLL_SECONDS)
     while True:

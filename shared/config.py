@@ -25,6 +25,29 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_anon_key: str = ""
     supabase_secret_key: str = ""
+    # A GitHub App is how a team's repositories are reached. The App's private
+    # key is the ONE long-lived secret: every repository credential is minted
+    # from it on demand, scoped by GitHub to that installation, and held only
+    # in memory (shared/github_app.py).
+    github_app_id: str = ""
+    github_app_private_key: str = ""      # PEM, escaped-newline PEM, or base64
+    github_app_slug: str = ""             # for the https://github.com/apps/<slug> link
+    # "Request user authorization (OAuth) during installation" on the App.
+    # These verify that whoever finishes an install can actually ADMINISTER
+    # the installation they are claiming — GitHub sends installation_id back
+    # as an unauthenticated number in a URL, and installation ids are small
+    # sequential integers. See server/github_connect.py.
+    github_app_client_id: str = ""
+    github_app_client_secret: str = ""
+
+    # LOCAL SINGLE-TENANT ESCAPE HATCH, and nothing more.
+    #
+    # This used to be THE credential, returned by _token_for for every team
+    # regardless of which team asked — so it was scoped to everything its
+    # owner could reach, including other teams' private repositories. It is
+    # kept only so a solo developer can run the harness before registering an
+    # App, and pipeline/repo_sync.py refuses to use it the moment a second
+    # team has connected a repository.
     github_pat: str = ""
     # Shared secret GitHub signs webhook deliveries with. EMPTY REFUSES EVERY
     # DELIVERY — server/webhooks.py fails closed rather than accepting unsigned
@@ -40,6 +63,21 @@ class Settings(BaseSettings):
     # Per-team hourly cap on agent turns — the lid on LLM spend and the
     # simplest abuse brake. 0 disables the cap entirely.
     agent_turns_per_hour: int = 60
+
+    # Where each team's checked-out repository lives. Deliberately outside
+    # Comrade's own tree — shared/workspace.py refuses a value that overlaps
+    # it, because team checkouts inside our repo would be kept out of git and
+    # out of the agent's reach only by a .gitignore line.
+    comrade_workspaces_root: str = "~/.comrade/workspaces"
+    # Total disk the checkouts may occupy. A full disk takes Postgres with it,
+    # so this is an availability bound, not tidiness. Checkouts are always
+    # re-clonable, which is what makes eviction safe.
+    comrade_workspaces_max_gb: float = 20.0
+    # The image the team's own code runs in. One image for every team for now:
+    # it is a knob a repository must not be able to turn, since "run my tests
+    # in MY image" is just "run my code on your host" with extra steps. A
+    # per-team value belongs in the teams table with an allowlist, not here.
+    comrade_sandbox_image: str = "comrade-sandbox:latest"
     # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the

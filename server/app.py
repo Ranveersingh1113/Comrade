@@ -26,7 +26,15 @@ from starlette.concurrency import run_in_threadpool
 from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
 from pipeline.chat import enqueue_remember
-from pipeline.github import enqueue_github_event, resolve_team_for_repo
+from pipeline.repo_sync import enqueue_sync
+from pipeline.github import (
+    enqueue_github_event, forget_installation,
+    resolve_team_for_installation, resolve_team_for_repo,
+)
+from server.github_connect import (
+    ConnectError, connectable_repositories, install_url,
+    record_installation,
+)
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
 from server.webhooks import verify_signature
@@ -35,7 +43,7 @@ from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
     reject_consent,
 )
-from shared.db import Role, team_session, user_session
+from shared.db import Role, connect, team_session, user_session
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +87,36 @@ class RejectRequest(TeamScoped):
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(response: Response) -> dict[str, str]:
+    """Alive AND able to reach the database.
+
+    🔴 This returned {"status": "ok"} unconditionally, without touching
+    anything. So an instance whose connection pool held dead handles — every
+    request failing with `could not receive data from server` — reported
+    itself healthy. A deploy check passes, a load balancer keeps routing to
+    it, an orchestrator never restarts it, and the only symptom is that
+    nothing works.
+
+    Found when a browser journey failed to execute an approved consent item
+    while /health said 200. It is the same shape as the rest of this
+    codebase's worst bugs: a signal reporting success for something it never
+    checked.
+
+    THE TRADE, stated because it is a real one: coupling liveness to a
+    dependency means a database blip can restart healthy app instances. At
+    this scale that is the better failure — an API that cannot reach Postgres
+    can serve no endpoint here except this one, so reporting it alive is a
+    lie with no upside. A deployment that autoscales on liveness should split
+    this into /health and /ready before relying on it.
+    """
+    try:
+        with connect(Role.ADMIN) as conn:
+            conn.execute("select 1")
+    except Exception as exc:  # noqa: BLE001 - any failure to reach it counts
+        logger.warning("health check could not reach the database: %s", exc)
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"status": "degraded", "database": "unreachable"}
+    return {"status": "ok", "database": "ok"}
 
 
 # ---------- agent ----------
@@ -282,6 +318,65 @@ def consent_edit_and_approve(
         )
     except ConsentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+# ---------- GitHub ----------
+#
+# Only what the BROWSER CANNOT DO ITSELF is here. Connecting and disconnecting
+# a repository are row writes the frontend makes straight to Supabase, where
+# RLS decides them — au_github_repos_insert requires both team leadership and
+# an installation the same team owns, so a route in front of it would add a
+# second place to get the same rule right. These three exist because they need
+# a credential the browser must never hold.
+
+class InstallationRequest(BaseModel):
+    installation_id: int
+    state: str
+    code: str
+
+
+@app.get("/teams/{team_id}/github/install")
+def github_install(team_id: str, user_id: CurrentUserId) -> dict:
+    """Where to send someone to install the App, or why we cannot."""
+    require_membership(user_id, team_id)
+    return install_url(team_id, user_id)
+
+
+@app.post("/github/installations")
+def github_record_installation(
+    req: InstallationRequest, user_id: CurrentUserId
+) -> dict:
+    """Finish an install.
+
+    NO TEAM IN THE PATH, and that is forced by GitHub rather than chosen: an
+    App has ONE fixed Callback URL, so the redirect cannot carry a team in its
+    path and a route that required one could never be reached by the flow it
+    exists to serve. The team comes out of the signed state token, which is
+    also the only trustworthy place for it — a path parameter is whatever the
+    caller typed.
+
+    So there is no require_membership call here either. The state token binds
+    team AND user, record_installation refuses a session that is not the
+    account that started the install, and the insert runs as that user under
+    RLS. Three checks, none of which a path parameter could have improved.
+    """
+    try:
+        return record_installation(
+            installation_id=req.installation_id, state=req.state,
+            code=req.code, session_user_id=user_id,
+        )
+    except ConnectError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@app.get("/teams/{team_id}/github/repositories")
+def github_repositories(team_id: str, user_id: CurrentUserId) -> dict:
+    """What this team's installations can reach — the picker's contents."""
+    require_membership(user_id, team_id)
+    try:
+        return connectable_repositories(team_id, user_id)
+    except ConnectError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 # ---------- teams ----------
@@ -581,18 +676,51 @@ async def github_webhook(request: Request) -> dict:
         logger.warning("github webhook: signed body was not JSON")
         return {"status": "ignored", "reason": "unparseable"}
 
+    event = request.headers.get("X-GitHub-Event", "")
+    installation_id = (body.get("installation") or {}).get("id")
+
+    # An uninstall is the one delivery that must be acted on even though it
+    # names no repository. Without it the rows survive, every later sync fails
+    # on a revoked credential and burns its three retries, and the team's UI
+    # goes on claiming a repository is connected that nothing can read.
+    if event == "installation" and body.get("action") in ("deleted", "suspend"):
+        if installation_id:
+            await run_in_threadpool(forget_installation, int(installation_id))
+        return {"status": "disconnected"}
+
     full_name = (body.get("repository") or {}).get("full_name")
     if not full_name:
         return {"status": "ignored", "reason": "no repository"}
 
-    team_id = await run_in_threadpool(resolve_team_for_repo, full_name)
+    # BY INSTALLATION FIRST. Two teams may legitimately connect the same public
+    # repository, and the name lookup returns whichever row came back first —
+    # which would route one team's activity into another team's wiki. The
+    # installation id is unique across all teams, so it cannot be ambiguous.
+    team_id = None
+    if installation_id:
+        team_id = await run_in_threadpool(
+            resolve_team_for_installation, int(installation_id)
+        )
+    if team_id is None:
+        team_id = await run_in_threadpool(resolve_team_for_repo, full_name)
     if team_id is None:
         return {"status": "ignored"}
+
+    # A push changed the code the agent reads, so refresh the checkout now
+    # rather than waiting for the reconciler's window. Deduped by
+    # enqueue_sync, so a burst of pushes queues one clone. Best-effort: the
+    # activity ingest below is the delivery's actual job, and a sync that
+    # cannot be queued is picked up by sweep_stale_checkouts anyway.
+    if event == "push":
+        try:
+            await run_in_threadpool(enqueue_sync, team_id, full_name)
+        except Exception:  # noqa: BLE001
+            logger.exception("could not queue a sync for %s", full_name)
 
     job_id = await run_in_threadpool(
         enqueue_github_event,
         team_id,
-        request.headers.get("X-GitHub-Event", ""),
+        event,
         request.headers.get("X-GitHub-Delivery"),
         body,
     )

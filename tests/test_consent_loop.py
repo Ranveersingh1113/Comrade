@@ -84,7 +84,7 @@ def test_edit_and_approve_executes_new_args(seeded):
         conn.close()
 
 
-def test_the_agent_may_propose_exactly_two_things(seeded):
+def test_the_agent_may_propose_exactly_three_things(seeded):
     """§13: the agent may not originate group content. Nothing executes it.
 
     This pinned `_EXECUTORS` because, until D4, "what can be executed" and
@@ -97,9 +97,28 @@ def test_the_agent_may_propose_exactly_two_things(seeded):
     the agent's reach rather than its size. If a future action is added to
     both sets, THIS test is the one that should make someone stop and argue
     for it out loud.
+
+    IT FIRED ONCE, FOR repo_open_pr, AND HERE IS THE ARGUMENT.
+    ---------------------------------------------------------
+    The bar this set sets is not "is the action safe" — every executor is
+    behind a human key. It is "should the MODEL be able to name this".
+
+    member_depart fails that bar: it executes, but "Comrade suggests you leave
+    the team" is not a card this product puts in anyone's inbox.
+
+    repo_open_pr passes it, and more cleanly than either task tool. Proposing a
+    change and having a human approve it is the entire point of the capability
+    — an agent that can edit a working copy but cannot ask for the change to be
+    reviewed has done nothing at all. It is team-visible, reversible by closing
+    the PR, and the approval is a member reading a diff, which is a better
+    review than a consent card usually gets.
+
+    What bounds it is not this set. It is that the executor pushes only to a
+    comrade/ branch and never to a default branch, so the worst an approval can
+    produce is a pull request somebody then declines to merge.
     """
     from shared.consent import _EXECUTORS, AGENT_PROPOSABLE
 
     assert "post_group_message" not in _EXECUTORS
-    assert AGENT_PROPOSABLE == {"task_create", "task_update"}
+    assert AGENT_PROPOSABLE == {"task_create", "task_update", "repo_open_pr"}
     assert "member_depart" not in AGENT_PROPOSABLE

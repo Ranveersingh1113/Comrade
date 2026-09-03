@@ -232,11 +232,29 @@ pointing at a plugin is still code. Worth taking only as a deliberate decision.
 
 ### Phase E — the harness layers still missing
 
-- **E1.** `AGENTS.md` with build/test/lint and the migration/RLS rules; un-ignore
-  `docs/` so the decision log survives a clone.
-- **E2.** Token counts on `agent_steps`, then `BudgetMulti`-style pressure with
-  graceful degradation — one signal, four dimensions, rather than four
-  independent limits.
+- **E1. DONE** (`2391e1b`) — `AGENTS.md`, and `docs/**/*.md` un-ignored while
+  the ~4MB of generated visual-check PNGs and HTML stay out. Drift fixed:
+  HANDOFF said 4 tools and architecture.md said five, against an actual 19;
+  two findings docs were cited in the reading list for months and never
+  existed as files.
+- **E2. DONE** (`97ca1fe`), and smaller than planned because the columns were
+  already there. `agent_runs.input_tokens/output_tokens/cost_usd` had existed
+  since the table did and nothing wrote them — so this was populating them,
+  not adding them. Read from the ADK event's `usage_metadata`, accumulated
+  across the empty-turn retries (a retried turn pays for its prompt each
+  time), and written on the failed path too.
+
+  Tokens are a fact, cost is a policy: counts are unconditional, `cost_usd`
+  stays NULL until someone configures a rate, because zero is a price.
+
+  The budget gained the dimension that tracks cost. A measured trivial turn
+  is 5,125 input tokens before the member types a word, so "60 turns" was
+  anywhere between 300K and several million — a turnstile, not a budget.
+
+**`BudgetMulti`'s four dimensions were NOT built, on purpose.** There are two
+real ones now (turns, tokens) and the check refuses on whichever binds first,
+naming it. A four-dimension framework today would be one signal wearing four
+hats; it is worth building when a third is genuinely in use.
 
 ---
 

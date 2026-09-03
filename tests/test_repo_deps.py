@@ -287,3 +287,42 @@ def test_the_run_phase_cannot_write_to_what_setup_installed(checkout, reclaim):
     assert " ro," in line or " ro " in line, (
         f"the dependency volume is not mounted read-only: {line}"
     )
+
+
+def test_nothing_installs_dependencies_automatically():
+    """🔴 The policy correction, guarded.
+
+    This ran on every sync. The privilege split was right and the trigger was
+    wrong: connecting a repository is a READ consent in a member's head —
+    "Comrade can see our code" — and installing its manifest unattended turns
+    that into "Comrade may execute this repository's dependency graph, with
+    egress". Nobody consented to the second thing.
+
+    A policy decision with no test is a policy decision that comes back, and
+    this one would come back as a one-line convenience in a sync handler.
+    Installing needs an explicit per-repository opt-in first.
+    """
+    import ast
+    from pathlib import Path
+
+    # The IMPORT, not a substring. A first attempt searched for "install(" and
+    # matched `def github_install(` — a route definition — which is the kind of
+    # false positive that gets a guard deleted rather than fixed.
+    root = Path(__file__).resolve().parent.parent
+    for module in ("pipeline/repo_sync.py", "pipeline/worker.py",
+                   "pipeline/github.py", "server/app.py", "agent/tools.py"):
+        tree = ast.parse((root / module).read_text(encoding="utf-8"))
+        imported = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        } | {
+            alias.name
+            for node in ast.walk(tree) if isinstance(node, ast.Import)
+            for alias in node.names
+        }
+        assert "pipeline.repo_deps" not in imported, (
+            f"{module} imports the dependency installer. Installing must not run"
+            " as a side effect of connecting or syncing a repository — it needs"
+            " an explicit per-repository opt-in first."
+        )

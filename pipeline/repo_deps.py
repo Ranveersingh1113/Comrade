@@ -18,11 +18,38 @@ never does.
 
 THE MODEL CANNOT ASK FOR THIS
 -------------------------------
-There is deliberately no `repo_install` tool. Installation happens on sync,
-from the repository's own manifest, decided by the manifest rather than by
-anything the agent says. A capability the model cannot name is one it cannot be
-argued into naming — the same reason `team_id` is bound into session state
-rather than passed as a tool argument.
+There is deliberately no `repo_install` tool, and there will not be one. What
+gets installed is decided by the repository's own manifest and by a member's
+explicit opt-in, never by anything the agent says. A capability the model
+cannot name is one it cannot be argued into naming — the same reason `team_id`
+is bound into session state rather than passed as a tool argument.
+
+NOTHING CALLS THIS AUTOMATICALLY, AND THAT WAS A CORRECTION
+------------------------------------------------------------
+It ran on every sync. The privilege split above was right and the trigger was
+wrong: connecting a repository is a READ consent in a member's head — "Comrade
+can see our code" — and installing its manifest unattended silently turns that
+into "Comrade may execute this repository's dependency graph, with egress".
+Nobody consented to the second thing. In a product whose thesis is that actions
+are proposed and approved, an execute-with-network capability arriving as a side
+effect of a checkbox is the one shape that cannot be defended.
+
+So `install()` is called by nothing today. It needs an explicit per-repository
+opt-in before it is wired to anything.
+
+TWO THINGS TO FIX BEFORE IT IS
+--------------------------------
+1. THE CACHE KEY IS WRONG for the pyproject path. It is the manifest hash
+   alone, but `pip install /workspace` installs the repository's OWN package —
+   so a commit that changes source without touching pyproject.toml leaves a
+   stale build installed and tests running against code that is not in the
+   checkout. The key needs the commit SHA, the lockfile when there is one, and
+   a recipe version so changing `_install_script` invalidates what it built.
+
+2. THERE IS NO VISIBLE STATUS. A member cannot see whether an environment is
+   ready, building, failed, stale or disabled — and neither can the agent, so
+   it cannot tell a member whether a red test suite is their code or a missing
+   environment. That distinction is the main thing this feature is for.
 
 WHAT IS HONESTLY NOT SOLVED
 -----------------------------
@@ -32,6 +59,7 @@ been. The container is the boundary and nothing of Comrade's is inside it.
 """
 import hashlib
 import logging
+import subprocess
 from pathlib import Path
 
 from agent.sandbox import DEPS_MOUNT, MOUNT, VENV, SandboxError, run_setup
@@ -146,9 +174,24 @@ def install(team_id: str, repo_full_name: str) -> dict:
 
 
 def volume_for(team_id: str, repo_full_name: str) -> str | None:
-    """The dependency volume to mount for a run, or None if there is nothing
-    installed. Callers pass this straight to run_contained's `deps`."""
-    root = repo_checkout(team_id, repo_full_name)
-    if not root.exists() or manifest_for(root) is None:
+    """The dependency volume to mount for a run, or None if none is PROVISIONED.
+
+    Checks the volume exists rather than checking the repository has a
+    manifest. Those were the same thing while installs happened automatically
+    on sync; they are not now. `docker run -v name:/deps` CREATES `name` when
+    it is absent, so returning a name for an environment nobody built would
+    mount an empty volume, put a nonexistent venv on PATH, and leave the agent
+    reporting import errors for a setup that was never asked for.
+
+    Only `install()` creates one, so existence is the readiness signal until
+    there is a status column to ask instead.
+    """
+    name = deps_volume(team_id, repo_full_name)
+    try:
+        found = subprocess.run(  # noqa: S603 - fixed argv
+            ["docker", "volume", "inspect", name],
+            capture_output=True, timeout=30,
+        ).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    return deps_volume(team_id, repo_full_name)
+    return name if found else None

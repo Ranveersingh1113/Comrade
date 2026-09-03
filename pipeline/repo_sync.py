@@ -316,43 +316,30 @@ def enqueue_sync(team_id: str, repo_full_name: str) -> str:
     return str(row[0])
 
 
-def _install_dependencies(team_id: str, repo_full_name: str) -> None:
-    """Bring the checkout's dependencies up to date, after it is on disk.
-
-    Here rather than in a tool, because this is the one phase with network
-    access and the model must not be able to ask for it. It runs from the
-    repository's own manifest, so what gets installed is decided by the repo
-    rather than by anything the agent says.
-
-    Never fatal to the sync. A project whose dependencies do not resolve still
-    has code worth reading, and failing the clone over a pip conflict would
-    take away the tools that work as well as the one that does not.
-    """
-    from pipeline.repo_deps import install
-
-    try:
-        outcome = install(team_id, repo_full_name)
-    except Exception:  # noqa: BLE001 - a clone must survive any install
-        logger.exception("dependency install raised for %s", repo_full_name)
-        return
-    if outcome.get("status") in ("failed", "timeout"):
-        logger.warning(
-            "dependencies did not install for %s (%s): %s",
-            repo_full_name, outcome["status"], str(outcome.get("detail", ""))[:200],
-        )
-
-
 def handle_sync_repo(team_id: str, payload: dict) -> None:
     name = payload.get("repo_full_name")
     if not name:
         raise PermanentJobError("sync_repo job carries no repo_full_name")
     sync_repo(team_id, name)
-    # In the JOB, not in sync_repo. Getting the code onto disk and installing
-    # what it needs are different operations with different privileges — one
-    # holds a git credential, the other opens the network — and the tests that
-    # exercise cloning against a local bare repository should not reach a
-    # package registry to do it.
-    _install_dependencies(team_id, name)
+    # 🔴 NO AUTOMATIC DEPENDENCY INSTALL HERE. This called
+    # _install_dependencies, and the trigger was wrong.
+    #
+    # The privilege split was right: installing reaches the network, running
+    # the team's code does not, and the model cannot ask for either. What that
+    # reasoning missed is a second threat entirely. Connecting a repository is
+    # a READ consent in a member's head — "Comrade can see our code". Running
+    # its manifest on every sync silently turns that into "Comrade may execute
+    # this repository's dependency graph, with egress, unattended", because
+    # `pip install` runs setup.py and a build hook runs whatever it likes.
+    #
+    # Nobody consented to the second thing, and in a product whose entire
+    # thesis is that actions are proposed and approved, an execute-with-network
+    # capability arriving as a side effect of a checkbox is the one shape that
+    # cannot be defended.
+    #
+    # The install path stays (pipeline/repo_deps.py). What it needs is an
+    # explicit per-repository opt-in, an environment whose status a member can
+    # see, and a cache key that includes the commit — see that module's header.
 
 
 register("sync_repo", handle_sync_repo)

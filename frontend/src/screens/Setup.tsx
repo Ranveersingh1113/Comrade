@@ -198,6 +198,25 @@ export function Setup() {
               approves after seeing the diff, and nothing is ever pushed to your default
               branch.
             </div>
+            {/* The steering mechanism nobody was told about. repo_guide() has
+                read this file since the repo tools shipped, and no screen, doc
+                or setup step ever mentioned it — so the strongest lever a team
+                has over Comrade's behaviour on their code was invisible. */}
+            <div
+              style={{
+                fontSize: 12.5,
+                color: 'var(--muted)',
+                margin: '9px 0 13px',
+                lineHeight: 1.55,
+                paddingLeft: 35,
+              }}
+            >
+              If your repository has an <code>AGENTS.md</code>, <code>CLAUDE.md</code> or{' '}
+              <code>.cursorrules</code>, Comrade reads it and follows your conventions —
+              the same file your other coding tools use. It informs Comrade; it can&apos;t
+              override the consent rules, so a stranger&apos;s pull request can&apos;t
+              rewrite them.
+            </div>
             <GitHubConnect teamId={teamId} isLeader={isLeader} />
           </div>
 

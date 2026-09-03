@@ -90,6 +90,14 @@ authorization (OAuth) during installation" disables that field, and GitHub
 redirects to the Callback URL instead. The path carries no team because an App
 has only one such URL; the signed state token carries it.
 
+**Comrade follows your repository's own conventions.** If the repo has an
+`AGENTS.md`, `CLAUDE.md` or `.cursorrules`, it is read at the start of every
+turn and put in front of the model — the same file your other coding tools
+already use, so there is nothing extra to write. It arrives datamarked and
+framed as data: it *informs* Comrade and cannot override the consent rules,
+which matters because a repository that accepts pull requests accepts them
+from strangers.
+
 Without an App, Comrade still ingests repository history from webhook
 deliveries — that path holds no credential. Only the working copy needs one.
 

@@ -60,6 +60,45 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
     return steps
 
 
+def _finish(
+    team_id: str, run_id: str, status: str, used_input: int, used_output: int
+) -> None:
+    """finish_run with positional arguments — run_in_threadpool forwards no
+    keywords, and the usage parameters are keyword-only so a caller cannot
+    silently swap the two token counts."""
+    finish_run(
+        team_id, run_id, status,
+        input_tokens=used_input, output_tokens=used_output,
+    )
+
+
+def _usage_from_event(event: Any) -> tuple[int, int]:
+    """(prompt tokens, generated tokens) for one model call, or (0, 0).
+
+    Defensive about the shape because it comes from a vendor SDK and is not
+    load-bearing: a turn that produced work must never fail because the
+    accounting could not read a field. Absent usage is recorded as zero, which
+    understates rather than invents.
+
+    Accumulating these ACROSS the empty-turn retries is deliberate. A retried
+    turn genuinely paid for its prompt each time — the measured 1-in-8 empty
+    response costs the whole context again, and that has been invisible since
+    the retry shipped.
+    """
+    usage = getattr(event, "usage_metadata", None)
+    if usage is None:
+        return 0, 0
+    prompt = getattr(usage, "prompt_token_count", None) or 0
+    # `candidates_token_count` is what Gemini calls generated tokens. Fall back
+    # to total - prompt, which is what the empty-turn instrumentation showed
+    # arriving when the candidate list was empty.
+    output = getattr(usage, "candidates_token_count", None)
+    if output is None:
+        total = getattr(usage, "total_token_count", None) or 0
+        output = max(total - prompt, 0)
+    return int(prompt), int(output)
+
+
 def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
     """Concatenate the text steps into the user-facing reply."""
     return "".join(s["text"] for s in steps if s["type"] == "text").strip()
@@ -144,6 +183,11 @@ async def stream_turn(
 
         message = types.Content(role="user", parts=[types.Part(text=user_text)])
         all_steps: list[dict[str, Any]] = []
+        # Outside the retry loop on purpose: a retried empty turn paid
+        # for its prompt every attempt, and that is the number worth
+        # having.
+        used_input = 0
+        used_output = 0
         # Inside the try: a failed history read must close the run row too, not
         # leave it 'running' forever.
         try:
@@ -197,6 +241,9 @@ async def stream_turn(
                         max_llm_calls=settings.agent_max_llm_calls
                     ),
                 ):
+                    prompt_tokens, generated_tokens = _usage_from_event(event)
+                    used_input += prompt_tokens
+                    used_output += generated_tokens
                     for step in _steps_from_event(event, len(all_steps)):
                         await run_in_threadpool(append_step, team_id, run_id, step)
                         all_steps.append(step)
@@ -208,7 +255,9 @@ async def stream_turn(
                     attempt, EMPTY_TURN_ATTEMPTS, team_id, run_id,
                 )
         except Exception:
-            await run_in_threadpool(finish_run, team_id, run_id, "failed")
+            await run_in_threadpool(
+                _finish, team_id, run_id, "failed", used_input, used_output
+            )
             raise
         reply = _reply_from_steps(all_steps)
         if not reply:
@@ -232,7 +281,9 @@ async def stream_turn(
             # product's side "raised an exception" and "produced no answer"
             # are the same event — you asked and got nothing. The traceback
             # path still logs its own detail.
-            await run_in_threadpool(finish_run, team_id, run_id, "failed")
+            await run_in_threadpool(
+                _finish, team_id, run_id, "failed", used_input, used_output
+            )
             yield {
                 "type": "empty",
                 "run_id": run_id,
@@ -242,7 +293,9 @@ async def stream_turn(
                 ),
             }
             return
-        await run_in_threadpool(finish_run, team_id, run_id, "done")
+        await run_in_threadpool(
+            _finish, team_id, run_id, "done", used_input, used_output
+        )
         yield {"type": "final", "run_id": run_id, "reply": reply}
 
 

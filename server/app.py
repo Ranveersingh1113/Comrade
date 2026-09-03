@@ -168,21 +168,39 @@ def _check_turn_budget(team_id: str) -> None:
     (20260830090000_close_agent_runs_leak.sql). The agent role is team-scoped
     by current_team(), and this returns a COUNT to the server, never rows to a
     member — so the cap stays a team cap without reopening the read.
+
+    TWO DIMENSIONS, ONE REFUSAL. Turns alone is a turnstile rather than a
+    budget: a measured trivial turn costs ~5,100 input tokens before the member
+    types a word, and a turn that reads twenty files costs orders more, so 60
+    turns is anywhere between 300K and several million tokens. Tokens alone
+    would let a thousand near-empty turns through. Whichever binds first wins,
+    and the message says which — "you have used your turns" when a team is out
+    of tokens sends someone looking in the wrong place.
     """
-    cap = settings.agent_turns_per_hour
-    if cap <= 0:
+    turn_cap = settings.agent_turns_per_hour
+    token_cap = settings.agent_tokens_per_hour
+    if turn_cap <= 0 and token_cap <= 0:
         return
     with team_session(Role.AGENT, team_id) as conn:
-        used = conn.execute(
-            "select count(*) from public.agent_runs"
+        turns, tokens = conn.execute(
+            "select count(*),"
+            "       coalesce(sum(coalesce(input_tokens,0)"
+            "                  + coalesce(output_tokens,0)), 0)"
+            "  from public.agent_runs"
             " where team_id=%s and created_at > now() - interval '1 hour'",
             (team_id,),
-        ).fetchone()[0]
-    if used >= cap:
+        ).fetchone()
+    if turn_cap > 0 and turns >= turn_cap:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
-            f"This team has used its {cap} agent turns for the hour."
+            f"This team has used its {turn_cap} agent turns for the hour."
             " Comrade will be available again shortly.",
+        )
+    if token_cap > 0 and tokens >= token_cap:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"This team has used its {token_cap:,} agent tokens for the hour"
+            f" ({tokens:,} so far). Comrade will be available again shortly.",
         )
 
 

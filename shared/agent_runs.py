@@ -68,13 +68,49 @@ def append_step(team_id: str, run_id: str, step: dict[str, Any]) -> None:
             )
 
 
-def finish_run(team_id: str, run_id: str, status: str) -> None:
-    """Close the run with a terminal status ('done' | 'failed')."""
+def _cost_usd(input_tokens: int, output_tokens: int) -> float | None:
+    """What those tokens cost, or None when nobody has said.
+
+    Deliberately None rather than 0.0 when the rates are unset: zero is a
+    price, and a column full of zeros reads as "this was free" rather than
+    "nobody configured this". The token counts beside it are unconditional,
+    so the question stays answerable either way.
+    """
+    from shared.config import settings
+
+    rate_in = settings.gemini_input_usd_per_mtok
+    rate_out = settings.gemini_output_usd_per_mtok
+    if not rate_in and not rate_out:
+        return None
+    return round(
+        (input_tokens * rate_in + output_tokens * rate_out) / 1_000_000, 6
+    )
+
+
+def finish_run(
+    team_id: str,
+    run_id: str,
+    status: str,
+    *,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> None:
+    """Close the run with a terminal status ('done' | 'failed') and what it cost.
+
+    The token columns have existed on agent_runs since the table did and were
+    never written, so every question about what the agent actually spends —
+    which teams, which kinds of turn, whether the empty-turn retry matters —
+    had no data behind it. They are written on the FAILED path too: a turn that
+    failed still consumed the prompt it was handed, and accounting that only
+    counts successes understates exactly the runs worth investigating.
+    """
     with team_session(Role.AGENT, team_id) as conn:
         cur = conn.execute(
-            "update public.agent_runs set status = %s, finished_at = now()"
+            "update public.agent_runs set status = %s, finished_at = now(),"
+            " input_tokens = %s, output_tokens = %s, cost_usd = %s"
             " where id = %s",
-            (status, run_id),
+            (status, input_tokens, output_tokens,
+             _cost_usd(input_tokens, output_tokens), run_id),
         )
         if cur.rowcount == 0:
             raise LookupError(

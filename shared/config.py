@@ -64,6 +64,33 @@ class Settings(BaseSettings):
     # simplest abuse brake. 0 disables the cap entirely.
     agent_turns_per_hour: int = 60
 
+    # The SECOND dimension of the same budget, and the one that tracks cost.
+    #
+    # Counting turns treats "what's my status" and a turn that reads twenty
+    # files as the same thing. A measured trivial turn costs ~5,100 input
+    # tokens before the member types a word — system prompt, wiki index and 19
+    # tool declarations — so 60 turns is somewhere between 300K and several
+    # million depending entirely on what was asked. That is not a budget, it is
+    # a turnstile.
+    #
+    # 500K is ~100 trivial turns, and it binds first on exactly the runs worth
+    # bounding: a repository sweep that reads file after file.
+    agent_tokens_per_hour: int = 500_000
+
+    # What a turn COSTS, as opposed to how many there were.
+    #
+    # Tokens are recorded unconditionally — they are a fact about what
+    # happened. Cost is not: it depends on a price that changes, that differs
+    # per deployment (free tier, committed use, a different model), and that
+    # nobody should be guessing on someone else's behalf. Left at 0 these stay
+    # null in agent_runs rather than becoming a confidently wrong number, and
+    # `select sum(input_tokens)` still answers every question that matters.
+    #
+    # Set from the current published rate for whatever MODEL names, per
+    # MILLION tokens.
+    gemini_input_usd_per_mtok: float = 0.0
+    gemini_output_usd_per_mtok: float = 0.0
+
     # Where each team's checked-out repository lives. Deliberately outside
     # Comrade's own tree — shared/workspace.py refuses a value that overlaps
     # it, because team checkouts inside our repo would be kept out of git and

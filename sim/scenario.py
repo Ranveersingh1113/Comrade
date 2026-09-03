@@ -27,6 +27,29 @@ API = "http://localhost:8000"
 STATE = json.loads((Path(__file__).resolve().parent / "state.json").read_text())
 TEAM = STATE["team_id"]
 WHO = {p["tag"]: p for p in STATE["people"]}
+
+
+def _refresh_tokens() -> None:
+    """Sign everyone in again at the start of a run.
+
+    Supabase access tokens last an hour, and state.json holds whatever setup
+    minted. A scenario re-run later fails every agent call with "Signature has
+    expired" — which is the JWT check working correctly, since 60 seconds of
+    leeway is for clock skew and not for an hour-old token.
+    """
+    from shared.config import settings
+
+    for person in WHO.values():
+        resp = httpx.post(
+            f"{settings.supabase_url.rstrip('/')}/auth/v1/token?grant_type=password",
+            headers={"apikey": settings.supabase_anon_key,
+                     "Content-Type": "application/json"},
+            json={"email": person["email"], "password": "sim-password-1"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise SystemExit(f"could not sign in {person['name']}: {resp.text[:160]}")
+        person["token"] = resp.json()["access_token"]
 REPO = "Ranveersingh1113/test"
 
 TRANSCRIPT: list[dict] = []
@@ -133,6 +156,7 @@ def _reset_room() -> None:
 
 
 def main() -> None:
+    _refresh_tokens()
     _reset_room()
     print("=" * 72)
     print("DAY 1 — the team forms and argues about the design")

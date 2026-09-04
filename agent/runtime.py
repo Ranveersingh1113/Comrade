@@ -220,6 +220,20 @@ async def stream_turn(
                         # neither, so it cannot ask to work in another team's
                         # tree or another team's repository.
                         "repo_full_name": repo,
+                        # "Has Comrade run what it just wrote." repo_edit
+                        # bumps the first, a repo_run that exited 0 stamps it
+                        # into the second, and repo_propose_pr refuses while
+                        # they disagree.
+                        #
+                        # Seeded HERE for the same reason as the three above:
+                        # the model must not be able to name either key, or it
+                        # could vouch for its own unrun work. Starting fresh
+                        # each turn is correct rather than incidental — the
+                        # checkout is reset from the remote every turn too, so
+                        # a pass measured last turn was measured on a tree
+                        # that no longer exists.
+                        "repo_edit_generation": 0,
+                        "repo_verified_generation": None,
                     },
                 )
                 for content in history:

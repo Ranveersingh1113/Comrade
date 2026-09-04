@@ -324,6 +324,58 @@ def repo_guide(team_id: str, repo_full_name: str | None) -> str | None:
     return None
 
 
+#: Session-state bookkeeping for "has Comrade run what it just wrote".
+#:
+#: 🔴 A four-person scenario had Comrade write a 2,992-character snake game and
+#: propose it as a pull request without executing a line of it. The patch
+#: carried a real off-by-one — self-collision checked before the tail is
+#: popped — and one `python snake.py` would have shown it.
+#:
+#: A GENERATION COUNTER, NOT A BOOLEAN. A boolean says "verified" forever after
+#: one passing run, and the sequence that actually happens is
+#: edit -> run -> edit -> propose: the second edit is the unverified one, and
+#: it is exactly the "one last small fix". Comparing generations makes a later
+#: edit invalidate an earlier pass for free.
+#:
+#: Both keys are bound by the server in runtime.py and written only by these
+#: tools' success paths. The model names neither, so it cannot declare its own
+#: work verified — which is the entire point.
+_EDIT_GEN = "repo_edit_generation"
+_VERIFIED_GEN = "repo_verified_generation"
+
+NEEDS_VERIFICATION = (
+    "Run a relevant test, build, lint, or executable check after your latest"
+    " edit before proposing this pull request."
+)
+
+
+def _note_edit(tool_context: ToolContext) -> None:
+    """One more unverified change. Called only where a write actually happened
+    — a refused edit must not invalidate a genuine verification, or the agent
+    is stuck re-running tests for a change it never made."""
+    state = tool_context.state
+    state[_EDIT_GEN] = state.get(_EDIT_GEN, 0) + 1
+
+
+def _note_verified(tool_context: ToolContext) -> None:
+    """The tree as it stands right now has been executed successfully."""
+    state = tool_context.state
+    state[_VERIFIED_GEN] = state.get(_EDIT_GEN, 0)
+
+
+def _unverified(tool_context: ToolContext) -> bool:
+    """True when an edit has happened that no successful run has covered.
+
+    Zero edits is not unverified: nothing was changed, so there is nothing to
+    have run. That case belongs to capture_patch's empty-diff refusal, which
+    tells the member something they can act on — "go run a test" would send
+    them looking for a change nobody made.
+    """
+    state = tool_context.state
+    edits = state.get(_EDIT_GEN, 0)
+    return edits > 0 and state.get(_VERIFIED_GEN) != edits
+
+
 def repo_edit(
     path: str, old_text: str, new_text: str, tool_context: ToolContext
 ) -> dict:
@@ -365,6 +417,7 @@ def repo_edit(
             }
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(new_text, encoding="utf-8")
+        _note_edit(tool_context)
         return {"path": rel, "created": True}
 
     if not target.is_file():
@@ -388,6 +441,7 @@ def repo_edit(
         }
 
     target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+    _note_edit(tool_context)
     return {"path": rel, "created": False, "replaced": True}
 
 
@@ -417,6 +471,12 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
     repo = tool_context.state.get("repo_full_name")
     if not (team_id and requester_id and repo):
         return {"error": "this turn has no team repository to propose against."}
+
+    # Before capture_patch, so the refusal names what to do rather than
+    # reporting a diff the member is not going to be shown anyway. After the
+    # identity check, so a turn with no repository still says so first.
+    if _unverified(tool_context):
+        return {"error": NEEDS_VERIFICATION}
 
     try:
         patch = capture_patch(str(team_id), str(repo))
@@ -537,4 +597,15 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     # On success too, because a PASS from a stale environment is the more
     # dangerous report — it is the one somebody acts on.
     result["environment"] = environment
+
+    # Exit 0 and not killed. Both conditions, and neither is truthiness: a
+    # timeout returns exit_code None, which `if not result["exit_code"]` reads
+    # as a pass — the command that produced no verdict at all would be the one
+    # vouching for the change.
+    #
+    # A non-zero exit is a normal answer for REPORTING (see this tool's
+    # docstring) and is not evidence the change works, which is the only
+    # question the proposal gate asks.
+    if result.get("exit_code") == 0 and not result.get("timed_out"):
+        _note_verified(tool_context)
     return result

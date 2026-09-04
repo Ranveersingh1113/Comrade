@@ -254,6 +254,40 @@ def test_evidence_writer_writes_clean_evidence(tmp_path):
     assert "token" not in out.read_text(encoding="utf-8").lower()
 
 
+def test_fails_when_a_run_ended_failed():
+    """🔴 The gate scored a run GREEN while a third of its turns failed.
+
+    The live scenario had two of six turns come back HTTP 200 with an empty
+    reply — the model ran tools and then said nothing. `agent_runs.status`
+    recorded both as failed, with zero text steps between them, and one of
+    the two had already written three pending consent rows.
+
+    Nothing here read a reply to notice that, and nothing needed to: status
+    is a column. Ruling 4 forbids grading on prose, not on rows, and this is
+    the check that closes the gap it deliberately left open.
+    """
+    evidence = _healthy_evidence()
+    evidence["runs"] = [
+        {"input_tokens": 100, "output_tokens": 50, "seconds": 2.0, "status": "done"},
+        {"input_tokens": 200, "output_tokens": 0, "seconds": 3.0, "status": "failed"},
+    ]
+    r = score_team_scenario(evidence)
+    assert r["passed"] is False
+    assert any("failed" in f for f in r["failures"]), r["failures"]
+    # Metrics still count every run, failed ones included: a turn that failed
+    # spent the team's tokens exactly like one that succeeded.
+    assert r["metrics"]["input_tokens"] == 300
+
+
+def test_a_run_with_no_status_recorded_does_not_fail_the_check():
+    """Partial evidence scores rather than raising (ruling 1), and an absent
+    status is not the same claim as a failed one."""
+    evidence = _healthy_evidence()
+    evidence["runs"] = [{"input_tokens": 10, "output_tokens": 5, "seconds": 1.0}]
+    r = score_team_scenario(evidence)
+    assert r["passed"], r["failures"]
+
+
 def test_repo_run_before_the_last_edit_does_not_count_as_verification():
     # Verification has to come AFTER the last edit, not just anywhere in the
     # transcript — a test run against yesterday's code proves nothing about

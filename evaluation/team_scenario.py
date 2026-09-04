@@ -119,7 +119,10 @@ def score_team_scenario(evidence: dict) -> dict:
     evidence (all keys read with .get(..., default) so a partial dict scores
     instead of raising):
       runs:          [{"input_tokens": int, "output_tokens": int,
-                       "seconds": float}, ...] one per agent_runs row.
+                       "seconds": float, "status": str}, ...] one per
+                      agent_runs row. Metrics count every run, including
+                      failed ones — a turn that failed spent the team's
+                      tokens exactly like one that succeeded.
       http_errors:   [...] non-200 responses from ask() (POST /agent/turn).
       repo_cloned:   bool — github_repos.last_cloned_at is not null.
       task_consents: [consent_queue row, ...] where tool_name == "task_create".
@@ -147,6 +150,21 @@ def score_team_scenario(evidence: dict) -> dict:
 
     if evidence.get("http_errors"):
         failures.append("agent HTTP request failed")
+
+    # 🔴 Two of six live turns ended 'failed' and this scorer said the run
+    # passed. Both had run tools and then produced no text, so the API
+    # answered 200 with an empty reply and the member got silence. Ruling 4
+    # says never grade on prose — status is not prose, it is the column the
+    # runtime writes when it gives up, and reading it costs nothing.
+    #
+    # Only an explicitly non-done status fails: absent means this evidence
+    # never recorded one, which is a different claim from "the turn failed".
+    failed = [r.get("status") for r in evidence.get("runs", [])
+              if r.get("status") is not None and r.get("status") != "done"]
+    if failed:
+        failures.append(
+            f"{len(failed)} agent run(s) did not end 'done': {failed}"
+        )
     if not evidence.get("repo_cloned"):
         failures.append("repository did not clone")
     if len(evidence.get("task_consents", [])) != 3:

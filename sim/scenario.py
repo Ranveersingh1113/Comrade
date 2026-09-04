@@ -218,7 +218,8 @@ def _collect_evidence() -> dict:
     steps: list[dict] = []
     if run_ids:
         run_rows = conn.execute(
-            "select id, input_tokens, output_tokens, created_at, finished_at"
+            "select id, input_tokens, output_tokens, created_at, finished_at,"
+            "       status"
             " from public.agent_runs where id = any(%s::uuid[])",
             (run_ids,),
         ).fetchall()
@@ -227,10 +228,14 @@ def _collect_evidence() -> dict:
             row = by_id.get(rid)
             if row is None:
                 continue
-            _id, in_tok, out_tok, created, finished = row
+            _id, in_tok, out_tok, created, finished, status = row
             seconds = (finished - created).total_seconds() if finished else 0.0
+            # status carries the runtime's own verdict on the turn. A turn
+            # that ran tools and then produced no text is written 'failed'
+            # here while the API still answers 200 with an empty reply — the
+            # only place that failure is visible without reading prose.
             runs.append({"input_tokens": in_tok or 0, "output_tokens": out_tok or 0,
-                         "seconds": seconds})
+                         "seconds": seconds, "status": status})
 
         step_rows = conn.execute(
             "select run_id, seq, type, tool, response"

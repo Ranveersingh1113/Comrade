@@ -297,3 +297,52 @@ def test_the_retry_starts_from_a_clean_session(seeded, monkeypatch):
     _frames()
     assert len(sessions) == 2
     assert sessions[0] != sessions[1], "the retry reused the failed session"
+
+
+def test_a_silent_turn_that_ran_a_tool_does_not_claim_nothing_changed(
+    seeded, monkeypatch
+):
+    """🔴 The message was true for one case and asserted for both.
+
+    Found 2026-09-04 by the four-person scenario. Two of six live turns came
+    back HTTP 200 with an empty reply, and both had run tools first:
+
+        run       | steps | text_steps | status | side effect
+        0368ae0a  |   4   |     0      | failed | -
+        2386b070  |   6   |     0      | failed | 3 pending task_create rows
+
+    The second one called team_propose_batch, wrote three consent rows, said
+    nothing, and told the member "Nothing was changed." Three approvals were
+    sitting in the queue at the time.
+
+    The retry above is correctly unavailable here — re-asking would run the
+    tool twice. That is exactly why the MESSAGE has to carry the weight: it is
+    the only thing the member gets, and it was describing the other case.
+    "Nothing was changed" is a claim about side effects that nothing checked,
+    which is the same shape as the success-report bug this whole file exists
+    for, one layer along.
+    """
+    from unittest.mock import MagicMock
+
+    async def _fake_run(*_a, **_k):
+        part = MagicMock()
+        part.function_call = MagicMock(name="fc")
+        part.function_call.name = "team_propose_batch"
+        part.function_call.args = {}
+        part.function_response = None
+        part.text = None
+        ev = MagicMock()
+        ev.content.parts = [part]
+        yield ev
+
+    monkeypatch.setattr("agent.runtime.Runner.run_async", _fake_run)
+    detail = _frames()[-1]["detail"]
+
+    assert "Nothing was changed" not in detail, (
+        "a turn that ran a tool told the member nothing was changed. The tool"
+        f" had already run. detail was: {detail!r}"
+    )
+    assert "team_propose_batch" in detail, (
+        "the member is not told WHICH tool ran, so they cannot go look for"
+        f" what it did. detail was: {detail!r}"
+    )

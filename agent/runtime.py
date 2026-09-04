@@ -284,14 +284,37 @@ async def stream_turn(
             await run_in_threadpool(
                 _finish, team_id, run_id, "failed", used_input, used_output
             )
-            yield {
-                "type": "empty",
-                "run_id": run_id,
-                "detail": (
+            # 🔴 "Nothing was changed" was true for one of these two cases and
+            # asserted for both. Found 2026-09-04 by the four-person scenario:
+            # a turn called team_propose_batch, wrote three consent rows, said
+            # nothing, and told the member nothing had changed. Three
+            # approvals were waiting in the queue while it said so.
+            #
+            # The retry above is correctly unavailable once a tool has run —
+            # re-asking would run it twice. That is precisely why this message
+            # has to carry the weight: it is the only thing the member gets,
+            # and it was describing the other case. Naming the tools is what
+            # makes it actionable — "check what it did" is useless without
+            # saying what it did.
+            tools_run = [
+                s["tool"] for s in all_steps
+                if s.get("type") == "tool_call" and s.get("tool")
+            ]
+            if tools_run:
+                detail = (
+                    "Comrade used "
+                    + ", ".join(dict.fromkeys(tools_run))
+                    + " and then stopped without saying anything. Those"
+                    " already ran, so check for pending approvals or new"
+                    " activity before asking again — asking again would"
+                    " repeat them."
+                )
+            else:
+                detail = (
                     "Comrade had nothing to say that time — the model came"
                     " back empty. Nothing was changed. Try asking again."
-                ),
-            }
+                )
+            yield {"type": "empty", "run_id": run_id, "detail": detail}
             return
         await run_in_threadpool(
             _finish, team_id, run_id, "done", used_input, used_output

@@ -13,7 +13,7 @@ from google.adk.tools import ToolContext
 
 from pipeline.parsers import spotlight
 from pipeline.wiki import ORPHAN_TITLE, all_active_pages
-from shared.consent import AGENT_PROPOSABLE, propose_action, propose_batch
+from shared.consent import propose_action
 from shared.db import user_session
 from shared.nudge import send_nudge
 
@@ -671,107 +671,6 @@ def team_propose_task(
         source_snippet=source or None,
         reversible=True,
     )
-
-
-#: The names the MODEL knows, mapped to the names the consent queue uses.
-#:
-#: 🔴 The agent calls its tools `team_propose_task` and `task_propose_update`;
-#: the consent queue calls the same actions `task_create` and `task_update`. Two
-#: names for one concept, and team_propose_batch is the one place the model has
-#: to supply the second. In a real scenario it passed the name of the tool it
-#: was holding — the obvious guess — and all three items were refused.
-#:
-#: An explicit alias map rather than a looser check: the accepted set stays
-#: closed and reviewable, and the model is no longer required to know an
-#: internal name to use a tool correctly.
-_BATCH_ALIASES = {
-    "team_propose_task": "task_create",
-    "task_propose_update": "task_update",
-    "repo_propose_pr": "repo_open_pr",
-}
-
-
-def team_propose_batch(items: list[dict], tool_context: ToolContext) -> dict:
-    """Propose several related actions together as ONE reviewable group,
-    instead of separate unrelated-looking cards. Use this when multiple
-    actions belong to a single piece of work the member asked for — e.g.
-    creating three tasks for one project kickoff — so the inbox shows them
-    together with progress ("2 of 3 approved") instead of scattering them.
-
-    This changes only how the proposals are DISPLAYED. Each one is still
-    approved or rejected on its own — there is no batch-wide approve/reject,
-    and approving some of them never approves or cancels the rest. Say
-    you've proposed them, not that they're done.
-
-    Args:
-        items: one dict per proposal, each {"tool_name": "task_create" or
-            "task_update", "args": {...}, "source": "..."}. `args` follows
-            the same shape team_propose_task / task_propose_update build —
-            task_create needs assignee_id/title/description/deadline,
-            task_update needs task_id plus whichever fields are changing.
-            `source` is the optional note shown on that item's card.
-    """
-    # This is the ONE place a tool name chosen by the model reaches the consent
-    # queue. Every other proposal path names its tool as a literal. Until
-    # member_depart existed, propose_action's `not in _EXECUTORS` check
-    # happened to reject everything unexpected — accidental validation that
-    # would have widened the moment the executor map grew. Say it out loud
-    # instead, and refuse per item so one bad name does not discard four good
-    # proposals (propose_batch's own partial-failure contract).
-    allowed, refused = [], []
-    for item in items:
-        name = _BATCH_ALIASES.get(item.get("tool_name"), item.get("tool_name"))
-        if name in AGENT_PROPOSABLE:
-            allowed.append(
-                {
-                    "tool_name": name,
-                    "args": item.get("args") or {},
-                    "source_snippet": item.get("source") or None,
-                }
-            )
-        else:
-            refused.append(
-                {
-                    "status": "failed",
-                    "tool_name": name,
-                    "error": f"{name!r} is not a tool the agent may propose",
-                }
-            )
-    # 🔴 A TOP-LEVEL VERDICT, because nested failures were read as success.
-    #
-    # A four-person scenario asked for three tasks. All three were refused, and
-    # the agent told the room "I have proposed three tasks for approval". The
-    # refusals were there — `status: failed`, three times — but buried inside an
-    # `items` array with nothing at the top saying so, and a model summarising a
-    # long result reasonably read the shape as "it returned, so it worked".
-    #
-    # Telling it plainly is the fix. `proposed: 0` and a `status` it cannot skim
-    # past cost nothing and remove the most damaging failure this tool has: a
-    # member believing work is queued that is not.
-    if not allowed:
-        return {
-            "status": "all_failed",
-            "proposed": 0,
-            "batch_id": None,
-            "items": refused,
-            "detail": (
-                "Nothing was proposed. Every item was refused — report that,"
-                " do not tell anyone these are awaiting approval."
-            ),
-        }
-    result = propose_batch(
-        tool_context.state["team_id"],
-        tool_context.state["requester_id"],
-        allowed,
-    )
-    result["items"].extend(refused)
-    result["proposed"] = len(allowed)
-    result["status"] = "partial" if refused else "ok"
-    if refused:
-        result["detail"] = (
-            f"{len(allowed)} proposed, {len(refused)} refused. Say which."
-        )
-    return result
 
 
 def task_propose_update(

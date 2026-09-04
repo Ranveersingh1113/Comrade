@@ -43,11 +43,22 @@ def test_task_propose_update_is_a_gated_write_like_task_create():
     assert spec_for("task_propose_update") == ToolSpec("db", writes=True, needs_human=False)
 
 
-def test_team_propose_batch_is_a_gated_write_like_team_propose_task():
-    """Same reasoning as team_propose_task: the call only writes pending rows
-    for a human to review one by one, so the call itself needs no human gate —
-    the batch grouping (task 6) is display only, never an approval gate."""
-    assert spec_for("team_propose_batch") == ToolSpec("db", writes=True, needs_human=False)
+def test_team_propose_batch_is_gone():
+    """Removed 2026-09-04. It batched cards for a detached consent inbox, and
+    approvals are moving into the thread that asked for them — at which point
+    grouping unrelated-looking cards is solving a problem that no longer
+    exists.
+
+    Two assertions, because either alone passes while the tool still works:
+    the registry must not declare it, AND the root agent must not carry it.
+    An undeclared tool that is still handed to the model fails closed into
+    outbound/writes/needs_human, which is a working tool with a wrong surface,
+    not a removed one.
+    """
+    from agent.agent import root_agent
+
+    assert "team_propose_batch" not in REGISTRY
+    assert "team_propose_batch" not in {t.__name__ for t in root_agent.tools}
 
 
 def test_the_nudge_is_declared_as_an_outbound_write():

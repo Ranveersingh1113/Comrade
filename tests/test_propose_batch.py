@@ -10,13 +10,16 @@ and_approvable is THE test that proves it.
 Partial-failure choice: best-effort, not atomic (see task-6-report.md for the
 reasoning). An item whose tool_name has no executor fails on its own; the
 rest of the batch still queues and still shares the batch_id.
-"""
-from types import SimpleNamespace
 
+The MODEL-facing wrapper around this, team_propose_batch, was removed
+2026-09-04: approvals move into the thread that asked for them, and grouping
+unrelated-looking cards solves a problem the detached inbox had. What is left
+here is shared.consent.propose_batch, which still writes the batch_id the
+frontend groups historical rows by. It goes when the inbox does.
+"""
 import psycopg
 import pytest
 
-from agent.tools import team_propose_batch
 from shared.config import settings
 from shared.consent import approve_consent, propose_action, propose_batch, reject_consent
 from tests._seed import A1, A2, TEAM_A, TEAM_B
@@ -26,10 +29,6 @@ def _admin():
     conn = psycopg.connect(settings.comrade_db_url_admin)
     conn.autocommit = True
     return conn
-
-
-def _ctx(team_id=TEAM_A, requester_id=A1):
-    return SimpleNamespace(state={"team_id": team_id, "requester_id": requester_id})
 
 
 def _task_create(title, assignee=A2):
@@ -191,27 +190,3 @@ def test_an_invalid_item_fails_on_its_own_without_sinking_the_rest(seeded):
 def test_propose_batch_rejects_an_empty_list(seeded):
     with pytest.raises(ValueError):
         propose_batch(TEAM_A, A1, [])
-
-
-# ---------------------------------------------------------------------------
-# The ADK wrapper binds ids from session state, never from model arguments
-# (same rule test_task_tools.py proves for task_propose_update).
-# ---------------------------------------------------------------------------
-
-def test_the_batch_wrapper_binds_ids_from_state_not_arguments(seeded):
-    result = team_propose_batch(
-        [_task_create("from the wrapper")],
-        _ctx(team_id=TEAM_A, requester_id=A1),
-    )
-    consent_id = result["items"][0]["consent_id"]
-
-    conn = _admin()
-    try:
-        requester_id, team_id = conn.execute(
-            "select requesting_member_id, team_id from public.consent_queue where id=%s",
-            (consent_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    assert str(requester_id) == A1
-    assert str(team_id) == TEAM_A

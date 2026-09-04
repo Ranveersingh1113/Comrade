@@ -496,11 +496,16 @@ _EXECUTORS = {
 
 # What the MODEL may name in a proposal, which is not the same set as what can
 # be executed. Until member_depart existed the two were identical and nothing
-# had to say so: agent/tools.py hands team_propose_batch's LLM-chosen
-# tool_name straight to propose_action, and the `not in _EXECUTORS` check
-# happened to reject everything else. That validation was accidental — a side
-# effect of the executor map being two entries long — and adding a third entry
-# would have quietly given the agent a new verb.
+# had to say so: team_propose_batch used to hand an LLM-chosen tool_name
+# straight to propose_action, and the `not in _EXECUTORS` check happened to
+# reject everything else. That validation was accidental — a side effect of
+# the executor map being two entries long — and adding a third entry would
+# have quietly given the agent a new verb.
+#
+# That tool was removed 2026-09-04, so today no model-chosen name reaches
+# here: every proposal tool hardcodes its own action. This set is now the
+# belt to that braces, and it stays — held by construction is not the same
+# as checked, and the construction is one refactor away from changing.
 #
 # It must never gain member_depart. Not because the agent could remove anyone
 # (it cannot; the key stays with the member) but because "Comrade suggests you

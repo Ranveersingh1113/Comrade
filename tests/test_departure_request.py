@@ -158,46 +158,26 @@ def test_a_stranger_cannot_resolve_your_card(seeded, admin):
     ).fetchone()[0] == "active"
 
 
-def test_the_agent_cannot_propose_a_departure(seeded):
-    """team_propose_batch is the one place a tool name chosen by the MODEL
-    reaches the consent queue.
+def test_the_agent_cannot_propose_a_departure():
+    """The invariant survives the tool that used to carry it.
 
-    Before member_depart existed, propose_action's `not in _EXECUTORS` check
-    rejected everything unexpected — accidental validation that came from the
-    executor map being two entries long. Adding a third would have handed the
-    model a new verb, and 'Comrade suggests you leave the team' is not a card
-    this product puts in anyone's inbox.
+    This was asserted through team_propose_batch, which was the one place a
+    tool name chosen by the MODEL reached the consent queue. That tool was
+    removed 2026-09-04, so the property now holds by construction — every
+    remaining proposal tool hardcodes its own action name and the model
+    cannot supply one.
+
+    Held by construction is not the same as checked, and this is a security
+    property, so it is re-anchored on the set itself rather than deleted with
+    the tool. member_depart executes fine; the bar it fails is "should the
+    MODEL be able to name this", because "Comrade suggests you leave the team"
+    is not a card this product puts in anyone's inbox — and the pending-hash
+    index means such a card would block the real one a teammate tried to send.
     """
-    from unittest.mock import MagicMock
+    from shared.consent import AGENT_PROPOSABLE
 
-    from agent.tools import team_propose_batch
-
-    ctx = MagicMock()
-    ctx.state = {"team_id": TEAM_A, "requester_id": A2}
-    result = team_propose_batch(
-        [{"tool_name": "member_depart", "args": {"user_id": A2}}], ctx
-    )
-    assert result["items"][0]["status"] == "failed"
-    assert "not a tool the agent may propose" in result["items"][0]["error"]
-
-
-def test_a_refused_name_does_not_discard_the_rest_of_the_batch(seeded):
-    """propose_batch's partial-failure contract, kept by the new check."""
-    from unittest.mock import MagicMock
-
-    from agent.tools import team_propose_batch
-
-    ctx = MagicMock()
-    ctx.state = {"team_id": TEAM_A, "requester_id": A1}
-    result = team_propose_batch(
-        [
-            {"tool_name": "task_create", "args": {"assignee_id": A2, "title": "real"}},
-            {"tool_name": "member_depart", "args": {"user_id": A1}},
-        ],
-        ctx,
-    )
-    statuses = sorted(i["status"] for i in result["items"])
-    assert statuses == ["failed", "pending"]
+    assert "member_depart" not in AGENT_PROPOSABLE
+    assert AGENT_PROPOSABLE == {"task_create", "task_update", "repo_open_pr"}
 
 
 # ---------------------------------------------------------------------------

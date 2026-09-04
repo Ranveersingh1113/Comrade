@@ -39,5 +39,10 @@ markers = [
   # gets checked. Slow, network-dependent, and opens a real pull request, so
   # it runs before a merge rather than on every commit.
   "realgithub: clones and opens a pull request on a real repository",
+  # The four-person scenario (sim/scenario.py --check) against the real API,
+  # a running pipeline worker and a real GitHub repo. Minutes long and needs
+  # infrastructure the default gate doesn't assume is up; run explicitly with
+  # scripts/gates.sh --with-agent-eval.
+  "scenario: runs the live team scenario end to end; slow, needs the worker",
 ]
-addopts = "-m 'not live and not realgithub'"
+addopts = "-m 'not live and not realgithub and not scenario'"

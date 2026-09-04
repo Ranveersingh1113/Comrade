@@ -21,12 +21,19 @@ import httpx
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from evaluation.team_scenario import score_team_scenario  # noqa: E402
 from shared.db import user_session  # noqa: E402
 
 API = "http://localhost:8000"
 STATE = json.loads((Path(__file__).resolve().parent / "state.json").read_text())
 TEAM = STATE["team_id"]
 WHO = {p["tag"]: p for p in STATE["people"]}
+
+#: Set from main() before anything runs. False keeps today's behaviour
+#: (print and continue, exit 0 no matter what); True makes ask(), the clone
+#: wait and _reset_room() raise instead of swallowing, and main() exits
+#: non-zero when score_team_scenario says the run failed.
+CHECK_MODE = False
 
 
 def _refresh_tokens() -> None:
@@ -85,6 +92,11 @@ def ask(tag: str, text: str, thread: str = "group") -> dict:
         print(f"  {'COMRADE':14} [{resp.status_code}] {resp.text[:160]}")
         TRANSCRIPT.append({"kind": "error", "who": person["name"],
                            "text": text, "detail": resp.text[:300]})
+        if CHECK_MODE:
+            raise RuntimeError(
+                f"agent turn failed for {person['name']}: "
+                f"{resp.status_code} {resp.text[:200]}"
+            )
         return {}
     body = resp.json()
     reply = (body.get("reply") or "").strip()
@@ -93,7 +105,8 @@ def ask(tag: str, text: str, thread: str = "group") -> dict:
     TRANSCRIPT.append({"kind": "agent", "asked_by": person["name"],
                        "question": text, "reply": reply,
                        "seconds": round(took, 1),
-                       "run_id": body.get("run_id")})
+                       "run_id": body.get("run_id"),
+                       "user_message_id": body.get("user_message_id")})
     return body
 
 
@@ -131,12 +144,28 @@ def connect_repo() -> None:
     print(f"\n  [Priya installs the App and connects {REPO}]")
 
 
+#: Tables cleared per team_id on a reset. memory_citations is deliberately
+#: NOT here: it has no team_id column (source_id is polymorphic, validated in
+#: app rather than by FK — see the init migration), so a team_id-scoped
+#: delete against it always raised and was always swallowed. Its rows go
+#: away anyway when the memory_versions row that owns them is deleted below
+#: (version_id references memory_versions on delete cascade).
+_RESET_TABLES = ("memory_versions", "memory_pages", "consent_queue", "tasks",
+                  "agent_steps", "agent_runs", "messages", "github_repos",
+                  "github_installations", "jobs")
+
+
 def _reset_room() -> None:
     """Clear the room so a re-run measures one conversation, not three.
 
     Admin, and only here: a scenario that appended to a previous run's chat
     would have the wiki compiling the same decisions repeatedly and the agent
     answering from a history no real team would have.
+
+    Under CHECK_MODE a delete that fails is not swallowed: it names the
+    table and the error and raises, so a broken cleanup fails the check
+    instead of quietly leaving stale rows for the next run to score against.
+    Without it the behaviour is what it always was — print nothing, move on.
     """
     import psycopg
 
@@ -144,18 +173,153 @@ def _reset_room() -> None:
 
     conn = psycopg.connect(settings.comrade_db_url_admin)
     conn.autocommit = True
-    for table in ("memory_citations", "memory_versions", "memory_pages",
-                  "consent_queue", "tasks", "agent_steps", "agent_runs",
-                  "messages", "github_repos", "github_installations", "jobs"):
+    for table in _RESET_TABLES:
         try:
             conn.execute(f"delete from public.{table} where team_id = %s",
                          (TEAM,))
-        except Exception:  # noqa: BLE001 - a few have no team_id; skip those
-            pass
+        except Exception as exc:  # noqa: BLE001 - reported below, not silent
+            if CHECK_MODE:
+                conn.close()
+                raise RuntimeError(f"reset cleanup failed on {table}: {exc}") from exc
     conn.close()
 
 
+def _collect_evidence() -> dict:
+    """Read back everything score_team_scenario needs to judge this run.
+
+    Admin only, and only here — reading for assessment, the same pattern
+    _reset_room and the tool-routing eval (evaluation/run.py) already use.
+    It is also the only option: `authenticated` has no SELECT on agent_runs
+    or agent_steps at all (20260830090000_close_agent_runs_leak.sql revoked
+    it after a private-thread leak), so a member-scoped read could not do
+    this even if it were the right role for it.
+
+    Never includes an access token. Nothing selected below is one — state.json
+    and WHO hold those in memory for the run and neither is touched here.
+    """
+    import psycopg
+
+    from shared.config import settings
+
+    run_ids = [t["run_id"] for t in TRANSCRIPT
+               if t.get("kind") == "agent" and t.get("run_id")]
+    # Every message that was itself the INPUT to an agent turn (say() chat
+    # is not; ask() is — see TurnResponse.user_message_id in server/app.py).
+    # score_team_scenario uses this to tell a compiled fact that cites plain
+    # room chat from one that cites only what someone asked Comrade to do.
+    agent_input_message_ids = [t["user_message_id"] for t in TRANSCRIPT
+                                if t.get("kind") == "agent" and t.get("user_message_id")]
+    http_errors = [t for t in TRANSCRIPT if t.get("kind") == "error"]
+
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+
+    runs: list[dict] = []
+    steps: list[dict] = []
+    if run_ids:
+        run_rows = conn.execute(
+            "select id, input_tokens, output_tokens, created_at, finished_at"
+            " from public.agent_runs where id = any(%s::uuid[])",
+            (run_ids,),
+        ).fetchall()
+        by_id = {str(r[0]): r for r in run_rows}
+        for rid in run_ids:  # TRANSCRIPT order == chronological order
+            row = by_id.get(rid)
+            if row is None:
+                continue
+            _id, in_tok, out_tok, created, finished = row
+            seconds = (finished - created).total_seconds() if finished else 0.0
+            runs.append({"input_tokens": in_tok or 0, "output_tokens": out_tok or 0,
+                         "seconds": seconds})
+
+        step_rows = conn.execute(
+            "select run_id, seq, type, tool, response"
+            " from public.agent_steps where run_id = any(%s::uuid[])"
+            " order by seq",
+            (run_ids,),
+        ).fetchall()
+        run_order = {rid: i for i, rid in enumerate(run_ids)}
+        step_rows.sort(key=lambda r: run_order.get(str(r[0]), len(run_ids)))
+        steps = [{"type": type_, "tool": tool, "response": response}
+                 for _rid, _seq, type_, tool, response in step_rows]
+
+    consent_rows = conn.execute(
+        "select id, tool_name, status from public.consent_queue where team_id = %s",
+        (TEAM,),
+    ).fetchall()
+    task_consents = [{"id": str(cid), "status": status}
+                      for cid, tool_name, status in consent_rows
+                      if tool_name == "task_create"]
+    pr_consents = [{"id": str(cid), "status": status}
+                    for cid, tool_name, status in consent_rows
+                    if tool_name == "repo_open_pr"]
+
+    fact_rows = conn.execute(
+        "select id, fact from public.memory_versions"
+        " where team_id = %s and is_active = true",
+        (TEAM,),
+    ).fetchall()
+    version_ids = [str(vid) for vid, _fact in fact_rows]
+    citations_by_version: dict[str, list[str]] = {vid: [] for vid in version_ids}
+    if version_ids:
+        # source_id is polymorphic (message/document/github — see
+        # memory_citations' comment in the init migration); score_team_scenario
+        # only cares whether it lands in agent_input_message_ids, so any kind
+        # of source_id is fine to hand it unfiltered.
+        citation_rows = conn.execute(
+            "select version_id, source_id from public.memory_citations"
+            " where version_id = any(%s::uuid[])",
+            (version_ids,),
+        ).fetchall()
+        for vid, source_id in citation_rows:
+            citations_by_version[str(vid)].append(str(source_id))
+    memory_facts = [{"fact": fact, "citations": citations_by_version[str(vid)]}
+                     for vid, fact in fact_rows]
+
+    cloned_row = conn.execute(
+        "select last_cloned_at from public.github_repos"
+        " where team_id = %s and repo_full_name = %s", (TEAM, REPO),
+    ).fetchone()
+    conn.close()
+
+    return {
+        "runs": runs,
+        "http_errors": http_errors,
+        "repo_cloned": bool(cloned_row and cloned_row[0]),
+        "task_consents": task_consents,
+        "pr_consents": pr_consents,
+        "memory_facts": memory_facts,
+        "agent_input_message_ids": agent_input_message_ids,
+        "steps": steps,
+    }
+
+
+def _write_evidence(evidence: dict, path: Path | None = None) -> Path:
+    """Write the evidence artifact next to transcript.json.
+
+    Refuses to write any of WHO's actual access tokens. Nothing built by
+    _collect_evidence should ever carry one, but this is cheap insurance
+    against the day a field is added that does. Checked against the live
+    token VALUES rather than the word "token" — a repo_run's stdout or a
+    GitHub API tool result can legitimately contain that word (e.g. a
+    Python "invalid syntax" traceback, or a field named token_type), and a
+    keyword match on those is a false alarm that would abort a good run.
+    """
+    if path is None:
+        path = Path(__file__).resolve().parent / "evidence.json"
+    blob = json.dumps(evidence, indent=2, default=str)
+    leaked = [p["name"] for p in WHO.values() if p.get("token") and p["token"] in blob]
+    if leaked:
+        raise ValueError(
+            f"evidence contains an access token for: {leaked}; refusing to write it"
+        )
+    path.write_text(blob, encoding="utf-8")
+    return path
+
+
 def main() -> None:
+    global CHECK_MODE
+    CHECK_MODE = "--check" in sys.argv
     _refresh_tokens()
     _reset_room()
     print("=" * 72)
@@ -204,6 +368,8 @@ def main() -> None:
             break
     else:
         print("  [NOT CLONED after 2 minutes]")
+        if CHECK_MODE:
+            raise RuntimeError("repository did not clone within 2 minutes")
 
     ask("marcus", "What's currently in our repository?")
 
@@ -237,6 +403,22 @@ def main() -> None:
     out = Path(__file__).resolve().parent / "transcript.json"
     out.write_text(json.dumps(TRANSCRIPT, indent=2), encoding="utf-8")
     print(f"\n[transcript → {out}]")
+
+    evidence = _collect_evidence()
+    evidence_path = _write_evidence(evidence)
+    print(f"[evidence → {evidence_path}]")
+
+    result = score_team_scenario(evidence)
+    print()
+    print("=" * 72)
+    print("SCENARIO " + ("PASSED" if result["passed"] else "FAILED"))
+    print("=" * 72)
+    for failure in result["failures"]:
+        print(f"  - {failure}")
+    print(f"  metrics: {result['metrics']}")
+
+    if CHECK_MODE and not result["passed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

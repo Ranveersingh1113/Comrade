@@ -19,18 +19,26 @@ cd "$(dirname "$0")/.."
 
 RESET=0
 QUICK=0
+AGENT_EVAL=0
 for arg in "$@"; do
   case "$arg" in
-    --with-reset) RESET=1 ;;
-    --quick)      QUICK=1 ;;
+    --with-reset)      RESET=1 ;;
+    --quick)           QUICK=1 ;;
+    --with-agent-eval) AGENT_EVAL=1 ;;
     -h|--help)
       cat <<'USAGE'
-usage: scripts/gates.sh [--quick] [--with-reset]
+usage: scripts/gates.sh [--quick] [--with-reset] [--with-agent-eval]
 
-  --quick        skip the slow lanes (browser e2e, real GitHub)
-  --with-reset   also rebuild the database from migrations.
-                 DESTRUCTIVE: drops every local row, including any repository
-                 you have connected. Off by default for that reason.
+  --quick             skip the slow lanes (browser e2e, real GitHub)
+  --with-reset        also rebuild the database from migrations.
+                       DESTRUCTIVE: drops every local row, including any
+                       repository you have connected. Off by default for
+                       that reason.
+  --with-agent-eval   run the team-scenario scorer tests plus the live
+                       four-person scenario (sim/scenario.py --check)
+                       against the real API and a real GitHub repo. Minutes
+                       long; needs sim/setup.py to have been run at least
+                       once already. Off by default for that reason.
 USAGE
       exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -126,6 +134,34 @@ if [ "$QUICK" -eq 0 ]; then
   # Skips itself cleanly when no credential is configured.
   step "real GitHub end to end"
   uv run pytest -m realgithub -q
+fi
+
+if [ "$AGENT_EVAL" -eq 1 ]; then
+  step "agent eval (deterministic scorer tests)"
+  uv run pytest tests/test_team_scenario_scoring.py -q
+
+  api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
+  case "$api_health" in
+    *'"database":"ok"'*) ;;
+    *)
+      echo "the API on :8000 is not answering (or can't reach the db); the" >&2
+      echo "live scenario needs it: uv run uvicorn server.app:app --port 8000" >&2
+      exit 1 ;;
+  esac
+
+  # The live scenario needs the pipeline worker to clone the repo. Started
+  # and stopped HERE, around just this step: the precondition check above
+  # already established no worker was running when this script started, and
+  # a worker left running after this block would silently break every other
+  # gate that shares this machine (the queue tests drain jobs against
+  # themselves — see the comment on that check).
+  step "agent eval (live four-person scenario)"
+  uv run python -m pipeline.worker &
+  worker_pid=$!
+  trap 'kill "$worker_pid" 2>/dev/null || true' EXIT
+  uv run python -m sim.scenario --check
+  kill "$worker_pid" 2>/dev/null || true
+  trap - EXIT
 fi
 
 if [ "$RESET" -eq 1 ]; then

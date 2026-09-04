@@ -256,6 +256,26 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
 # ---------- human-side resolution (authorization happens here, via RLS) ----------
 # The approver acts as themselves; RLS (au_consent_queue_update: requester only)
 # is the authorization. execute_consent below never receives the approver id.
+#
+# 🔴 AND THE TEAM IS NOT RLS'S JOB HERE. Two policies cover this table and
+# neither covers both halves:
+#
+#   au_consent_queue_update   requesting_member_id = auth.uid()   <- no team
+#   ex_consent_queue          team_id = current_team()            <- no owner
+#
+# The requester side is team-blind, so `where id=%s` matched a row in ANY team
+# the caller had a proposal in, and the team_id the caller passed then went
+# straight to execute_consent to open the executor session. Nothing asked
+# whether the row was in that team. server/app.py checks the caller belongs to
+# the team they name, which is a different question.
+#
+# The damage was worst in edit_and_approve, which recomputes the action hash:
+# a mismatched team_id stamped a hash bound to the wrong team onto the row, and
+# no correct call could ever match it again. The item became permanently
+# unexecutable with nothing saying why.
+#
+# So every requester-side statement below carries team_id explicitly. The row
+# either belongs to the named team or is not found.
 
 def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
     """Requester approves a pending item; it executes immediately.
@@ -266,8 +286,8 @@ def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
     with user_session(approver_id) as conn:
         row = conn.execute(
             "update public.consent_queue set status='approved'"
-            " where id=%s and status='pending' returning id",
-            (consent_id,),
+            " where id=%s and team_id=%s and status='pending' returning id",
+            (consent_id, team_id),
         ).fetchone()
     if row is None:
         return {"status": "not_approved", "reason": "not pending or not yours"}
@@ -285,8 +305,9 @@ def reject_consent(
     with user_session(approver_id) as conn:
         row = conn.execute(
             "update public.consent_queue set status='rejected', resolved_at=now(),"
-            " resolution_reason=%s where id=%s and status='pending' returning id",
-            (reason, consent_id),
+            " resolution_reason=%s where id=%s and team_id=%s"
+            " and status='pending' returning id",
+            (reason, consent_id, team_id),
         ).fetchone()
     return {"status": "rejected" if row is not None else "not_found"}
 
@@ -298,17 +319,20 @@ def edit_and_approve(
     with user_session(approver_id) as conn:
         row = conn.execute(
             "select tool_name, requesting_member_id from public.consent_queue"
-            " where id=%s and status='pending'",
-            (consent_id,),
+            " where id=%s and team_id=%s and status='pending'",
+            (consent_id, team_id),
         ).fetchone()
         if row is None:
             return {"status": "not_approved", "reason": "not pending or not yours"}
         tool_name, requester_id = row
+        # Safe to bind team_id into the hash now, and only now: the select
+        # above proved the row is in that team. Before it did, this line wrote
+        # a hash the row could never match again.
         new_hash = compute_hash(tool_name, team_id, str(requester_id), new_args)
         conn.execute(
             "update public.consent_queue set tool_args=%s, action_hash=%s,"
-            " status='edited' where id=%s",
-            (Json(new_args), new_hash, consent_id),
+            " status='edited' where id=%s and team_id=%s",
+            (Json(new_args), new_hash, consent_id, team_id),
         )
     return execute_consent(team_id, consent_id)
 

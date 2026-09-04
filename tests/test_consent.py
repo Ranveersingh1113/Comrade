@@ -5,7 +5,7 @@ import pytest
 
 from shared.config import settings
 from shared.consent import ConsentError, compute_hash, execute_consent, propose_action
-from tests._seed import A1, A2, TEAM_A
+from tests._seed import A1, A2, TEAM_A, TEAM_B
 
 
 def _admin():
@@ -209,3 +209,109 @@ def test_proposing_a_tool_with_no_executor_is_refused_at_propose_time():
     """
     with pytest.raises(ConsentError, match="no executor"):
         propose_action(TEAM_A, A1, "post_group_message", {"text": "hi"})
+
+
+# ---------------------------------------------------------------------------
+# The team the caller names is not the team the row belongs to
+# ---------------------------------------------------------------------------
+# Two policies, and between them a seam:
+#
+#   au_consent_queue_update   requesting_member_id = auth.uid()   <- no team
+#   ex_consent_queue          team_id = current_team()            <- no owner
+#
+# The requester side is team-blind. So every resolution function took a
+# team_id from its caller, filtered the row by id alone, and then handed that
+# unverified team_id to execute_consent, which opens the executor session with
+# it. Nothing ever asked whether the row was in that team.
+#
+# server/app.py calls require_membership(user_id, req.team_id) first, so the
+# caller does have to belong to the team they name — it just need not be the
+# team the consent row is in. Anyone in two teams can reach this, and so can
+# an honest client that sends the wrong id.
+
+def test_approving_with_another_teams_id_does_not_resolve_the_row(seeded):
+    """The row must not move. Today it lands in 'approved' and stays there:
+    the requester-side update matches on id alone and succeeds, and then
+    execute_consent finds nothing under the other team's session and returns
+    a noop — leaving a row that was never executed marked as approved."""
+    from shared.consent import approve_consent
+
+    consent_id = _propose("wrong team on approve")
+    result = approve_consent(TEAM_B, consent_id, A1)
+
+    conn = _admin()
+    try:
+        status = conn.execute(
+            "select status from public.consent_queue where id=%s", (consent_id,)
+        ).fetchone()[0]
+        assert status == "pending", (
+            f"a consent row in team A moved to {status!r} on a call naming"
+            " team B"
+        )
+        assert _task_count(conn, "wrong team on approve") == 0
+    finally:
+        conn.close()
+    assert result["status"] != "executed"
+
+
+def test_rejecting_with_another_teams_id_does_not_resolve_the_row(seeded):
+    """reject_consent never used its team_id at all — the parameter was
+    decorative, and the row was rejected on the strength of ownership alone."""
+    from shared.consent import reject_consent
+
+    consent_id = _propose("wrong team on reject")
+    reject_consent(TEAM_B, consent_id, A1, "no")
+
+    conn = _admin()
+    try:
+        status = conn.execute(
+            "select status from public.consent_queue where id=%s", (consent_id,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert status == "pending", (
+        f"a consent row in team A was {status!r} by a call naming team B"
+    )
+
+
+def test_editing_with_another_teams_id_does_not_brick_the_row(seeded):
+    """🔴 The one that does lasting damage.
+
+    edit_and_approve recomputes the action hash — and it bound it to the
+    team_id the CALLER passed, not the team the row is in. A wrong id
+    therefore wrote a hash bound to the other team and flipped the row to
+    'edited'. The execute that follows finds nothing under that team, so the
+    row survives carrying a hash it can never match: a later, correct call
+    computes the hash with the real team, gets a mismatch, and raises. The
+    item is permanently unexecutable and nothing says why.
+
+    Assert on the hash, not just the status — the status is recoverable and
+    the hash is not.
+    """
+    from shared.consent import edit_and_approve
+
+    consent_id = _propose("wrong team on edit")
+    conn = _admin()
+    try:
+        before = conn.execute(
+            "select action_hash from public.consent_queue where id=%s",
+            (consent_id,),
+        ).fetchone()[0]
+        edit_and_approve(
+            TEAM_B, consent_id, A1,
+            {"assignee_id": A2, "title": "edited", "description": None,
+             "deadline": None},
+        )
+        after, status = conn.execute(
+            "select action_hash, status from public.consent_queue where id=%s",
+            (consent_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert after == before, (
+        "a call naming the wrong team rewrote the action hash. The row can no"
+        " longer be executed by anyone: the stored hash is bound to a team the"
+        " row is not in."
+    )
+    assert status == "pending", f"row moved to {status!r}"

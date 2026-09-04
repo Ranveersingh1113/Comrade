@@ -226,6 +226,20 @@ def test_errored_repo_run_between_edit_and_proposal_does_not_count_as_verificati
     assert any("verif" in f for f in r["failures"])
 
 
+def test_failed_repo_run_between_edit_and_proposal_does_not_count_as_verification():
+    evidence = _healthy_evidence()
+    evidence["steps"] = [
+        {"type": "tool_call", "tool": "repo_edit", "response": None},
+        {"type": "tool_call", "tool": "repo_run", "response": None},
+        {"type": "tool_result", "tool": "repo_run",
+         "response": {"exit_code": 1, "timed_out": False}},
+        {"type": "tool_call", "tool": "repo_propose_pr", "response": None},
+    ]
+    r = score_team_scenario(evidence)
+    assert not r["passed"]
+    assert any("verif" in f for f in r["failures"])
+
+
 def test_evidence_writer_refuses_to_write_a_live_token():
     # ruling 6: state.json holds live JWTs and WHO carries them in memory for
     # the run; the evidence artifact must never end up with one in it. Cheap

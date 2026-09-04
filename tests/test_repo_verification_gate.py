@@ -141,6 +141,16 @@ def test_a_timed_out_run_is_not_verification(checkout, ctx, sandbox):
     assert REFUSAL in result.get("error", ""), result
 
 
+@pytest.mark.parametrize("command", ["python --version", "make"])
+def test_an_inspection_or_untargeted_build_does_not_count_as_verification(
+    checkout, ctx, sandbox, command
+):
+    _edit(ctx)
+    repo_run(command, ctx)
+    result = repo_propose_pr("Add verification", "body", ctx)
+    assert REFUSAL in result.get("error", ""), result
+
+
 def test_a_passing_run_lets_the_proposal_through(checkout, ctx, sandbox):
     """Past the gate. It fails later, on the real git checkout this fixture
     does not build — asserting the refusal is ABSENT is the whole point, since

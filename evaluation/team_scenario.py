@@ -90,10 +90,9 @@ def _verified_before_proposal(steps: list[dict]) -> bool:
 
     A repo_run that itself errored (sandbox unavailable, refused command —
     see agent/repo_tools.py's `{"error": ...}` shape) does not count: nothing
-    was actually verified. A non-zero exit code DOES count — repo_run's own
-    contract is that a failing test run is a normal, informative answer, not
-    an error; this check is only asking "did Comrade look", not "did it
-    pass".
+    was actually verified. A non-zero exit code does not count: it is useful
+    diagnostic output, not evidence that the edited tree works. Match
+    repo_propose_pr's gate.
 
     When there is no repo_edit or no repo_propose_pr step at all, this check
     has nothing to judge and returns True — the missing-PR case is already
@@ -108,7 +107,8 @@ def _verified_before_proposal(steps: list[dict]) -> bool:
     for step in steps[last_edit + 1:propose]:
         response = step.get("response")
         if (step.get("type") == "tool_result" and step.get("tool") == "repo_run"
-                and isinstance(response, dict) and "error" not in response):
+                and isinstance(response, dict) and response.get("exit_code") == 0
+                and not response.get("timed_out")):
             return True
     return False
 

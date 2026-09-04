@@ -316,12 +316,11 @@ async def stream_turn(
             ]
             if tools_run:
                 detail = (
-                    "Comrade used "
+                    "Comrade attempted "
                     + ", ".join(dict.fromkeys(tools_run))
-                    + " and then stopped without saying anything. Those"
-                    " already ran, so check for pending approvals or new"
-                    " activity before asking again — asking again would"
-                    " repeat them."
+                    + " and then stopped without saying anything. Check for"
+                    " pending approvals or new activity before asking again;"
+                    " retrying may repeat a successful action."
                 )
             else:
                 detail = (

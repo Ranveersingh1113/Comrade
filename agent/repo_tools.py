@@ -349,6 +349,13 @@ NEEDS_VERIFICATION = (
 )
 
 
+def _is_verification_command(argv: list[str]) -> bool:
+    """Reject commands that cannot check the edited tree."""
+    return bool(argv) and not any(
+        arg in {"--help", "-h", "--version", "-V"} for arg in argv[1:]
+    ) and not (argv[0] == "make" and len(argv) == 1)
+
+
 def _note_edit(tool_context: ToolContext) -> None:
     """One more unverified change. Called only where a write actually happened
     — a refused edit must not invalidate a genuine verification, or the agent
@@ -581,7 +588,8 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
             logger.debug("could not resolve the environment: %s", exc)
 
     try:
-        result = run_contained(shlex.split(checked), root=root, deps=deps)
+        argv = shlex.split(checked)
+        result = run_contained(argv, root=root, deps=deps)
     except SandboxError as exc:
         return {"error": str(exc), "environment": environment}
 
@@ -606,6 +614,7 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     # A non-zero exit is a normal answer for REPORTING (see this tool's
     # docstring) and is not evidence the change works, which is the only
     # question the proposal gate asks.
-    if result.get("exit_code") == 0 and not result.get("timed_out"):
+    if (_is_verification_command(argv) and result.get("exit_code") == 0
+            and not result.get("timed_out")):
         _note_verified(tool_context)
     return result

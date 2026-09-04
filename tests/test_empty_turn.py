@@ -346,3 +346,4 @@ def test_a_silent_turn_that_ran_a_tool_does_not_claim_nothing_changed(
         "the member is not told WHICH tool ran, so they cannot go look for"
         f" what it did. detail was: {detail!r}"
     )
+    assert "attempted" in detail and "already ran" not in detail, detail

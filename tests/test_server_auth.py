@@ -4,20 +4,20 @@ These tests deliberately avoid the database — they assert that requests are
 rejected *before* any handler logic runs, which is the property that matters.
 """
 import time
-from contextlib import nullcontext
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
-from server.app import ThreadScope, app
+from server.app import app
 from server.auth import _decode
 from shared.config import settings
 
 SECRET = "test-jwt-secret-at-least-32-characters-long"
 USER = "11111111-1111-1111-1111-111111111111"
 TEAM = "22222222-2222-2222-2222-222222222222"
+THREAD = "33333333-3333-3333-3333-333333333333"
 
 # Supabase issues ES256 user tokens signed by a key published via JWKS. A test
 # key pair stands in for the auth server's.
@@ -59,7 +59,11 @@ def _token(secret=SECRET, **overrides):
 def _turn(client, headers=None):
     return client.post(
         "/agent/turn",
-        json={"team_id": TEAM, "text": "hello", "thread_type": "private"},
+        # A VALID body, deliberately. Every other test here asserts a 401 or a
+        # 403, and an invalid body could produce a 422 that looks like the
+        # rejection those tests are claiming to prove. The auth boundary has to
+        # be the only reason a request fails.
+        json={"team_id": TEAM, "text": "hello", "thread_id": THREAD},
         headers=headers or {},
     )
 
@@ -122,19 +126,22 @@ def test_es256_token_is_accepted(es256_client, monkeypatch):
     An HS256-only verifier rejects every genuine browser session with
     "The specified alg value is not allowed" — the whole API is unreachable.
     """
+    # Everything past the token check is stubbed, because the subject here is
+    # the token and nothing else. The set tracks /agent/turn's body exactly:
+    # membership, budget, thread resolution, enqueue. When that endpoint stops
+    # calling one of these, this fails loudly at setattr rather than passing on
+    # a stub for a function nobody calls — which is how this file came to
+    # import a ThreadScope that had been deleted.
     monkeypatch.setattr("server.app.require_membership", lambda *_: None)
+    monkeypatch.setattr("server.app._check_turn_budget", lambda *_: None)
+    monkeypatch.setattr("server.app._resolve_thread", lambda *_: THREAD)
     monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **k: {"run_id": "r", "reply": "ok", "steps": []},
+        "server.app.enqueue_turn",
+        lambda *a, **k: "44444444-4444-4444-4444-444444444444",
     )
-    monkeypatch.setattr("server.app._persist_user_message", lambda *a: "m1")
-    monkeypatch.setattr("server.app._persist_ai_reply", lambda *a: "m2")
-    monkeypatch.setattr(
-        "server.app._resolve_thread", lambda *_: ThreadScope("thread", "private", USER)
-    )
-    monkeypatch.setattr("server.app.thread_lock", lambda _: nullcontext(True))
     resp = _turn(es256_client, {"Authorization": f"Bearer {_es256_token()}"})
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "queued"
 
 
 def test_es256_token_signed_by_another_key_is_rejected(es256_client):

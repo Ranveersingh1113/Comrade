@@ -28,7 +28,7 @@ import psycopg
 import pytest
 
 from shared.config import settings
-from tests._seed import A1, A2, B1, TEAM_A, TEAM_B, as_user
+from tests._seed import A1, A2, B1, TEAM_A, TEAM_B, as_user, general_thread
 
 
 @pytest.fixture
@@ -145,9 +145,9 @@ def test_a_member_cannot_upload_into_another_team(seeded):
 def test_a_member_can_post_to_their_own_team(seeded):
     with as_user(A1) as conn:
         conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body) values (%s,'group','user',%s,'hello')",
-            (TEAM_A, A1),
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body) values (%s,%s,'user',%s,'hello')",
+            (TEAM_A, general_thread(conn, TEAM_A), A1),
         )
 
 
@@ -155,17 +155,17 @@ def test_a_member_cannot_post_as_someone_else(seeded):
     with pytest.raises(psycopg.Error):
         with as_user(A1) as conn:
             conn.execute(
-                "insert into public.messages (team_id, thread_type, sender_kind,"
-                " sender_id, body) values (%s,'group','user',%s,'not me')",
-                (TEAM_A, A2),
+                "insert into public.messages (team_id, thread_id, sender_kind,"
+                " sender_id, body) values (%s,%s,'user',%s,'not me')",
+                (TEAM_A, general_thread(conn, TEAM_A), A2),
             )
 
 
 def test_a_member_can_tombstone_their_own_message(seeded, admin):
     mid = admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, sender_id,"
-        " body) values (%s,'group','user',%s,'mine') returning id",
-        (TEAM_A, A1),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id,"
+        " body) values (%s,%s,'user',%s,'mine') returning id",
+        (TEAM_A, general_thread(admin, TEAM_A), A1),
     ).fetchone()[0]
     with as_user(A1, commit=True) as conn:
         conn.execute(

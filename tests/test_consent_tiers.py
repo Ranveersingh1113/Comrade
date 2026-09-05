@@ -4,7 +4,7 @@ import pytest
 
 from shared.config import settings
 from shared.consent import propose_action, resolve_tier
-from tests._seed import A1, A2, TEAM_A, as_user
+from tests._seed import A1, A2, TEAM_A, as_user, general_thread
 
 
 def _admin():
@@ -90,12 +90,13 @@ def test_tombstone_fn_marks_only_ai_messages_and_is_agent_only(seeded):
     conn = _admin()
     try:
         ai_id, user_id = conn.execute(
-            "with a as (insert into public.messages (team_id, thread_type,"
-            " sender_kind, body) values (%s,'group','ai','obs') returning id),"
-            " u as (insert into public.messages (team_id, thread_type,"
-            " sender_kind, sender_id, body) values (%s,'group','user',%s,'hi')"
+            "with a as (insert into public.messages (team_id, thread_id,"
+            " sender_kind, body) values (%s,%s,'ai','obs') returning id),"
+            " u as (insert into public.messages (team_id, thread_id,"
+            " sender_kind, sender_id, body) values (%s,%s,'user',%s,'hi')"
             " returning id) select a.id, u.id from a, u",
-            (TEAM_A, TEAM_A, A1),
+            (TEAM_A, general_thread(conn, TEAM_A), TEAM_A,
+             general_thread(conn, TEAM_A), A1),
         ).fetchone()
     finally:
         conn.close()
@@ -126,10 +127,10 @@ def test_suppress_refuses_a_memory_diff_card(seeded):
     conn = _admin()
     try:
         msg_id = conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind, body)"
-            " values (%s,'group','ai','Memory updated — 2 added, 1 revised, 0 removed.')"
+            "insert into public.messages (team_id, thread_id, sender_kind, body)"
+            " values (%s,%s,'ai','Memory updated — 2 added, 1 revised, 0 removed.')"
             " returning id",
-            (TEAM_A,),
+            (TEAM_A, general_thread(conn, TEAM_A)),
         ).fetchone()[0]
         conn.execute(
             "insert into public.memory_compilations (team_id, trigger, status,"
@@ -172,10 +173,10 @@ def test_suppress_still_works_on_a_plain_observation(seeded):
     conn = _admin()
     try:
         msg_id = conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind, body)"
-            " values (%s,'group','ai','Observation: the doc has not moved.')"
+            "insert into public.messages (team_id, thread_id, sender_kind, body)"
+            " values (%s,%s,'ai','Observation: the doc has not moved.')"
             " returning id",
-            (TEAM_A,),
+            (TEAM_A, general_thread(conn, TEAM_A)),
         ).fetchone()[0]
     finally:
         conn.close()

@@ -25,7 +25,7 @@ import psycopg
 import pytest
 
 from shared.config import settings
-from tests._seed import A1, A2, B1, TEAM_A, as_user
+from tests._seed import A1, A2, B1, TEAM_A, TEAM_B, as_user, general_thread, personal_thread
 
 
 @pytest.fixture
@@ -41,11 +41,11 @@ def admin():
 @pytest.fixture
 def message(admin):
     return str(admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind,"
-        " sender_id, body) values (%s,'group','user',%s,"
+        "insert into public.messages (team_id, thread_id, sender_kind,"
+        " sender_id, body) values (%s,%s,'user',%s,"
         " 'the listing expiry is 90 minutes, that is not negotiable')"
         " returning id",
-        (TEAM_A, A1),
+        (TEAM_A, general_thread(admin, TEAM_A), A1),
     ).fetchone()[0])
 
 
@@ -138,10 +138,10 @@ def test_a_message_from_another_team_is_refused(seeded, admin):
     from tests._seed import TEAM_B
 
     other = str(admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind,"
-        " sender_id, body) values (%s,'group','user',%s,'team B says hello')"
+        "insert into public.messages (team_id, thread_id, sender_kind,"
+        " sender_id, body) values (%s,%s,'user',%s,'team B says hello')"
         " returning id",
-        (TEAM_B, B1),
+        (TEAM_B, general_thread(admin, TEAM_B), B1),
     ).fetchone()[0])
     with pytest.raises(HTTPException) as exc:
         _remember(other, user_id=A1, team_id=TEAM_A)
@@ -157,10 +157,10 @@ def test_a_private_message_cannot_be_remembered(seeded, admin):
     from fastapi import HTTPException
 
     private = str(admin.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body) values (%s,'private',%s,'user',%s,"
+        "insert into public.messages (team_id, thread_id,"
+        " sender_kind, sender_id, body) values (%s,%s,'user',%s,"
         " 'something I only told Comrade') returning id",
-        (TEAM_A, A1, A1),
+        (TEAM_A, personal_thread(admin, TEAM_A, A1), A1),
     ).fetchone()[0])
     with pytest.raises(HTTPException) as exc:
         _remember(private, user_id=A1)

@@ -18,7 +18,7 @@ import psycopg
 import pytest
 
 from shared.config import settings
-from tests._seed import A1, A2, B1, ENTRY_A, TEAM_A, TEAM_B, VER_A, as_user
+from tests._seed import A1, A2, B1, ENTRY_A, TEAM_A, TEAM_B, VER_A, as_user, personal_thread
 
 
 @pytest.fixture
@@ -164,16 +164,18 @@ def test_a_stranger_is_not_in_your_profile_directory(team_a_data):
 def test_a_teammates_private_thread_stays_private(team_a_data, admin):
     """The invariant the whole product rests on, asserted from the read side."""
     admin.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
+        "insert into public.messages (team_id, thread_id,"
         " sender_kind, sender_id, body)"
-        " values (%s,'private',%s,'user',%s,'A1 confided this')",
-        (TEAM_A, A1, A1),
+        " values (%s,%s,'user',%s,'A1 confided this')",
+        (TEAM_A, personal_thread(admin, TEAM_A, A1), A1),
     )
     with as_user(A2) as conn:
         bodies = [
             r[0]
             for r in conn.execute(
-                "select body from public.messages where thread_type='private'"
+                "select m.body from public.messages m"
+                " join public.threads t on t.id = m.thread_id"
+                " where t.visibility = 'restricted'"
             ).fetchall()
         ]
     assert "A1 confided this" not in bodies

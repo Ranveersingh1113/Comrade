@@ -115,3 +115,43 @@ def as_user(uid, commit=False):
 
 def count(conn, sql, params=()):
     return conn.execute(sql, params).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Naming a thread the way tests think about one
+# ---------------------------------------------------------------------------
+# The contract migration (20260904100000) dropped messages.thread_type and
+# messages.thread_owner_id: a message now names its thread by id and nothing
+# else. Tests still reason in terms of "the room" and "that member's private
+# thread", so these translate — rather than every test file growing its own
+# copy of the same two selects, which is what it was doing.
+#
+# Both are LOOKUPS, deliberately. A get-or-create would paper over a thread
+# that should exist and does not, which is a real failure worth seeing: the
+# backfill only made a personal thread for owners who already had a private
+# message, so a member who never wrote one has none until something gives them
+# one.
+
+def general_thread(conn, team_id) -> str:
+    """The team-visible thread every team gets from the backfill."""
+    row = conn.execute(
+        "select id from public.threads where team_id=%s and title='General'",
+        (team_id,),
+    ).fetchone()
+    assert row is not None, f"team {team_id} has no General thread"
+    return str(row[0])
+
+
+def personal_thread(conn, team_id, owner_id) -> str:
+    """That member's restricted thread. Fails loudly when they have none."""
+    row = conn.execute(
+        "select id from public.threads where team_id=%s and owner_id=%s",
+        (team_id, owner_id),
+    ).fetchone()
+    assert row is not None, (
+        f"member {owner_id} has no personal thread in team {team_id}."
+        " The backfill only created one per owner FOUND IN MESSAGES, so a"
+        " member who never wrote a private message has none — create it in"
+        " the test rather than relying on the seed."
+    )
+    return str(row[0])

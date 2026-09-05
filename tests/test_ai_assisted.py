@@ -25,7 +25,7 @@ import psycopg
 import pytest
 
 from shared.config import settings
-from tests._seed import A1, A2, TEAM_A, as_user
+from tests._seed import general_thread, personal_thread, A1, A2, TEAM_A, as_user
 
 
 @pytest.fixture
@@ -47,10 +47,10 @@ def test_a_member_publishes_it_as_themselves(seeded, admin):
     """
     with as_user(A1, commit=True) as conn:
         conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body, ai_assisted) values (%s,'group','user',%s,"
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body, ai_assisted) values (%s,%s,'user',%s,"
             " 'Here is the summary I put together.', true)",
-            (TEAM_A, A1),
+            (TEAM_A, general_thread(conn, TEAM_A), A1),
         )
     row = admin.execute(
         "select sender_kind, sender_id, ai_assisted from public.messages"
@@ -67,9 +67,9 @@ def test_an_ordinary_message_is_not_marked(seeded, admin):
     it, and a backfill that guessed would put it on every message ever sent."""
     with as_user(A1, commit=True) as conn:
         conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body) values (%s,'group','user',%s,'morning all')",
-            (TEAM_A, A1),
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body) values (%s,%s,'user',%s,'morning all')",
+            (TEAM_A, general_thread(conn, TEAM_A), A1),
         )
     assert admin.execute(
         "select ai_assisted from public.messages where body='morning all'"
@@ -83,10 +83,10 @@ def test_an_ai_message_cannot_claim_to_be_ai_assisted(seeded, admin):
     """
     with pytest.raises(psycopg.errors.CheckViolation):
         admin.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body, ai_assisted) values (%s,'group','ai',null,"
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body, ai_assisted) values (%s,%s,'ai',null,"
             " 'I wrote this myself, with my own help', true)",
-            (TEAM_A,),
+            (TEAM_A, general_thread(admin, TEAM_A)),
         )
 
 
@@ -97,10 +97,10 @@ def test_a_member_still_cannot_publish_under_someone_else_s_name(seeded):
     with pytest.raises(psycopg.Error):
         with as_user(A1) as conn:
             conn.execute(
-                "insert into public.messages (team_id, thread_type, sender_kind,"
-                " sender_id, body, ai_assisted) values (%s,'group','user',%s,"
+                "insert into public.messages (team_id, thread_id, sender_kind,"
+                " sender_id, body, ai_assisted) values (%s,%s,'user',%s,"
                 " 'A2 definitely said this', true)",
-                (TEAM_A, A2),
+                (TEAM_A, general_thread(conn, TEAM_A), A2),
             )
 
 
@@ -113,42 +113,45 @@ def test_publishing_is_a_new_message_not_a_move(seeded, admin):
     sender_kind='ai' — which §13 forbids in the room.
     """
     private_id = admin.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body) values (%s,'private',%s,'ai',null,"
+        "insert into public.messages (team_id, thread_id,"
+        " sender_kind, sender_id, body) values (%s,%s,'ai',null,"
         " 'Here is a draft of the summary.') returning id",
-        (TEAM_A, A1),
+        (TEAM_A, personal_thread(admin, TEAM_A, A1)),
     ).fetchone()[0]
 
     with as_user(A1, commit=True) as conn:
         conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body, ai_assisted) values (%s,'group','user',%s,"
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body, ai_assisted) values (%s,%s,'user',%s,"
             " 'Here is a draft of the summary.', true)",
-            (TEAM_A, A1),
+            (TEAM_A, general_thread(conn, TEAM_A), A1),
         )
 
+    # "still private" is a property of the THREAD now, not a column on the
+    # message — the publish must not have moved the original anywhere.
     still_private = admin.execute(
-        "select thread_type, sender_kind from public.messages where id=%s",
+        "select t.visibility, m.sender_kind from public.messages m"
+        " join public.threads t on t.id = m.thread_id where m.id=%s",
         (private_id,),
     ).fetchone()
-    assert still_private == ("private", "ai")
+    assert still_private == ("restricted", "ai")
 
 
 def test_a_teammate_cannot_read_the_private_original(seeded, admin):
     """The boundary publishing must not weaken. A2 sees what A1 chose to
     publish and nothing else from that thread."""
     admin.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body) values (%s,'private',%s,'ai',null,"
+        "insert into public.messages (team_id, thread_id,"
+        " sender_kind, sender_id, body) values (%s,%s,'ai',null,"
         " 'the part A1 decided not to share') returning id",
-        (TEAM_A, A1),
+        (TEAM_A, personal_thread(admin, TEAM_A, A1)),
     )
     with as_user(A1, commit=True) as conn:
         conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body, ai_assisted) values (%s,'group','user',%s,"
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body, ai_assisted) values (%s,%s,'user',%s,"
             " 'the part A1 did share', true)",
-            (TEAM_A, A1),
+            (TEAM_A, general_thread(conn, TEAM_A), A1),
         )
     with as_user(A2) as conn:
         bodies = [

@@ -13,7 +13,7 @@ import pytest
 
 from agent.tools import fetch_member_activity
 from shared.config import settings
-from tests._seed import A1, A2, B1, TEAM_A, TEAM_B
+from tests._seed import A1, A2, B1, TEAM_A, TEAM_B, general_thread
 
 
 @pytest.fixture
@@ -53,10 +53,10 @@ def test_a_recent_message_sets_the_signal(seeded, admin):
 
 def test_days_since_last_signal_counts_from_the_most_recent(seeded, admin):
     admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind,"
+        "insert into public.messages (team_id, thread_id, sender_kind,"
         " sender_id, body, created_at)"
-        " values (%s,'group','user',%s,'old news', now() - interval '9 days')",
-        (TEAM_A, A1),
+        " values (%s,%s,'user',%s,'old news', now() - interval '9 days')",
+        (TEAM_A, general_thread(admin, TEAM_A), A1),
     )
     by_id = {r["user_id"]: r for r in fetch_member_activity(TEAM_A, A1)}
     assert by_id[A1]["days_since_last_signal"] == 9

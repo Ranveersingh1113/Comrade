@@ -18,7 +18,7 @@ def _thread_id(team_id: str, *, private: bool = False) -> str:
         if private:
             row = conn.execute(
                 "select id from public.threads where team_id=%s"
-                " and legacy_thread_owner_id=%s",
+                " and owner_id=%s",
                 (team_id, A1),
             ).fetchone()
         else:

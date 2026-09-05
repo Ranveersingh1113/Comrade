@@ -28,7 +28,7 @@ def _start(summary: str) -> str:
     try:
         row = conn.execute(
             "select id from public.threads where team_id=%s"
-            " and legacy_thread_owner_id=%s",
+            " and owner_id=%s",
             (TEAM_A, A1),
         ).fetchone()
     finally:

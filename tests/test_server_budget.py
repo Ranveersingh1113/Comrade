@@ -35,18 +35,33 @@ def as_a1():
     app.dependency_overrides.clear()
 
 
+#: Any well-formed uuid. _resolve_thread is stubbed, so it is never looked up
+#: — but the body must still VALIDATE, or FastAPI answers 422 and a test
+#: asserting 429 fails for a reason that has nothing to do with the budget.
+THREAD = "33333333-3333-3333-3333-333333333333"
+
+
 def _turn(client):
-    return client.post("/agent/turn", json={"team_id": TEAM_A, "text": "status?"})
+    return client.post(
+        "/agent/turn",
+        json={"team_id": TEAM_A, "text": "status?", "thread_id": THREAD},
+    )
 
 
 def _stub_turn(monkeypatch):
-    """Budget checks must never actually run the agent."""
+    """Budget checks must never actually run the agent.
+
+    The turn endpoint enqueues now instead of running inline, so the names
+    stubbed here follow it: resolve the thread, write the run. run_turn_sync
+    and _persist_ai_reply went with that change, and monkeypatch.setattr
+    raises on a name that no longer exists — which is the behaviour worth
+    having, since a stub for a function nobody calls is a test guarding air.
+    """
+    monkeypatch.setattr("server.app._resolve_thread", lambda *_: THREAD)
     monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **k: {"run_id": "r", "reply": "ok", "steps": []},
+        "server.app.enqueue_turn",
+        lambda *a, **k: "44444444-4444-4444-4444-444444444444",
     )
-    monkeypatch.setattr("server.app._persist_user_message", lambda *a: "m1")
-    monkeypatch.setattr("server.app._persist_ai_reply", lambda *a: "m2")
 
 
 def test_turn_is_refused_once_the_team_hits_its_cap(seeded, as_a1, monkeypatch):
@@ -85,7 +100,8 @@ def test_non_member_gets_403_not_429(seeded, monkeypatch):
     app.dependency_overrides[current_user_id] = lambda: B1
     try:
         resp = TestClient(app).post(
-            "/agent/turn", json={"team_id": TEAM_A, "text": "hi"}
+            "/agent/turn",
+            json={"team_id": TEAM_A, "text": "hi", "thread_id": THREAD},
         )
     finally:
         app.dependency_overrides.clear()

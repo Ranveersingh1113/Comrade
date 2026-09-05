@@ -32,12 +32,16 @@ def _msg(conn, team_id, thread_type, owner, kind, sender, body, order=0):
     TRANSACTION timestamp -- rows written together would otherwise tie. The
     offset also puts these rows after the ones tests/_seed.py wrote.
     """
+    # thread_type/thread_owner_id were dropped by the contract migration
+    # (20260904100000). The signature keeps naming a thread the way these
+    # tests think about it — "the group room", "A1's private thread" — and
+    # resolves it to the canonical id here, so no caller had to change.
     row = conn.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
+        "insert into public.messages (team_id, thread_id,"
         " sender_kind, sender_id, body, created_at)"
-        " values (%s,%s,%s,%s,%s,%s, now() + make_interval(secs => %s))"
+        " values (%s,%s,%s,%s,%s, now() + make_interval(secs => %s))"
         " returning id",
-        (team_id, thread_type, owner, kind, sender, body, order),
+        (team_id, _thread_id(team_id, thread_type, owner), kind, sender, body, order),
     ).fetchone()
     return str(row[0])
 
@@ -54,7 +58,7 @@ def _thread_id(team_id, thread_type, owner=None) -> str:
         else:
             row = conn.execute(
                 "select id from public.threads where team_id=%s"
-                " and legacy_thread_owner_id=%s",
+                " and owner_id=%s",
                 (team_id, owner),
             ).fetchone()
     finally:
@@ -164,8 +168,8 @@ def test_history_does_not_mix_two_visible_team_threads(seeded):
             (TEAM_A, A1),
         ).fetchone()[0]
         conn.execute(
-            "insert into public.messages (team_id, thread_id, thread_type, sender_kind,"
-            " sender_id, body) values (%s,%s,'group','user',%s,'other-thread-marker')",
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body) values (%s,%s,'user',%s,'other-thread-marker')",
             (TEAM_A, other, A2),
         )
     finally:
@@ -183,6 +187,19 @@ def test_history_does_not_mix_two_visible_team_threads(seeded):
 def test_another_members_private_thread_never_appears(seeded):
     conn = _admin()
     try:
+        # A2's personal thread has to be built here. The contract migration
+        # backfilled one restricted thread per (team, owner) FOUND IN
+        # MESSAGES, and the seed only writes a private message for A1 — so A2
+        # has no personal thread until someone gives them one. Created
+        # explicitly rather than teaching _thread_id to get-or-create: a
+        # helper that invents a thread when it cannot find one would hide the
+        # absence from every other test that calls it.
+        conn.execute(
+            "insert into public.threads"
+            " (team_id, title, visibility, kind, created_by, owner_id)"
+            " values (%s,'Private','restricted','discussion',%s,%s)",
+            (TEAM_A, A2, A2),
+        )
         _msg(conn, TEAM_A, "private", A2, "user", A2, "a2-only-secret", 1)
     finally:
         conn.close()

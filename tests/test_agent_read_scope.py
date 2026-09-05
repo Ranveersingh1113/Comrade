@@ -13,7 +13,7 @@ import pytest
 from agent.tools import fetch_team_state, read_memory_page
 from shared.config import settings
 from shared.db import Role, team_session
-from tests._seed import A1, A2, B1, B2, TEAM_A, TEAM_B, as_user, count
+from tests._seed import A1, A2, B1, B2, TEAM_A, TEAM_B, as_user, count, general_thread
 
 
 def _admin():
@@ -47,10 +47,10 @@ def test_agent_role_can_still_insert_its_own_reply(seeded):
     message_id = str(uuid.uuid4())
     with team_session(Role.AGENT, TEAM_A) as conn:
         conn.execute(
-            "insert into public.messages (id, team_id, thread_type,"
-            " thread_owner_id, sender_kind, body)"
-            " values (%s,%s,'group',null,'ai','still works')",
-            (message_id, TEAM_A),
+            "insert into public.messages (id, team_id, thread_id,"
+            " sender_kind, body)"
+            " values (%s,%s,%s,'ai','still works')",
+            (message_id, TEAM_A, general_thread(conn, TEAM_A)),
         )
     conn = _admin()
     try:

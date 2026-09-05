@@ -12,7 +12,25 @@ from psycopg import errors
 from shared.db import Role, team_session
 from tests._seed import (
     A1, A2, ENTRY_A, TEAM_A, TEAM_B, VER_A, as_user, count as _count,
+    personal_thread,
 )
+
+
+@pytest.fixture
+def admin():
+    """Reads only, and only to resolve ids the assertions then hand to a real
+    user session. Nothing here asserts through this connection — it bypasses
+    RLS, which is the thing under test."""
+    import psycopg
+
+    from shared.config import settings
+
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 # ---------- end-user (authenticated) boundaries ----------
@@ -23,11 +41,21 @@ def test_member_sees_only_own_team(seeded):
         assert _count(conn, "select count(*) from public.teams where id=%s", (TEAM_B,)) == 0
 
 
-def test_private_thread_is_owner_only(seeded):
+def test_private_thread_is_owner_only(seeded, admin):
+    """messages.thread_type is gone, so this asks the question by thread id.
+
+    Deliberately NOT `join threads ... where visibility='restricted'`. RLS
+    hides the THREAD from A2 as well, so a join would return zero for A2
+    whether or not they could read the message — the test would pass on the
+    wrong boundary. Resolving the id as admin and handing the same literal to
+    both users leaves exactly one variable: who is asking.
+    """
+    private = personal_thread(admin, TEAM_A, A1)
+    sql = "select count(*) from public.messages where thread_id=%s"
     with as_user(A2) as conn:  # not the owner
-        assert _count(conn, "select count(*) from public.messages where thread_type='private'") == 0
+        assert _count(conn, sql, (private,)) == 0
     with as_user(A1) as conn:  # owner
-        assert _count(conn, "select count(*) from public.messages where thread_type='private'") == 1
+        assert _count(conn, sql, (private,)) == 1
 
 
 def test_member_cannot_author_memory(seeded):

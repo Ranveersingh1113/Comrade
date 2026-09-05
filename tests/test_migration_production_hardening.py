@@ -3,7 +3,7 @@ import psycopg
 import pytest
 
 from shared.config import settings
-from tests._seed import B2, TEAM_A, TEAM_B, VER_A
+from tests._seed import B2, TEAM_A, TEAM_B, VER_A, general_thread
 
 
 @pytest.fixture
@@ -44,9 +44,9 @@ def test_page_titles_are_case_insensitive_per_team(admin, seeded):
 
 def test_citation_cannot_reference_another_teams_message(admin, seeded):
     message_id = admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, sender_id, body)"
-        " values (%s,'group','user',%s,'other team') returning id",
-        (TEAM_B, B2),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,'other team') returning id",
+        (TEAM_B, general_thread(admin, TEAM_B), B2),
     ).fetchone()[0]
     with pytest.raises(psycopg.errors.RaiseException, match="version team"):
         admin.execute(

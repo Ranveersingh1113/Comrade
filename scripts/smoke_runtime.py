@@ -32,7 +32,7 @@ def main() -> None:
         try:
             thread_id = str(conn.execute(
                 "select id from public.threads where team_id=%s"
-                " and legacy_thread_owner_id=%s",
+                " and owner_id=%s",
                 (TEAM_A, A1),
             ).fetchone()[0])
         finally:

@@ -26,11 +26,14 @@ def _thread(admin, team_id, *, visibility="team", title="Thread"):
 
 
 def test_legacy_messages_backfill_to_general_and_private_threads(seeded, admin):
+    # Where a message LIVES is the whole claim now — thread_type is gone, so
+    # the thread's own visibility and title are what say the backfill put each
+    # message in the right place.
     rows = admin.execute(
-        "select m.thread_type, t.visibility, t.title from public.messages m"
-        " join public.threads t on t.id = m.thread_id order by m.thread_type"
+        "select t.visibility, t.title from public.messages m"
+        " join public.threads t on t.id = m.thread_id order by t.title"
     ).fetchall()
-    assert rows == [("group", "team", "General"), ("private", "restricted", "Private")]
+    assert rows == [("team", "General"), ("restricted", "Private")]
 
 
 def test_restricted_thread_metadata_is_hidden_from_outsiders(seeded, admin):
@@ -88,10 +91,10 @@ def test_removing_participant_revokes_thread_message_access(seeded, admin):
             " values (%s,%s,%s,%s)", (thread_id, TEAM_A, user_id, A1)
         )
     message_id = admin.execute(
-        "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
+        "insert into public.messages (team_id, thread_id,"
         " sender_kind, sender_id, body)"
-        " values (%s,%s,'private',%s,'user',%s,'restricted') returning id",
-        (TEAM_A, thread_id, A1, A1),
+        " values (%s,%s,'user',%s,'restricted') returning id",
+        (TEAM_A, thread_id, A1),
     ).fetchone()[0]
     with as_user(A2) as conn:
         assert conn.execute("select id from public.messages where id=%s", (message_id,)).fetchone()
@@ -141,40 +144,34 @@ def test_former_creator_cannot_manage_thread_participants(seeded, admin):
     ).fetchone() is None
 
 
-def test_restricted_thread_rejects_group_legacy_identity(seeded, admin):
-    thread_id = _thread(admin, TEAM_A, visibility="restricted")
-    admin.execute(
-        "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
-        " values (%s,%s,%s,%s)", (thread_id, TEAM_A, A1, A1)
-    )
-    with pytest.raises(psycopg.Error):
-        admin.execute(
-            "insert into public.messages (team_id, thread_id, thread_type, sender_kind,"
-            " sender_id, body) values (%s,%s,'group','user',%s,'not team memory')",
-            (TEAM_A, thread_id, A1),
-        )
+def test_a_message_cannot_be_moved_to_another_thread_after_insert(seeded, admin):
+    """The rule outlived its wording.
 
+    This asserted that thread_type/thread_owner_id were immutable — a message
+    could not be reclassified from group to private after the fact. Those
+    columns went with the contract migration, but the rule did not:
+    trg_thread_identity_guard now covers thread_id alongside team_id,
+    sender_id and sender_kind. Moving a message between threads is the same
+    act the old version forbade, so the test follows the rule rather than
+    retiring with the column.
 
-def test_message_legacy_identity_cannot_change_after_insert(seeded, admin):
+    (Its neighbour, test_legacy_insert_receives_canonical_thread_id, is gone.
+    That one tested the temporary trigger mapping legacy inserts onto
+    canonical threads — scaffolding Task 8 removed on purpose, so there is
+    nothing left for it to protect.)
+    """
+    general = admin.execute(
+        "select id from public.threads where team_id=%s and title='General'",
+        (TEAM_A,),
+    ).fetchone()[0]
+    other = _thread(admin, TEAM_A, title="Release work")
     message_id = admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, sender_id, body)"
-        " values (%s,'group','user',%s,'team message') returning id",
-        (TEAM_A, A1),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,'team message') returning id",
+        (TEAM_A, general, A1),
     ).fetchone()[0]
     with as_user(A1) as conn, pytest.raises(psycopg.errors.RaiseException, match="identity"):
         conn.execute(
-            "update public.messages set thread_type='private', thread_owner_id=%s where id=%s",
-            (A1, message_id),
+            "update public.messages set thread_id=%s where id=%s",
+            (other, message_id),
         )
-
-
-def test_legacy_insert_receives_canonical_thread_id(seeded, admin):
-    message_id = admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, sender_id, body)"
-        " values (%s,'group','user',%s,'legacy write') returning id",
-        (TEAM_A, A1),
-    ).fetchone()[0]
-    thread_id = admin.execute(
-        "select thread_id from public.messages where id=%s", (message_id,)
-    ).fetchone()[0]
-    assert thread_id is not None

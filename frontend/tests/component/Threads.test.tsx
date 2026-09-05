@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { http, HttpResponse } from 'msw';
-import { makeSupabaseMock, makeTeamMock, renderInApp, resetSupa, resetTeam, server, supaState } from './mocks';
+import { makeSupabaseMock, makeTeamMock, renderInApp, resetSupa, resetTeam, server, supaState, teamState } from './mocks';
 
 vi.mock('../../src/lib/supabase', () => makeSupabaseMock());
 vi.mock('../../src/state/TeamContext', () => makeTeamMock());
@@ -81,4 +81,26 @@ test('missing legacy private thread gives the member a route back to threads', a
   render(<MemoryRouter initialEntries={['/t/team-1/thread']}><Routes><Route path="/t/:teamId/thread" element={<LegacyThreadRedirect privateThread />} /></Routes></MemoryRouter>);
   expect(await screen.findByText(/No private thread exists yet/)).toBeInTheDocument();
   expect(screen.getByRole('link', { name: 'View threads' })).toHaveAttribute('href', '/t/team-1/threads');
+});
+
+test('changing member identity resets the mounted thread composer and its send path', async () => {
+  localStorage.setItem('comrade.composerMode.u1.thread-1', 'team');
+  localStorage.setItem('comrade.composerMode.u2.thread-1', 'agent');
+  supaState.tables.threads = [thread];
+  let body: unknown;
+  server.use(http.post('http://localhost:8000/agent/turn/stream', async ({ request }) => {
+    body = await request.json();
+    return new HttpResponse('{"type":"done"}\n');
+  }));
+  const user = userEvent.setup();
+  const app = () => <MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>;
+  const { rerender } = render(app());
+  expect(await screen.findByLabelText('Composer mode: team')).toBeInTheDocument();
+
+  teamState.myUserId = 'u2';
+  rerender(app());
+  expect(await screen.findByLabelText('Composer mode: agent')).toBeInTheDocument();
+  await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'review this');
+  await user.click(screen.getByRole('button', { name: 'SEND' }));
+  await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'review this', thread_id: 'thread-1' }));
 });

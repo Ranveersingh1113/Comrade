@@ -23,6 +23,8 @@ async def _fake_frames(team_id, run_id):
 @pytest.fixture
 def as_a1(monkeypatch):
     monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
+    monkeypatch.setattr("server.app.reserve_turn", lambda *_: 0)
+    monkeypatch.setattr("server.app.record_reservation", lambda *_: None)
     monkeypatch.setattr("server.app._run_frames", _fake_frames)
     app.dependency_overrides[current_user_id] = lambda: A1
     yield TestClient(app)
@@ -94,18 +96,10 @@ def test_non_member_gets_403_not_a_stream(seeded, monkeypatch):
 
 def test_over_budget_gets_429_not_a_stream(seeded, as_a1, monkeypatch):
     monkeypatch.setattr(settings, "agent_turns_per_hour", 1)
-    import psycopg
+    from shared.usage import reserve_turn
 
-    conn = psycopg.connect(settings.comrade_db_url_admin)
-    conn.autocommit = True
-    try:
-        conn.execute(
-            "insert into public.agent_runs (team_id, trigger_type, status)"
-            " values (%s,'user','done')",
-            (TEAM_A,),
-        )
-    finally:
-        conn.close()
+    reserve_turn(TEAM_A)
+    monkeypatch.setattr("server.app.reserve_turn", reserve_turn)
     resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "thread_id": _general_thread(), "text": "hi"})
     assert resp.status_code == 429
 

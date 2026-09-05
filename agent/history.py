@@ -69,3 +69,21 @@ def recent_turns(
         )
         for kind, body, name, visibility, shared in reversed(rows)
     ]
+
+
+def steering_messages(
+    team_id: str, requester_id: str, thread_id: str, run_id: str, seen: list[str],
+) -> list[tuple[str, str]]:
+    """Participant messages added after a run started and not yet shown to it."""
+    with user_session(requester_id) as conn:
+        rows = conn.execute(
+            "select m.id, m.body from public.messages m"
+            " join public.agent_runs r on r.id=%s"
+            " where m.team_id=%s and m.thread_id=%s and m.sender_kind='user'"
+            " and m.id is distinct from r.input_message_id"
+            " and m.created_at >= r.created_at"
+            " and not (m.id = any(%s::uuid[]))"
+            " order by m.created_at, m.id",
+            (run_id, team_id, thread_id, seen),
+        ).fetchall()
+    return [(str(message_id), body) for message_id, body in rows]

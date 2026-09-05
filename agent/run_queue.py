@@ -22,16 +22,27 @@ class Run:
     input_text: str | None = None
 
 
-def enqueue_turn(team_id: str, requester_id: str, thread_id: str, text: str, *, trigger_type: str = "user") -> str:
+class EnqueuedTurn(str):
+    """A run id that preserves the enqueue disposition for the HTTP response."""
+
+    status: str
+
+    def __new__(cls, run_id: str, status: str):
+        value = str.__new__(cls, run_id)
+        value.status = status
+        return value
+
+
+def enqueue_turn(team_id: str, requester_id: str, thread_id: str, text: str, *, trigger_type: str = "user") -> EnqueuedTurn:
     """Durably append the member message and queued turn in one transaction."""
     with user_session(requester_id) as conn:
         row = conn.execute(
-            "select run_id from public.enqueue_agent_turn(%s, %s, %s, %s)",
+            "select run_id, disposition from public.enqueue_agent_turn(%s, %s, %s, %s)",
             (team_id, thread_id, text, trigger_type),
         ).fetchone()
     if row is None:
         raise RuntimeError("enqueue_agent_turn returned no run")
-    return str(row[0])
+    return EnqueuedTurn(str(row[0]), row[1])
 
 
 def _recover(conn) -> int:

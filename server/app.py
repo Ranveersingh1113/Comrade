@@ -218,8 +218,8 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     require_membership(user_id, req.team_id)
     _check_turn_budget(req.team_id)
     thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-    run_id = enqueue_turn(req.team_id, user_id, thread_id, req.text)
-    return TurnResponse(run_id=run_id, status="queued")
+    turn = enqueue_turn(req.team_id, user_id, thread_id, req.text)
+    return TurnResponse(run_id=str(turn), status=getattr(turn, "status", "queued"))
 
 
 async def _run_frames(team_id: str, run_id: str):
@@ -254,8 +254,8 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     require_membership(user_id, req.team_id)
     _check_turn_budget(req.team_id)
     thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-    run_id = await run_in_threadpool(enqueue_turn, req.team_id, user_id, thread_id, req.text)
-    return StreamingResponse(_run_frames(req.team_id, run_id), media_type="application/x-ndjson")
+    turn = await run_in_threadpool(enqueue_turn, req.team_id, user_id, thread_id, req.text)
+    return StreamingResponse(_run_frames(req.team_id, str(turn)), media_type="application/x-ndjson")
 
 
 @app.get("/agent/runs/{run_id}/stream")

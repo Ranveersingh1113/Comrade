@@ -20,9 +20,13 @@ from typing import Any, Optional
 from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools import ToolContext
 from google.adk.tools.base_tool import BaseTool
+from google.genai import types
 
 from agent.capability import CapabilityError, check_command, check_path
+from agent.effects import EffectUncertain, claim_effect, complete_effect
+from agent.history import steering_messages
 from agent.registry import spec_for
+from pipeline.parsers import spotlight
 from shared.workspace import WorkspaceError, workspace_for
 
 
@@ -31,6 +35,27 @@ class ChokepointPlugin(BasePlugin):
 
     def __init__(self) -> None:
         super().__init__(name="chokepoint")
+
+    async def before_model_callback(self, *, callback_context, llm_request) -> None:
+        """Deliver messages that arrived while the preceding tool was running."""
+        state = callback_context.state
+        run_id = state.get("agent_run_id")
+        if not run_id:
+            return None
+        seen = list(state.get("steering_message_ids", []))
+        messages = steering_messages(
+            state["team_id"], state["requester_id"], state["thread_id"], run_id, seen,
+        )
+        if not messages:
+            return None
+        for message_id, body in messages:
+            llm_request.contents.append(types.Content(
+                role="user",
+                parts=[types.Part(text=f"New participant message: {spotlight(body)}")],
+            ))
+            seen.append(message_id)
+        state["steering_message_ids"] = seen
+        return None
 
     async def before_tool_callback(
         self,
@@ -54,8 +79,10 @@ class ChokepointPlugin(BasePlugin):
             # ungated shell — `ToolSpec("sandbox", ...)` and nothing else.
             #
             # Until real containment exists underneath, THIS is the boundary.
-            return self._check_arguments(tool.name, spec, tool_args, tool_context)
-        if spec.needs_human:
+            refusal = self._check_arguments(tool.name, spec, tool_args, tool_context)
+            if refusal is not None:
+                return refusal
+        elif spec.needs_human:
             # Nothing can ask a member mid-turn — approval lives in the consent
             # queue, which a tool must propose INTO rather than wait on. So the
             # honest answer to needs_human is to refuse and say why. An
@@ -74,6 +101,25 @@ class ChokepointPlugin(BasePlugin):
                     " member can approve it."
                 ),
             }
+        run_id = tool_context.state.get("agent_run_id")
+        if not spec.writes or not run_id:
+            return None
+        try:
+            result = claim_effect(
+                tool_context.state["team_id"], run_id, tool.name, tool_args,
+            )
+        except EffectUncertain as exc:
+            return {"error": "effect_interrupted", "reason": str(exc)}
+        return result
+
+    async def after_tool_callback(
+        self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext,
+        result: dict,
+    ) -> Optional[dict]:
+        spec = spec_for(tool.name)
+        run_id = tool_context.state.get("agent_run_id")
+        if spec.writes and run_id:
+            complete_effect(tool_context.state["team_id"], run_id, tool.name, tool_args, result)
         return None
 
     @staticmethod

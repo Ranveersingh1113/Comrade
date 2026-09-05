@@ -215,6 +215,7 @@ async def stream_turn(
                         "requester_id": requester_id,
                         "thread_id": thread_id,
                         "agent_run_id": run_id,
+                        "steering_message_ids": [],
                         # Server-bound like the two above. The repo tools
                         # derive the checkout path from these; the model names
                         # neither, so it cannot ask to work in another team's

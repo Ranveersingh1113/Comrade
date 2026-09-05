@@ -1,19 +1,24 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 import { http, HttpResponse } from 'msw';
 import { makeSupabaseMock, makeTeamMock, renderInApp, resetSupa, resetTeam, server, supaState } from './mocks';
 
 vi.mock('../../src/lib/supabase', () => makeSupabaseMock());
 vi.mock('../../src/state/TeamContext', () => makeTeamMock());
 
-import { Threads } from '../../src/screens/Threads';
+import { LegacyThreadRedirect, Threads } from '../../src/screens/Threads';
 
 const thread = {
   id: 'thread-1', team_id: 'team-1', title: 'Release work', visibility: 'team', kind: 'work',
   work_state: 'planned', owner_id: null, created_by: 'u1', created_at: '2026-09-04T00:00:00Z', updated_at: '2026-09-04T00:00:00Z',
 };
+
+function ThreadRoute() {
+  const navigate = useNavigate();
+  return <><button onClick={() => navigate('/t/team-1/threads/thread-2')}>Open planning</button><Threads /></>;
+}
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterAll(() => server.close());
@@ -58,4 +63,22 @@ test('agent mode sends the canonical thread id', async () => {
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'check the release');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
   await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'check the release', thread_id: 'thread-1' }));
+});
+
+test('switching thread routes resets the visible composer mode for the new thread', async () => {
+  supaState.tables.threads = [
+    thread,
+    { ...thread, id: 'thread-2', title: 'Planning', kind: 'discussion', work_state: null },
+  ];
+  const user = userEvent.setup();
+  render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<ThreadRoute />} /></Routes></MemoryRouter>);
+  expect((await screen.findByLabelText('Composer mode: agent'))).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Open planning' }));
+  expect(await screen.findByLabelText('Composer mode: team')).toBeInTheDocument();
+});
+
+test('missing legacy private thread gives the member a route back to threads', async () => {
+  render(<MemoryRouter initialEntries={['/t/team-1/thread']}><Routes><Route path="/t/:teamId/thread" element={<LegacyThreadRedirect privateThread />} /></Routes></MemoryRouter>);
+  expect(await screen.findByText(/No private thread exists yet/)).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'View threads' })).toHaveAttribute('href', '/t/team-1/threads');
 });

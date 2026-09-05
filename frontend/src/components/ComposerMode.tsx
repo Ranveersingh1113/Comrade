@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 export type ComposerModeValue = 'team' | 'agent';
 
@@ -21,6 +21,9 @@ export function ComposerMode({
   const [mode, setMode] = useState<ComposerModeValue>(
     () => savedComposerMode(userId, threadId, defaultMode),
   );
+  useEffect(() => {
+    setMode(savedComposerMode(userId, threadId, defaultMode));
+  }, [userId, threadId, defaultMode]);
   const choose = (next: ComposerModeValue) => {
     setMode(next);
     localStorage.setItem(storageKey(userId, threadId), next);

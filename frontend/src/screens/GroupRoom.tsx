@@ -37,6 +37,13 @@ export function GroupRoom({ thread }: { thread?: Thread }) {
     return (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
       ?? (thread.kind === 'work' ? 'agent' : 'team');
   });
+  useEffect(() => {
+    if (!thread) return;
+    setComposerMode(
+      (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
+        ?? (thread.kind === 'work' ? 'agent' : 'team'),
+    );
+  }, [myUserId, thread]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);

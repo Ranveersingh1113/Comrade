@@ -77,8 +77,10 @@ export function LegacyThreadRedirect({ privateThread = false }: { privateThread?
   const { teamId } = useParams<{ teamId: string }>();
   const { myUserId } = useTeam();
   const navigate = useNavigate();
+  const [missing, setMissing] = useState(false);
   useEffect(() => {
     if (!teamId) return;
+    setMissing(false);
     let query = supabase.from('threads').select('id').eq('team_id', teamId);
     query = privateThread
       ? query.eq('legacy_thread_owner_id', myUserId)
@@ -86,7 +88,12 @@ export function LegacyThreadRedirect({ privateThread = false }: { privateThread?
     void query.maybeSingle().then(({ data }) => {
       const id = (data as { id: string } | null)?.id;
       if (id) navigate(`/t/${teamId}/threads/${id}`, { replace: true });
-    });
+      else setMissing(true);
+    }).catch(() => setMissing(true));
   }, [teamId, myUserId, privateThread, navigate]);
+  if (missing) return <main style={{ flex: 1, padding: 28 }}>
+    <p>{privateThread ? 'No private thread exists yet.' : 'The General thread is unavailable.'}</p>
+    <Link to={`/t/${teamId}/threads`}>View threads</Link>
+  </main>;
   return <main style={{ flex: 1, padding: 28 }}>Opening thread…</main>;
 }

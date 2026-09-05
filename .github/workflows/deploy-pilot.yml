@@ -1,0 +1,31 @@
+name: Deploy pilot
+
+on:
+  push:
+    branches: [claude/multiplayer-harness]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::276833795981:role/ComradePilotGithubDeploy
+          aws-region: eu-north-1
+      - name: Deploy exact commit through SSM
+        env:
+          INSTANCE_ID: i-0e5e97d751ffbd262
+        run: |
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy Comrade $GITHUB_SHA" \
+            --parameters "commands=[\"cd /opt/comrade && sh scripts/deploy_host.sh $GITHUB_SHA\"]" \
+            --query 'Command.CommandId' --output text)
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
+          aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+            --query '[Status,StandardOutputContent,StandardErrorContent]' --output json

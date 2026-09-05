@@ -1,0 +1,31 @@
+# Overlay for a real deployment. Use WITH the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# What it changes:
+#   * Caddy in front, terminating TLS and serving one origin.
+#   * No published ports on api/frontend — only Caddy is reachable from outside.
+#     Publishing 8000 as well would leave a plaintext route straight past TLS,
+#     which is the kind of thing nobody notices until it is in a log.
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      COMRADE_HOST: ${COMRADE_HOST}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # certificates. Losing this re-issues them, and
+      - caddy_config:/config  # Let's Encrypt rate-limits that, so keep it.
+    depends_on: [api, frontend]
+
+  api:
+    ports: !reset []
+
+  frontend:
+    ports: !reset []
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -42,6 +42,9 @@ from shared.consent import (
     reject_consent, revoke_permission_grant,
 )
 from shared.db import Role, connect, team_session, user_session
+from shared.usage import (
+    BudgetExceeded, record_reservation, release_turn, reserve_turn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,63 +169,46 @@ def _persist_ai_reply(
     return message_id
 
 
-def _check_turn_budget(team_id: str) -> None:
-    """Refuse the turn when the team is at its hourly cap.
+def _admit_turn(req, user_id: str):
+    """Reserve budget, authorise the thread, and persist the turn — in that
+    order, releasing what was reserved if any later step refuses.
 
-    agent_runs already records every turn (team_id, created_at), so the limit
-    is a count over a table that exists: no new store, correct across API
-    instances, and it survives a restart. idx_agent_runs_team covers the query.
+    🔴 THE ORDER IS THE FIX. This was `_check_turn_budget` — a count and a sum
+    over agent_runs compared to the cap — and the comparison happened in a
+    different transaction from the spend. Two simultaneous turns both read a
+    snapshot under the cap and both proceeded; nothing downstream stopped the
+    second. The cap was advice, and on a deployment where the model key is the
+    operator's, that is somebody else's bill.
 
-    Runs as the AGENT role, not as the member. Members have no read on
-    agent_runs at all — the table holds every private-thread prompt verbatim in
-    `input_summary` and every tool result in `steps`, and a team-scoped policy
-    over it leaked one member's private turn to their teammates
-    (20260830090000_close_agent_runs_leak.sql). The agent role is team-scoped
-    by current_team(), and this returns a COUNT to the server, never rows to a
-    member — so the cap stays a team cap without reopening the read.
-
-    TWO DIMENSIONS, ONE REFUSAL. Turns alone is a turnstile rather than a
-    budget: a measured trivial turn costs ~5,100 input tokens before the member
-    types a word, and a turn that reads twenty files costs orders more, so 60
-    turns is anywhere between 300K and several million tokens. Tokens alone
-    would let a thousand near-empty turns through. Whichever binds first wins,
-    and the message says which — "you have used your turns" when a team is out
-    of tokens sends someone looking in the wrong place.
+    The reservation is now a single conditional UPDATE on one row
+    (shared/usage.py), so concurrent turns serialise on that row's lock.
+    Reserved BEFORE the message is persisted, because a turn admitted is a
+    turn that will cost money whether or not the rest of this function works.
     """
-    turn_cap = settings.agent_turns_per_hour
-    token_cap = settings.agent_tokens_per_hour
-    if turn_cap <= 0 and token_cap <= 0:
-        return
-    with team_session(Role.AGENT, team_id) as conn:
-        turns, tokens = conn.execute(
-            "select count(*),"
-            "       coalesce(sum(coalesce(input_tokens,0)"
-            "                  + coalesce(output_tokens,0)), 0)"
-            "  from public.agent_runs"
-            " where team_id=%s and created_at > now() - interval '1 hour'",
-            (team_id,),
-        ).fetchone()
-    if turn_cap > 0 and turns >= turn_cap:
+    try:
+        reservation = reserve_turn(req.team_id)
+    except BudgetExceeded as exc:
         raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"This team has used its {turn_cap} agent turns for the hour."
-            " Comrade will be available again shortly.",
-        )
-    if token_cap > 0 and tokens >= token_cap:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            f"This team has used its {token_cap:,} agent tokens for the hour"
-            f" ({tokens:,} so far). Comrade will be available again shortly.",
-        )
+            status.HTTP_429_TOO_MANY_REQUESTS, exc.detail
+        ) from exc
+    try:
+        thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
+        turn = enqueue_turn(req.team_id, user_id, thread_id, req.text)
+    except BaseException:
+        # An inaccessible thread, a database error, a disconnect. None of them
+        # spent anything, and leaving the estimate on the bucket would refuse
+        # a team work it never did.
+        release_turn(req.team_id, reservation)
+        raise
+    record_reservation(req.team_id, str(turn), reservation)
+    return turn
 
 
 @app.post("/agent/turn", response_model=TurnResponse)
 def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     """Persist a turn and return immediately; agent.worker executes it."""
     require_membership(user_id, req.team_id)
-    _check_turn_budget(req.team_id)
-    thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-    turn = enqueue_turn(req.team_id, user_id, thread_id, req.text)
+    turn = _admit_turn(req, user_id)
     return TurnResponse(run_id=str(turn), status=getattr(turn, "status", "queued"))
 
 
@@ -256,9 +242,7 @@ def _visible_run(team_id: str, user_id: str, run_id: str) -> None:
 async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     """Compatibility shortcut: enqueue, then follow the durable event log."""
     require_membership(user_id, req.team_id)
-    _check_turn_budget(req.team_id)
-    thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-    turn = await run_in_threadpool(enqueue_turn, req.team_id, user_id, thread_id, req.text)
+    turn = await run_in_threadpool(_admit_turn, req, user_id)
     return StreamingResponse(_run_frames(req.team_id, str(turn)), media_type="application/x-ndjson")
 
 

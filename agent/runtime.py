@@ -27,6 +27,7 @@ from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
 from shared.db import thread_lock
+from shared.usage import finalize_usage
 from shared.config import settings
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,12 @@ def _finish(
         input_tokens=used_input, output_tokens=used_output, worker_id=worker_id,
         last_error=last_error,
     )
+    # Reconcile the estimate the turn reserved against what it actually cost.
+    # HERE rather than on the success path, because a turn that failed still
+    # paid for the prompt it was handed — and a turn that cost less than its
+    # estimate must give the balance back or a team slowly loses budget it
+    # never spent. finalize_usage is idempotent; this runs on every exit.
+    finalize_usage(team_id, run_id, used_input + used_output)
 
 
 def _usage_from_event(event: Any) -> tuple[int, int]:

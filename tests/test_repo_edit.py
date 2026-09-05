@@ -20,11 +20,13 @@ from types import SimpleNamespace
 import pytest
 
 from agent.repo_tools import repo_edit, repo_read
-from shared.workspace import repo_checkout
+from shared.workspace import repo_checkout, thread_checkout
 
 TEAM_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 TEAM_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 REPO = "acme/app"
+# The agent works in a THREAD's tree, not the team's (Task 15).
+THREAD_A = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 
 @pytest.fixture
@@ -32,7 +34,7 @@ def checkout(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
     )
-    root = repo_checkout(TEAM_A, REPO)
+    root = thread_checkout(TEAM_A, THREAD_A, REPO)
     (root / "src").mkdir(parents=True)
     (root / "src" / "auth.py").write_text(
         "def authenticate(user):\n    return True\n"
@@ -46,7 +48,7 @@ def checkout(tmp_path, monkeypatch):
 
 @pytest.fixture
 def ctx():
-    return SimpleNamespace(state={"team_id": TEAM_A, "repo_full_name": REPO})
+    return SimpleNamespace(state={"team_id": TEAM_A, "thread_id": THREAD_A, "repo_full_name": REPO})
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +127,7 @@ def test_git_cannot_be_edited(checkout, ctx):
 
 
 def test_another_teams_checkout_cannot_be_edited(checkout, ctx):
-    other = repo_checkout(TEAM_B, REPO)
+    other = thread_checkout(TEAM_B, THREAD_A, REPO)
     other.mkdir(parents=True)
     (other / "app.py").write_text("team B\n")
     result = repo_edit(f"../../{TEAM_B}/acme__app/app.py", "team B", "hacked", ctx)
@@ -134,7 +136,7 @@ def test_another_teams_checkout_cannot_be_edited(checkout, ctx):
 
 
 def test_a_turn_with_no_repo_edits_nothing(checkout):
-    no_repo = SimpleNamespace(state={"team_id": TEAM_A})
+    no_repo = SimpleNamespace(state={"team_id": TEAM_A, "thread_id": THREAD_A})
     assert "error" in repo_edit("src/auth.py", "a", "b", no_repo)
 
 

@@ -37,6 +37,7 @@ finds its own branch and its own open PR and returns them rather than opening a
 second one.
 """
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -47,7 +48,7 @@ from pipeline.repo_sync import (
     _run_git,
     default_branch as _remote_default_branch,
 )
-from shared.workspace import repo_checkout
+from shared.workspace import repo_checkout, thread_checkout, workspaces_root
 
 logger = logging.getLogger(__name__)
 
@@ -84,19 +85,49 @@ def _git_out(args: list[str], cwd: Path) -> str:
     return proc.stdout
 
 
-def capture_patch(team_id: str, repo_full_name: str) -> str:
-    """Everything the agent changed in this checkout, as a patch.
+def _assert_is_the_checkout(checkout: Path) -> None:
+    """🔴 Ask GIT whether this directory is the repository, not the filesystem.
+
+    The guard here was `(checkout / '.git').exists()`. A MALFORMED .git passes
+    that — a worktree pointer to a directory that is gone, a half-deleted
+    clone — while git rejects it and does what git always does: walks UP
+    looking for a real repository. The workspaces root lives under the user's
+    home directory, which on a developer's machine is itself a repository, so
+    `add -A` began staging the user's home. Observed live as
+    `fatal: Unable to create 'C:/Users/ricky/.git/index.lock'`.
+
+    Two defences, because either alone leaves a hole: GIT_CEILING_DIRECTORIES
+    stops the walk at the workspaces root, and comparing --show-toplevel to
+    the path we asked for catches a real repository that simply is not this
+    one.
+    """
+    proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
+        ["git", *GIT_FLAGS, "rev-parse", "--show-toplevel"],
+        cwd=str(checkout) if checkout.is_dir() else None,
+        capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS,
+        env={**os.environ, "GIT_CEILING_DIRECTORIES": str(workspaces_root())},
+    )
+    top = Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else None
+    if top is None or top.resolve() != checkout.resolve():
+        raise PullRequestError(
+            "this thread has no working copy of the repository, so there is"
+            " nothing to propose."
+        )
+
+
+def capture_patch(team_id: str, repo_full_name: str, thread_id: str) -> str:
+    """Everything THIS THREAD changed in its own tree, as a patch.
 
     `add -A` first so new files appear: an untracked file is invisible to a
     plain `git diff`, and "the agent created a file and the PR did not contain
     it" is the kind of silent omission that makes a review meaningless.
+
+    The thread's tree, not the team's: two members editing one repository have
+    separate working copies since Task 15, and a proposal that read the shared
+    checkout would carry whatever the other person had not yet proposed.
     """
-    checkout = repo_checkout(team_id, repo_full_name)
-    if not (checkout / ".git").exists():
-        raise PullRequestError(
-            "this team's repository is not checked out, so there is nothing to"
-            " propose."
-        )
+    checkout = thread_checkout(team_id, thread_id, repo_full_name)
+    _assert_is_the_checkout(checkout)
     _git_out(["add", "-A"], checkout)
     patch = _git_out(["diff", "--cached"], checkout)
     if not patch.strip():

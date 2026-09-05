@@ -89,6 +89,7 @@ def _root(tool_context: ToolContext) -> Path:
     there is a way for a member to say, the single connected repo is used.
     """
     team_id = tool_context.state.get("team_id")
+    thread_id = tool_context.state.get("thread_id")
     repo = tool_context.state.get("repo_full_name")
     if not team_id:
         raise CapabilityError("this turn carries no team, so it has no checkout.")
@@ -97,7 +98,16 @@ def _root(tool_context: ToolContext) -> Path:
             "no repository is connected to this team, so there is nothing to"
             " read. Connect one first."
         )
-    return repo_checkout(str(team_id), str(repo))
+    if not thread_id:
+        raise CapabilityError("this turn carries no thread, so it has no checkout.")
+    # The THREAD's working tree (Task 15), created on first use. Two members
+    # working at once each get their own files; before this they shared one
+    # checkout, so a turn's `reset --hard` deleted the other's unproposed work
+    # and a proposal captured both. thread_id is server-bound like team_id —
+    # no repo tool takes it as an argument.
+    from pipeline.repo_sync import ensure_thread_checkout
+
+    return ensure_thread_checkout(str(team_id), str(thread_id), str(repo))
 
 
 def _resolve(raw: str, root: Path, *, writing: bool = False) -> Path:
@@ -475,8 +485,9 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
 
     team_id = tool_context.state.get("team_id")
     requester_id = tool_context.state.get("requester_id")
+    thread_id = tool_context.state.get("thread_id")
     repo = tool_context.state.get("repo_full_name")
-    if not (team_id and requester_id and repo):
+    if not (team_id and requester_id and thread_id and repo):
         return {"error": "this turn has no team repository to propose against."}
 
     # Before capture_patch, so the refusal names what to do rather than
@@ -486,7 +497,7 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
         return {"error": NEEDS_VERIFICATION}
 
     try:
-        patch = capture_patch(str(team_id), str(repo))
+        patch = capture_patch(str(team_id), str(repo), str(thread_id))
     except (PullRequestError, WorkspaceError) as exc:
         return {"error": str(exc)}
 

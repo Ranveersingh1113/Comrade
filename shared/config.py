@@ -77,6 +77,20 @@ class Settings(BaseSettings):
     # bounding: a repository sweep that reads file after file.
     agent_tokens_per_hour: int = 500_000
 
+    # What a turn is assumed to cost before it has run.
+    #
+    # A cap can only be enforced atomically against a number known at the time
+    # the turn is admitted, and the real number does not exist until the turn
+    # is over. So a turn reserves this and reconciles the truth when it
+    # finishes (shared/usage.py).
+    #
+    # 6,000 from measurement: a trivial turn was ~5,100 input tokens before
+    # the member typed a word. Too low and a burst of simultaneous turns can
+    # overshoot the cap by the difference; too high and a team is refused work
+    # it could have afforded. It is a reservation, not a charge — a cheap turn
+    # gives the balance straight back.
+    agent_tokens_estimate: int = 6_000
+
     # What a turn COSTS, as opposed to how many there were.
     #
     # Tokens are recorded unconditionally — they are a fact about what

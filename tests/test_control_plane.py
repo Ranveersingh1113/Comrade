@@ -24,3 +24,13 @@ def test_control_can_claim_queue_metadata_but_not_message_bodies():
         conn.execute("select count(*) from public.jobs").fetchone()
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             conn.execute("select body from public.messages").fetchone()
+
+
+def test_control_can_manage_thread_box_metadata_but_members_cannot(seeded):
+    with psycopg.connect(settings.comrade_control_db_url) as conn:
+        conn.execute("select box_id, state from public.thread_boxes").fetchall()
+    from tests._seed import as_user, A1
+    with as_user(A1) as conn:
+        # Supabase grants authenticated SELECT by default; RLS is the API and
+        # must still expose no row without a member policy.
+        assert conn.execute("select box_id from public.thread_boxes").fetchall() == []

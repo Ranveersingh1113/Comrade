@@ -135,6 +135,11 @@ class Settings(BaseSettings):
     # in MY image" is just "run my code on your host" with extra steps. A
     # per-team value belongs in the teams table with an allowlist, not here.
     comrade_sandbox_image: str = "comrade-sandbox:latest"
+    # Docker is only the local development backend. Production switches to a
+    # server-owned ASCII Box key; this value never reaches browser code or a Box.
+    comrade_sandbox_backend: str = "docker"
+    comrade_box_api_key: str = ""
+    comrade_box_max_archive_bytes: int = 50_000_000
     # Per-TURN cap on LLM calls (ADK RunConfig.max_llm_calls). ADK's own
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the

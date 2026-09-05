@@ -1,0 +1,94 @@
+"""Small, server-only client for the ASCII Box execution boundary."""
+import hashlib
+import io
+import tarfile
+from pathlib import Path
+from uuid import UUID
+
+import httpx
+
+
+API_URL = "https://ascii.dev/api/box/v1"
+
+
+class BoxError(Exception):
+    """A Box request failed before a repository command ran."""
+
+
+class BoxStarting(BoxError):
+    """The Box is provisioning; its lifecycle may be polled and retried."""
+
+
+class BoxCommandAmbiguous(BoxError):
+    """A gateway failure may have started the command; never retry it."""
+
+
+class BoxClient:
+    def __init__(self, api_key: str, *, transport: httpx.BaseTransport | None = None):
+        self._client = httpx.Client(
+            base_url=API_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            transport=transport,
+            timeout=30,
+        )
+
+    def create(self, thread_id: UUID, team_id: UUID) -> dict:
+        response = self._client.post(
+            "/boxes",
+            headers={"Idempotency-Key": f"comrade-thread-{thread_id}"},
+            json={
+                "noEnv": True,
+                "ttlSeconds": 900,
+                "env": {
+                    "COMRADE_TEAM_ID": str(team_id),
+                    "COMRADE_THREAD_ID": str(thread_id),
+                },
+            },
+        )
+        if response.status_code >= 400:
+            self._raise(response)
+        body = response.json()
+        return body.get("box", body)
+
+    @staticmethod
+    def _raise(response: httpx.Response) -> None:
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        message = body.get("message", f"Box request failed ({response.status_code})")
+        if body.get("code") == "box_starting":
+            raise BoxStarting(message)
+        raise BoxError(message)
+
+
+def build_source_archive(root: Path, *, max_bytes: int) -> tuple[bytes, str]:
+    """Archive only regular, non-secret files physically contained by root."""
+    root = root.resolve()
+    digest = hashlib.sha256()
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w:gz") as archive:
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root)
+            if (relative.parts[0] == ".git" or path.name == ".env"
+                    or path.name.startswith(".env.")):
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            resolved = path.resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                continue
+            data = path.read_bytes()
+            digest.update(relative.as_posix().encode() + b"\0" + data)
+            info = tarfile.TarInfo(relative.as_posix())
+            info.size = len(data)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(data))
+            if stream.tell() > max_bytes:
+                raise BoxError(f"repository archive exceeds {max_bytes} byte limit")
+    data = stream.getvalue()
+    if len(data) > max_bytes:
+        raise BoxError(f"repository archive exceeds {max_bytes} byte limit")
+    return data, digest.hexdigest()

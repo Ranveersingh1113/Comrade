@@ -144,6 +144,17 @@ def finish_run(
             )
 
 
+def pause_for_permission(team_id: str, run_id: str, worker_id: str | None) -> None:
+    with team_session(Role.AGENT, team_id) as conn:
+        cur = conn.execute(
+            "update public.agent_runs set status='waiting_for_permission' where id=%s"
+            " and (%s::text is null or worker_id=%s) and status='running'",
+            (run_id, worker_id, worker_id),
+        )
+    if cur.rowcount != 1:
+        raise LookupError(f"agent_run {run_id!r} is no longer runnable")
+
+
 def _step_from_row(row: tuple) -> dict[str, Any]:
     """Rebuild one step dict from an agent_steps row. Only the columns the
     caller actually populated come back as keys, matching the shape the old

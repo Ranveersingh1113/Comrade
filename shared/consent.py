@@ -230,13 +230,13 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
             "update public.consent_queue set status='executed', resolved_at=now()"
             " where id=%s and status in ('approved','edited')"
             " returning tool_name, tool_args, action_hash, requesting_member_id,"
-            " expires_at",
+            " expires_at, agent_run_id",
             (consent_id,),
         ).fetchone()
         if claimed is None:
             return {"status": "noop", "reason": "not approved or already executed"}
 
-        (tool_name, args, action_hash, requester_id, expires_at) = claimed
+        (tool_name, args, action_hash, requester_id, expires_at, agent_run_id) = claimed
 
         if expires_at is not None and expires_at < datetime.now(timezone.utc):
             raise ConsentError(f"consent {consent_id} has expired")
@@ -253,7 +253,18 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
             raise ConsentError(f"no executor registered for {tool_name}")
 
         result = executor(conn, team_id, requester_id, args)
-        return {"status": "executed", "result": result}
+        return {"status": "executed", "result": result, "agent_run_id": str(agent_run_id) if agent_run_id else None}
+
+
+def _requeue_permission_run(team_id: str, run_id: str | None) -> None:
+    if not run_id:
+        return
+    with team_session(Role.AGENT, team_id) as conn:
+        conn.execute(
+            "update public.agent_runs set status='queued', worker_id=null, lease_expires_at=null"
+            " where id=%s and status='waiting_for_permission'",
+            (run_id,),
+        )
 
 
 # ---------- human-side resolution (authorization happens here, via RLS) ----------
@@ -294,7 +305,10 @@ def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
         ).fetchone()
     if row is None:
         return {"status": "not_approved", "reason": "not pending or not yours"}
-    return execute_consent(team_id, consent_id)
+    result = execute_consent(team_id, consent_id)
+    if result.get("status") == "executed":
+        _requeue_permission_run(team_id, result.get("agent_run_id"))
+    return result
 
 
 def reject_consent(
@@ -337,7 +351,10 @@ def edit_and_approve(
             " status='edited' where id=%s and team_id=%s",
             (Json(new_args), new_hash, consent_id, team_id),
         )
-    return execute_consent(team_id, consent_id)
+    result = execute_consent(team_id, consent_id)
+    if result.get("status") == "executed":
+        _requeue_permission_run(team_id, result.get("agent_run_id"))
+    return result
 
 
 # ---------- per-tool executors + precondition checks ----------

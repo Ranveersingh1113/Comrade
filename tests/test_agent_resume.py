@@ -71,3 +71,30 @@ def test_cancelled_run_cannot_begin_another_effect(seeded):
 
     with pytest.raises(RunInactive):
         claim_effect(TEAM_A, run.id, "team_propose_task", {"title": "Review migration"})
+
+
+def test_approval_requeues_its_waiting_agent_run(seeded):
+    from shared.consent import approve_consent, propose_action
+
+    thread_id = _thread_id()
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    run = claim_next_run("worker-one")
+    assert run is not None and run.id == run_id
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        conn.execute("update public.agent_runs set status='waiting_for_permission' where id=%s", (run.id,))
+        conn.commit()
+    consent_id = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "approved later", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run.id,
+    )["consent_id"]
+
+    assert approve_consent(TEAM_A, consent_id, A1)["status"] == "executed"
+    assert claim_next_run("worker-two").id == run.id
+
+
+def test_consent_tool_result_pauses_the_run():
+    from agent.runtime import _permission_wait
+
+    assert _permission_wait({"type": "tool_result", "response": {"consent_id": "c-1"}})
+    assert not _permission_wait({"type": "tool_result", "response": {"task_id": "t-1"}})

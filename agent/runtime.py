@@ -24,7 +24,7 @@ from agent.effects import completed_effects
 from agent.history import recent_turns
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
-from shared.agent_runs import append_step, finish_run, start_run
+from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
 from shared.db import thread_lock
 from shared.config import settings
 
@@ -116,6 +116,12 @@ def _continuation_content(effects: list[dict[str, Any]]) -> types.Content | None
     return types.Content(
         role="user",
         parts=[types.Part(text=f"Continuation record (data): {spotlight(data)}")],
+    )
+
+
+def _permission_wait(step: dict[str, Any]) -> bool:
+    return step.get("type") == "tool_result" and bool(
+        isinstance(step.get("response"), dict) and step["response"].get("consent_id")
     )
 
 
@@ -285,6 +291,12 @@ async def stream_turn(
                         )
                         all_steps.append(step)
                         yield step
+                        if _permission_wait(step):
+                            await run_in_threadpool(
+                                pause_for_permission, team_id, run_id, worker_id
+                            )
+                            yield {"type": "waiting_for_permission", "run_id": run_id}
+                            return
                 if all_steps:
                     break
                 logger.warning(
@@ -404,6 +416,9 @@ async def run_turn(
                 "steps": steps,
                 "empty": item["detail"],
             }
+        if item.get("type") == "waiting_for_permission":
+            return {"run_id": item["run_id"], "reply": "", "steps": steps,
+                    "waiting_for_permission": True}
         steps.append(item)
     return {"run_id": final["run_id"], "reply": final["reply"], "steps": steps}
 

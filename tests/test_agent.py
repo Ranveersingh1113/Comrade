@@ -27,4 +27,5 @@ def test_tools_registered():
         "team_propose_task",
         "task_propose_update",
         "member_send_nudge",
+        "plan_update",
     }

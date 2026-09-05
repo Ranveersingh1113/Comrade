@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from agent.agent import APP_NAME, app
 from agent.effects import completed_effects
 from agent.history import recent_turns
+from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
@@ -108,11 +109,30 @@ def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
     return "".join(s["text"] for s in steps if s["type"] == "text").strip()
 
 
-def _continuation_content(effects: list[dict[str, Any]]) -> types.Content | None:
-    """A resumed run's completed effects, marked as untrusted context."""
-    if not effects:
+def _continuation_content(
+    effects: list[dict[str, Any]], plan: dict[str, Any] | None = None,
+) -> types.Content | None:
+    """A resumed run's completed effects and the thread's unfinished plan,
+    marked as untrusted context.
+
+    Completed steps are dropped on purpose: what has to survive a restart is
+    what is LEFT, and a finished step re-read as context is an invitation to
+    do it again. The version travels with them because the model needs it to
+    write the plan back without clobbering a concurrent run's edit.
+    """
+    record: dict[str, Any] = {}
+    if effects:
+        record["effects"] = effects
+    if plan:
+        record["plan"] = {
+            "version": plan["version"],
+            "remaining": [
+                step for step in plan["steps"] if step.get("status") != "completed"
+            ],
+        }
+    if not record:
         return None
-    data = json.dumps(effects, sort_keys=True, separators=(",", ":"), default=str)
+    data = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
     return types.Content(
         role="user",
         parts=[types.Part(text=f"Continuation record (data): {spotlight(data)}")],
@@ -214,7 +234,8 @@ async def stream_turn(
                 settings.agent_history_turns, exclude_message_id,
             )
             effects = await run_in_threadpool(completed_effects, team_id, run_id)
-            continuation = _continuation_content(effects)
+            plan = await run_in_threadpool(read_plan, team_id, thread_id)
+            continuation = _continuation_content(effects, plan)
             # Resolved once per turn rather than per tool call: it is a DB read
             # and it cannot change mid-turn.
             repo = await run_in_threadpool(connected_repo, team_id, requester_id)

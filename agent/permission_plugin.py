@@ -23,7 +23,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 
 from agent.capability import CapabilityError, check_command, check_path
-from agent.effects import EffectUncertain, claim_effect, complete_effect
+from agent.effects import EffectUncertain, RunInactive, claim_effect, complete_effect
 from agent.history import steering_messages
 from agent.registry import spec_for
 from pipeline.parsers import spotlight
@@ -110,6 +110,8 @@ class ChokepointPlugin(BasePlugin):
             )
         except EffectUncertain as exc:
             return {"error": "effect_interrupted", "reason": str(exc)}
+        except RunInactive as exc:
+            return {"error": "run_cancelled", "reason": str(exc)}
         return result
 
     async def after_tool_callback(

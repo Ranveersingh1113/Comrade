@@ -1,10 +1,11 @@
 """Effects from a reclaimed run must never be executed twice."""
 
 import psycopg
+import pytest
 from types import SimpleNamespace
 
-from agent.effects import complete_effect, claim_effect
-from agent.run_queue import claim_next_run, enqueue_turn
+from agent.effects import RunInactive, complete_effect, claim_effect, completed_effects
+from agent.run_queue import cancel_run, claim_next_run, enqueue_turn
 from shared.config import settings
 from tests._seed import A1, TEAM_A
 
@@ -29,6 +30,22 @@ def test_completed_effect_returns_its_saved_result_after_worker_restart(seeded):
     complete_effect(TEAM_A, run.id, "team_propose_task", args, {"consent_id": "c-1"})
 
     assert claim_effect(TEAM_A, run.id, "team_propose_task", args) == {"consent_id": "c-1"}
+    assert completed_effects(TEAM_A, run.id) == [
+        {"tool": "team_propose_task", "result": {"consent_id": "c-1"}}
+    ]
+
+
+def test_continuation_record_marks_completed_effect_data():
+    from agent.runtime import _continuation_content
+
+    content = _continuation_content([
+        {"tool": "team_propose_task", "result": {"consent_id": "c-1"}},
+    ])
+
+    assert content is not None
+    assert content.parts[0].text.startswith("Continuation record (data): ")
+    assert "team_propose_task" in content.parts[0].text
+    assert "consent_id" in content.parts[0].text
 
 
 def test_resumed_tool_call_uses_the_durable_effect_result(monkeypatch):
@@ -44,3 +61,13 @@ def test_resumed_tool_call_uses_the_durable_effect_result(monkeypatch):
     ))
 
     assert result == {"consent_id": "c-1"}
+
+
+def test_cancelled_run_cannot_begin_another_effect(seeded):
+    run_id = enqueue_turn(TEAM_A, A1, _thread_id(), "create the task")
+    run = claim_next_run("worker-one")
+    assert run is not None and run.id == run_id
+    assert cancel_run(TEAM_A, run.id)
+
+    with pytest.raises(RunInactive):
+        claim_effect(TEAM_A, run.id, "team_propose_task", {"title": "Review migration"})

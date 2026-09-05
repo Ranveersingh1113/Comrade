@@ -7,6 +7,7 @@ thread it is standing in without a second session store.
 The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 """
 import asyncio
+import json
 import logging
 from contextlib import ExitStack
 from typing import Any, AsyncIterator
@@ -19,8 +20,10 @@ from google.genai import types
 from starlette.concurrency import run_in_threadpool
 
 from agent.agent import APP_NAME, app
+from agent.effects import completed_effects
 from agent.history import recent_turns
 from agent.repo_tools import connected_repo
+from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, start_run
 from shared.db import thread_lock
 from shared.config import settings
@@ -103,6 +106,17 @@ def _usage_from_event(event: Any) -> tuple[int, int]:
 def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
     """Concatenate the text steps into the user-facing reply."""
     return "".join(s["text"] for s in steps if s["type"] == "text").strip()
+
+
+def _continuation_content(effects: list[dict[str, Any]]) -> types.Content | None:
+    """A resumed run's completed effects, marked as untrusted context."""
+    if not effects:
+        return None
+    data = json.dumps(effects, sort_keys=True, separators=(",", ":"), default=str)
+    return types.Content(
+        role="user",
+        parts=[types.Part(text=f"Continuation record (data): {spotlight(data)}")],
+    )
 
 
 # How many times to re-ask when the model returns literally nothing.
@@ -193,6 +207,8 @@ async def stream_turn(
                 recent_turns, team_id, requester_id, thread_id,
                 settings.agent_history_turns, exclude_message_id,
             )
+            effects = await run_in_threadpool(completed_effects, team_id, run_id)
+            continuation = _continuation_content(effects)
             # Resolved once per turn rather than per tool call: it is a DB read
             # and it cannot change mid-turn.
             repo = await run_in_threadpool(connected_repo, team_id, requester_id)
@@ -248,6 +264,10 @@ async def stream_turn(
                             else app.root_agent.name,
                             content=content,
                         ),
+                    )
+                if continuation is not None:
+                    await runner.session_service.append_event(
+                        session, Event(author="user", content=continuation)
                     )
                 async for event in runner.run_async(
                     user_id=requester_id, session_id=session.id,

@@ -5,3 +5,10 @@ channel = "stable-25_05"
 
 [agent]
 expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[ports]]
+localPort = 23636
+externalPort = 80

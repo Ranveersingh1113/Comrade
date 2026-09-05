@@ -7,19 +7,20 @@ import { activityLabel } from '../lib/toolActivity';
 import { useIsNarrow } from '../hooks/useIsNarrow';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
 import { classifyMessage, memberBars } from '../lib/roomModel';
-import type { DocumentRow, MemoryCompilation, Message, Milestone, Task } from '../lib/types';
+import type { DocumentRow, MemoryCompilation, Message, Milestone, Task, Thread } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { useMessages } from '../hooks/useMessages';
 import { taskCell, taskMark, taskPill, useTasks, type TaskActions } from '../hooks/useTasks';
 import { Avatar, AiOrb } from '../components/Avatar';
 import { MemoryDiffCard } from '../components/MemoryDiffCard';
+import { ComposerMode, type ComposerModeValue } from '../components/ComposerMode';
 
 type RoomLayout = 'classic' | 'split' | 'board';
 
-export function GroupRoom() {
+export function GroupRoom({ thread }: { thread?: Thread }) {
   const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
-  const { messages, compilationsByMessage, error, refresh } = useMessages('group');
+  const { messages, compilationsByMessage, error, refresh } = useMessages(thread?.id ?? 'group');
   const taskState = useTasks();
   const [layout, setLayout] = useState<RoomLayout>(
     () => (localStorage.getItem('comrade.roomLayout') as RoomLayout | null) ?? 'classic',
@@ -31,6 +32,11 @@ export function GroupRoom() {
   const [step, setStep] = useState('');
   const [agentNote, setAgentNote] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [composerMode, setComposerMode] = useState<ComposerModeValue>(() => {
+    if (!thread) return 'team';
+    return (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
+      ?? (thread.kind === 'work' ? 'agent' : 'team');
+  });
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -72,7 +78,7 @@ export function GroupRoom() {
     setSendError(null);
     setNote(null);
     setAgentNote(null);
-    const mentionsAi = /@comrade/i.test(text);
+    const mentionsAi = composerMode === 'agent' || /@comrade/i.test(text);
     if (mentionsAi) {
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
@@ -80,7 +86,7 @@ export function GroupRoom() {
       setPending('');
       setStep('');
       try {
-        await streamTurn(teamId, text, 'group', (f) => {
+        await streamTurn(teamId, text, thread?.id ?? 'group', (f) => {
           if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
           // The runtime already says what it is doing; the room was throwing
           // it away and showing three dots instead.
@@ -110,7 +116,9 @@ export function GroupRoom() {
     } else {
       const { error: err } = await supabase.from('messages').insert({
         team_id: teamId,
-        thread_type: 'group',
+        thread_type: thread?.visibility === 'restricted' ? 'private' : 'group',
+        ...(thread?.visibility === 'restricted' ? { thread_owner_id: thread.owner_id ?? thread.created_by } : {}),
+        ...(thread ? { thread_id: thread.id } : {}),
         sender_kind: 'user',
         sender_id: myUserId,
         body: text,
@@ -180,10 +188,10 @@ export function GroupRoom() {
       >
         <div>
           <div className="display" style={{ fontSize: 30 }}>
-            Group room
+            {thread?.title ?? 'Group room'}
           </div>
           <div style={{ fontSize: 11, letterSpacing: '0.06em', color: 'var(--muted)', marginTop: 6 }}>
-            Comrade reads everything · speaks only when spoken to
+            {thread ? (thread.visibility === 'restricted' ? 'Selected members' : 'Team-visible') : 'Comrade reads everything · speaks only when spoken to'}
           </div>
         </div>
         <div
@@ -354,13 +362,14 @@ export function GroupRoom() {
               </div>
             )}
             <div className="composer">
+              {thread && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode={thread.kind === 'work' ? 'agent' : 'team'} onChange={setComposerMode} />}
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void send();
                 }}
-                placeholder="Message the team… @Comrade to ask the AI"
+                placeholder={composerMode === 'agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'}
               />
               <button className="btn-ink" onClick={() => void send()}>
                 SEND

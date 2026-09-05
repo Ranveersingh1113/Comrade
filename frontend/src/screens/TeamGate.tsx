@@ -57,7 +57,7 @@ export function TeamGate() {
 
   const enter = (teamId: string) => {
     localStorage.setItem('comrade.teamId', teamId);
-    navigate(`/t/${teamId}/room`);
+    navigate(`/t/${teamId}/threads`);
   };
 
   const acceptInvite = async (m: Membership) => {

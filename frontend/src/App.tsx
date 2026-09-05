@@ -15,8 +15,6 @@ import { Sidebar } from './components/Sidebar';
 import { useIsNarrow } from './hooks/useIsNarrow';
 import { Login } from './screens/Login';
 import { TeamGate } from './screens/TeamGate';
-import { GroupRoom } from './screens/GroupRoom';
-import { PrivateThread } from './screens/PrivateThread';
 import { Tasks } from './screens/Tasks';
 import { Wiki } from './screens/Wiki';
 import { Documents } from './screens/Documents';
@@ -24,6 +22,7 @@ import { ConsentInbox } from './screens/ConsentInbox';
 import { Setup } from './screens/Setup';
 import { Team } from './screens/Team';
 import { GitHubCallback } from './screens/GitHubCallback';
+import { LegacyThreadRedirect, Threads } from './screens/Threads';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { session, loading } = useAuth();
@@ -151,7 +150,7 @@ function TeamShellInner() {
 
 function Home() {
   const stored = localStorage.getItem('comrade.teamId');
-  return <Navigate to={stored ? `/t/${stored}/room` : '/teams'} replace />;
+  return <Navigate to={stored ? `/t/${stored}/threads` : '/teams'} replace />;
 }
 
 export default function App() {
@@ -186,9 +185,11 @@ export default function App() {
               </RequireAuth>
             }
           >
-            <Route index element={<Navigate to="room" replace />} />
-            <Route path="room" element={<GroupRoom />} />
-            <Route path="thread" element={<PrivateThread />} />
+            <Route index element={<Navigate to="threads" replace />} />
+            <Route path="threads" element={<Threads />} />
+            <Route path="threads/:threadId" element={<Threads />} />
+            <Route path="room" element={<LegacyThreadRedirect />} />
+            <Route path="thread" element={<LegacyThreadRedirect privateThread />} />
             <Route path="tasks" element={<Tasks />} />
             <Route path="wiki" element={<Wiki />} />
             <Route path="docs" element={<Documents />} />

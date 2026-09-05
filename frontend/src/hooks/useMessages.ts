@@ -13,7 +13,7 @@ export interface MessagesState {
   refresh: () => Promise<void>;
 }
 
-export function useMessages(threadType: ThreadType): MessagesState {
+export function useMessages(threadIdOrLegacyType: string): MessagesState {
   const { team, myUserId } = useTeam();
   const teamId = team?.id ?? '';
   const [messages, setMessages] = useState<Message[]>([]);
@@ -29,10 +29,14 @@ export function useMessages(threadType: ThreadType): MessagesState {
       .from('messages')
       .select('*')
       .eq('team_id', teamId)
-      .eq('thread_type', threadType)
       .order('created_at')
       .limit(500);
-    if (threadType === 'private') q = q.eq('thread_owner_id', myUserId);
+    const legacyType = threadIdOrLegacyType === 'group' || threadIdOrLegacyType === 'private'
+      ? threadIdOrLegacyType as ThreadType
+      : null;
+    if (legacyType) q = q.eq('thread_type', legacyType);
+    else q = q.eq('thread_id', threadIdOrLegacyType);
+    if (legacyType === 'private') q = q.eq('thread_owner_id', myUserId);
     const { data, error: err } = await q;
     if (err) {
       setError(err.message);
@@ -42,7 +46,7 @@ export function useMessages(threadType: ThreadType): MessagesState {
     setMessages((data as Message[] | null) ?? []);
     setError(null);
 
-    if (threadType === 'group') {
+    if (legacyType === 'group') {
       const { data: comps } = await supabase
         .from('memory_compilations')
         .select('*')
@@ -55,7 +59,7 @@ export function useMessages(threadType: ThreadType): MessagesState {
       setCompilations(map);
     }
     setLoading(false);
-  }, [teamId, threadType, myUserId]);
+  }, [teamId, threadIdOrLegacyType, myUserId]);
 
   useEffect(() => {
     void refresh();

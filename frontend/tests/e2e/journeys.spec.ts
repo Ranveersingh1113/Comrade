@@ -33,7 +33,7 @@ async function memberPage(browser: Browser): Promise<Page> {
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   await signIn(page, state.member.email);
-  await page.goto(`/t/${state.teamId}/room`);
+  await page.goto(`/t/${state.teamId}/threads`);
   return page;
 }
 
@@ -45,10 +45,10 @@ test.describe.serial('Comrade journeys', () => {
     await signIn(page, state.leader.email);
   });
 
-  test('1. team gate → group room renders the roster', async () => {
+  test('1. team gate → threads renders the roster', async () => {
     await page.goto('/teams');
     await page.getByRole('button', { name: 'ENTER →' }).first().click();
-    await expect(page).toHaveURL(new RegExp(`/t/${state.teamId}/room`));
+    await expect(page).toHaveURL(new RegExp(`/t/${state.teamId}/threads`));
     // both members appear in the sidebar roster (emails' local parts)
     const leaderName = state.leader.email.split('@')[0];
     await expect(page.getByText(leaderName).first()).toBeVisible();
@@ -113,10 +113,12 @@ test.describe.serial('Comrade journeys', () => {
     await expect(page.getByText(/the API doc has not moved in a week/)).toHaveCount(0);
   });
 
-  test('8. private thread agent turn (needs GEMINI_API_KEY)', async () => {
+  test('8. thread agent turn (needs GEMINI_API_KEY)', async () => {
     test.skip(!process.env.GEMINI_API_KEY, 'live agent turn needs a Gemini key');
-    await page.goto(`/t/${state.teamId}/thread`);
-    await page.getByPlaceholder(/this stays private/).fill('What tasks are open right now?');
+    await page.goto(`/t/${state.teamId}/threads`);
+    await page.getByText('General', { exact: true }).click();
+    await page.getByRole('button', { name: 'Agent mode' }).click();
+    await page.getByPlaceholder('Ask Comrade…').fill('What tasks are open right now?');
     await page.getByRole('button', { name: 'SEND' }).click();
     // the user's message and a non-empty AI reply both arrive via the server
     await expect(page.getByText('What tasks are open right now?')).toBeVisible({
@@ -155,7 +157,7 @@ test('9. no screen scrolls sideways on a phone', async ({ browser }) => {
   const phone = await ctx.newPage();
   await signIn(phone, state.leader.email);
 
-  for (const path of ['room', 'tasks', 'wiki', 'docs', 'inbox', 'thread']) {
+  for (const path of ['threads', 'tasks', 'wiki', 'docs', 'inbox', 'thread']) {
     await phone.goto(`/t/${state.teamId}/${path}`);
     await phone.waitForLoadState('networkidle');
     const overflows = await phone.evaluate(

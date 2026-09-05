@@ -9,7 +9,7 @@ import { useTeamRealtime } from '../hooks/useRealtime';
 import { Avatar } from './Avatar';
 
 const NAV_ITEMS = [
-  { to: 'room', icon: '#', label: 'Group room' },
+  { to: 'threads', icon: '#', label: 'Threads' },
   { to: 'tasks', icon: '☑', label: 'Tasks' },
   { to: 'wiki', icon: '✦', label: 'Team wiki' },
   { to: 'docs', icon: '▤', label: 'Documents' },

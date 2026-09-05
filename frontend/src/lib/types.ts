@@ -35,6 +35,29 @@ export interface Membership {
 }
 
 export type ThreadType = 'group' | 'private';
+export type ThreadVisibility = 'team' | 'restricted';
+export type ThreadKind = 'discussion' | 'work';
+
+export interface Thread {
+  id: string;
+  team_id: string;
+  title: string;
+  visibility: ThreadVisibility;
+  kind: ThreadKind;
+  work_state: 'planned' | 'active' | 'waiting' | 'review' | 'done' | null;
+  owner_id: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ThreadParticipant {
+  thread_id: string;
+  team_id: string;
+  user_id: string;
+  added_by: string;
+  joined_at: string;
+}
 export type SenderKind = 'user' | 'ai';
 export type DeletedScope = 'everyone' | 'me' | null;
 

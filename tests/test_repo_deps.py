@@ -52,10 +52,21 @@ def reclaim():
     that made it, so a suite that leaves them behind fills a disk slowly enough
     that nobody connects it to the tests."""
     made: list[str] = []
-    yield made.append
+
+    def remove(name: str) -> None:
+        result = subprocess.run(
+            ["docker", "volume", "rm", "-f", name], capture_output=True, timeout=60,
+        )
+        if result.returncode and b"No such volume" not in result.stderr:
+            pytest.fail(result.stderr.decode(errors="replace"))
+
+    def reclaim_now(name: str) -> None:
+        remove(name)
+        made.append(name)
+
+    yield reclaim_now
     for name in made:
-        subprocess.run(["docker", "volume", "rm", "-f", name],
-                       capture_output=True, timeout=60)
+        remove(name)
 
 
 # ---------------------------------------------------------------------------
@@ -72,10 +83,11 @@ def test_requirements_wins_over_pyproject(checkout):
     assert manifest_for(checkout) == "requirements.txt"
 
 
-def test_a_repo_with_no_manifest_is_not_an_error(checkout):
+def test_a_repo_with_no_manifest_is_not_an_error(checkout, reclaim):
     """Most repositories Comrade reads will never need this. 'no-manifest' is
     an outcome, not a failure — the stdlib case worked before this existed and
     must keep working."""
+    reclaim(deps_volume(TEAM_A, REPO))
     assert manifest_for(checkout) is None
     assert install(TEAM_A, REPO)["status"] == "no-manifest"
     assert volume_for(TEAM_A, REPO) is None

@@ -5,7 +5,7 @@ import pytest
 
 from shared.config import settings
 from shared.consent import ConsentError, compute_hash, execute_consent, propose_action
-from tests._seed import A1, A2, TEAM_A, TEAM_B, general_thread
+from tests._seed import A1, A2, TEAM_A, TEAM_B, as_user, general_thread, personal_thread
 
 
 def _admin():
@@ -54,6 +54,183 @@ def test_agent_proposal_records_its_thread_and_run_provenance(seeded):
             "select thread_id, agent_run_id from public.consent_queue where id=%s", (consent_id,)
         ).fetchone()
     assert tuple(map(str, row)) == (thread_id, str(run_id))
+
+
+def test_agent_proposal_requester_must_match_its_run(seeded):
+    from agent.run_queue import enqueue_turn
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+
+    with pytest.raises(psycopg.Error, match="provenance"):
+        propose_action(
+            TEAM_A, A2, "task_create",
+            {"assignee_id": A2, "title": "forged", "description": None, "deadline": None},
+            thread_id=thread_id, agent_run_id=run_id,
+        )
+
+
+def test_allow_for_thread_reuses_only_the_same_task_scope(seeded):
+    from agent.run_queue import enqueue_turn
+    from shared.consent import approve_consent
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    first = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "first", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )
+
+    assert approve_consent(TEAM_A, first["consent_id"], A1, grant_for_thread=True)["status"] == "executed"
+
+    second = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "second", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )
+    assert second["status"] == "executed"
+    with _admin() as conn:
+        assert _task_count(conn, "second") == 1
+
+
+def test_revoked_thread_grant_returns_to_allow_once(seeded):
+    from agent.run_queue import enqueue_turn
+    from shared.consent import approve_consent, revoke_permission_grant
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    first = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "granted", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )
+    grant_id = approve_consent(
+        TEAM_A, first["consent_id"], A1, grant_for_thread=True,
+    )["permission_grant_id"]
+
+    assert revoke_permission_grant(TEAM_A, grant_id, A1)
+    after_revocation = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "needs approval", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )
+    assert after_revocation["status"] == "pending"
+
+
+def test_thread_grant_rejects_other_resources_requesters_and_expiry(seeded):
+    from agent.run_queue import enqueue_turn
+    from shared.consent import approve_consent
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_a1 = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    source = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "granted", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_a1,
+    )
+    grant_id = approve_consent(
+        TEAM_A, source["consent_id"], A1, grant_for_thread=True,
+    )["permission_grant_id"]
+
+    different_member = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A2, "title": "other member", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_a1,
+    )
+    assert different_member["status"] == "pending"
+
+    run_a2 = enqueue_turn(TEAM_A, A2, thread_id, "create a task")
+    different_requester = propose_action(
+        TEAM_A, A2, "task_create",
+        {"assignee_id": A1, "title": "other requester", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_a2,
+    )
+    assert different_requester["status"] == "pending"
+
+    from shared.consent import revoke_permission_grant
+    assert revoke_permission_grant(TEAM_A, grant_id, A1)
+    expiring_source = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "expiring source", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_a1,
+    )
+    assert approve_consent(TEAM_A, expiring_source["consent_id"], A1)["status"] == "executed"
+    with as_user(A1, commit=True) as conn:
+        conn.execute(
+            "insert into public.permission_grants (team_id, thread_id, requesting_member_id,"
+            " tool_name, resource_constraint, max_risk_class, source_consent_id, expires_at)"
+            " values (%s,%s,%s,'task_create',jsonb_build_object('assignee_id', %s::text),"
+            " 'member',%s, now() + interval '1 millisecond')",
+            (TEAM_A, thread_id, A1, A1, expiring_source["consent_id"]),
+        )
+    expired = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "expired", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_a1,
+    )
+    assert expired["status"] == "pending"
+
+
+def test_high_risk_actions_cannot_create_thread_grants(seeded):
+    from agent.run_queue import enqueue_turn
+    from shared.consent import approve_consent
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "open a pull request")
+    proposal = propose_action(
+        TEAM_A, A1, "repo_open_pr",
+        {"repo_full_name": "acme/widgets", "title": "Change", "body": "", "patch": ""},
+        thread_id=thread_id, agent_run_id=run_id,
+    )
+
+    with pytest.raises(ConsentError, match="only be allowed once"):
+        approve_consent(TEAM_A, proposal["consent_id"], A1, grant_for_thread=True)
+
+    with _admin() as conn:
+        assert conn.execute(
+            "select status from public.consent_queue where id=%s", (proposal["consent_id"],)
+        ).fetchone()[0] == "pending"
+
+
+def test_thread_participants_can_read_action_but_only_requester_can_resolve(seeded):
+    from agent.run_queue import enqueue_turn
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    consent_id = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "visible", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )["consent_id"]
+
+    with as_user(A2) as conn:
+        assert conn.execute(
+            "select id from public.consent_queue where id=%s", (consent_id,)
+        ).fetchone() is not None
+        assert conn.execute(
+            "update public.consent_queue set status='approved' where id=%s returning id",
+            (consent_id,),
+        ).fetchone() is None
+
+    with _admin() as conn:
+        private_thread_id = personal_thread(conn, TEAM_A, A1)
+    private_run = enqueue_turn(TEAM_A, A1, private_thread_id, "create a task")
+    private_consent = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "hidden", "description": None, "deadline": None},
+        thread_id=private_thread_id, agent_run_id=private_run,
+    )["consent_id"]
+    with as_user(A2) as conn:
+        assert conn.execute(
+            "select id from public.consent_queue where id=%s", (private_consent,)
+        ).fetchone() is None
 
 
 def test_propose_writes_pending_without_acting(seeded):

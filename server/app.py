@@ -39,7 +39,7 @@ from server.webhooks import verify_signature
 from shared.config import settings
 from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
-    reject_consent,
+    reject_consent, revoke_permission_grant,
 )
 from shared.db import Role, connect, team_session, user_session
 
@@ -76,6 +76,10 @@ class TurnResponse(BaseModel):
 
 class EditApproveRequest(TeamScoped):
     args: dict
+
+
+class ApproveRequest(TeamScoped):
+    grant_for_thread: bool = False
 
 
 class RejectRequest(TeamScoped):
@@ -281,13 +285,27 @@ def _consent_result(outcome: dict) -> dict:
 
 @app.post("/consent/{consent_id}/approve")
 def consent_approve(
-    consent_id: str, req: TeamScoped, user_id: CurrentUserId
+    consent_id: str, req: ApproveRequest, user_id: CurrentUserId
 ) -> dict:
     require_membership(user_id, req.team_id)
     try:
-        return _consent_result(approve_consent(req.team_id, consent_id, user_id))
+        outcome = (
+            approve_consent(req.team_id, consent_id, user_id, grant_for_thread=True)
+            if req.grant_for_thread else approve_consent(req.team_id, consent_id, user_id)
+        )
+        return _consent_result(outcome)
     except ConsentError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+
+@app.post("/permission-grants/{grant_id}/revoke")
+def permission_grant_revoke(
+    grant_id: str, req: TeamScoped, user_id: CurrentUserId
+) -> dict:
+    require_membership(user_id, req.team_id)
+    if not revoke_permission_grant(req.team_id, grant_id, user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "permission grant not found")
+    return {"status": "revoked"}
 
 
 @app.post("/consent/{consent_id}/reject")
@@ -520,6 +538,14 @@ def member_departure_request(
     if req.reason:
         note = f"{note} They said: {req.reason}"
 
+    # The target alone can read and resolve this card. Reuse the existing
+    # private-thread helper, which creates their canonical restricted thread
+    # only when an older account does not already have one.
+    with team_session(Role.AGENT, team_id) as conn:
+        thread_id = conn.execute(
+            "select public.ensure_private_thread(%s,%s)", (team_id, member_id),
+        ).fetchone()[0]
+
     return propose_action(
         team_id=team_id,
         requester_id=member_id,
@@ -531,6 +557,7 @@ def member_departure_request(
         # someone else, not an undo they hold.
         reversible=False,
         tier="T1",
+        thread_id=str(thread_id),
     )
 
 

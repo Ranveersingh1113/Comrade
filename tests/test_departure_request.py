@@ -24,7 +24,7 @@ from shared.consent import (
     reject_consent,
 )
 from shared.db import Role, team_session
-from tests._seed import A1, A2, B1, TEAM_A, as_user
+from tests._seed import A1, A2, B1, TEAM_A, as_user, personal_thread
 
 
 @pytest.fixture
@@ -90,6 +90,16 @@ def test_the_card_is_a_T1_and_says_who_asked(seeded, admin):
     ).fetchone()
     assert "A1 asked you to leave" in row[0] and "scope changed" in row[0]
     assert row[1] is False
+
+
+def test_departure_request_appears_in_the_target_private_thread(seeded, admin):
+    from server.app import DepartureRequest, member_departure_request
+
+    proposal = member_departure_request(TEAM_A, A2, DepartureRequest(), A1)
+    thread_id = admin.execute(
+        "select thread_id from public.consent_queue where id=%s", (proposal["consent_id"],)
+    ).fetchone()[0]
+    assert str(thread_id) == personal_thread(admin, TEAM_A, A2)
 
 
 # ---------------------------------------------------------------------------

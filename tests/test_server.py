@@ -101,6 +101,40 @@ def test_consent_approve_passes_the_caller_as_approver(client, monkeypatch):
     assert seen == {"approver": USER, "consent": "c-1"}
 
 
+def test_consent_approve_can_request_a_thread_grant(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("server.app.require_membership", lambda *_: None)
+    monkeypatch.setattr(
+        "server.app.approve_consent",
+        lambda team, consent, approver, *, grant_for_thread=False: seen.update(
+            team=team, consent=consent, approver=approver, grant=grant_for_thread,
+        ) or {"status": "executed", "result": {}},
+    )
+
+    resp = client.post(
+        "/consent/c-1/approve",
+        json={"team_id": TEAM, "grant_for_thread": True},
+    )
+
+    assert resp.status_code == 200
+    assert seen == {"team": TEAM, "consent": "c-1", "approver": USER, "grant": True}
+
+
+def test_permission_grant_revoke_uses_current_member(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(
+        "server.app.revoke_permission_grant",
+        lambda team, grant, requester: seen.update(
+            team=team, grant=grant, requester=requester,
+        ) or True,
+    )
+
+    resp = client.post("/permission-grants/g-1/revoke", json={"team_id": TEAM})
+
+    assert resp.status_code == 200
+    assert seen == {"team": TEAM, "grant": "g-1", "requester": USER}
+
+
 def test_consent_not_yours_is_404(client, monkeypatch):
     monkeypatch.setattr(
         "server.app.approve_consent",

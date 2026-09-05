@@ -13,7 +13,7 @@ import psycopg
 from agent.agent import build_instruction, recent_rejections
 from shared.config import settings
 from shared.consent import propose_action, reject_consent
-from tests._seed import A1, A2, TEAM_A, TEAM_B, as_user, count
+from tests._seed import A1, A2, TEAM_A, TEAM_B, as_user, count, general_thread
 
 
 def _admin():
@@ -88,6 +88,22 @@ def test_rejection_reason_appears_in_the_instruction(seeded):
 
 def test_recent_rejections_is_empty_with_nothing_rejected(seeded):
     assert recent_rejections(TEAM_A, A1) == ""
+
+
+def test_participant_does_not_inherit_another_requesters_rejection(seeded):
+    from agent.run_queue import enqueue_turn
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    proposal = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A2, "title": "A1 only", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )
+    reject_consent(TEAM_A, proposal["consent_id"], A1, reason="A1 declined")
+
+    assert "A1 declined" not in recent_rejections(TEAM_A, A2)
 
 
 def test_approved_and_pending_items_do_not_appear(seeded):

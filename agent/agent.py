@@ -194,10 +194,11 @@ def recent_rejections(team_id: str, requester_id: str) -> str:
     with user_session(requester_id) as conn:
         rows = conn.execute(
             "select tool_name, tool_args, resolution_reason"
-            " from public.consent_queue where team_id=%s and status='rejected'"
+            " from public.consent_queue where team_id=%s and requesting_member_id=%s"
+            " and status='rejected'"
             " and resolved_at > now() - make_interval(days => %s)"
             " order by resolved_at desc limit %s",
-            (team_id, _REJECTION_WINDOW_DAYS, _REJECTION_CAP),
+            (team_id, requester_id, _REJECTION_WINDOW_DAYS, _REJECTION_CAP),
         ).fetchall()
     if not rows:
         return ""

@@ -53,6 +53,29 @@ _TOOL_TIER_FLOORS = {
 }
 DEFAULT_TIER = "T2"
 
+# Thread grants deliberately cover only reversible, member-scoped task work.
+# A repository publication or departure remains an explicit one-time decision.
+_REUSABLE_GRANT_RISK = {
+    "task_create": "member",
+    "task_update": "member",
+}
+
+
+def _permission_resource(tool_name: str, args: dict) -> dict | None:
+    if tool_name == "task_create":
+        return {"assignee_id": args.get("assignee_id")}
+    if tool_name == "task_update":
+        return {"task_id": args.get("task_id")}
+    return None
+
+
+def _grantable(tool_name: str, thread_id: str | None, args: dict) -> tuple[str, dict]:
+    risk = _REUSABLE_GRANT_RISK.get(tool_name)
+    resource = _permission_resource(tool_name, args)
+    if not thread_id or risk is None or resource is None:
+        raise ConsentError(f"{tool_name} may only be allowed once")
+    return risk, resource
+
 
 def resolve_tier(tool_name: str, requested: str | None = None) -> str:
     """The proposal's tier: the requested one, floored per tool."""
@@ -147,6 +170,13 @@ def propose_action(
         if row is None:
             raise  # resolved between the insert and the read — not idempotency
         consent_id, final_tier = str(row[0]), row[1]
+    grant_id = _approve_with_thread_grant(
+        team_id, requester_id, consent_id, tool_name, args, thread_id,
+    )
+    if grant_id is not None:
+        result = execute_consent(team_id, consent_id)
+        if result.get("status") == "executed":
+            return {**result, "permission_grant_id": grant_id}
     return {
         "consent_id": consent_id,
         "status": "pending",
@@ -154,6 +184,33 @@ def propose_action(
         "action_hash": action_hash,
         "tier": final_tier,
     }
+
+
+def _approve_with_thread_grant(
+    team_id: str, requester_id: str, consent_id: str, tool_name: str,
+    args: dict, thread_id: str | None,
+) -> str | None:
+    """Consume a matching active grant and turn this exact action into approval."""
+    resource = _permission_resource(tool_name, args)
+    risk = _REUSABLE_GRANT_RISK.get(tool_name)
+    if not thread_id or resource is None or risk is None:
+        return None
+    with user_session(requester_id) as conn:
+        row = conn.execute(
+            "select id from public.permission_grants where team_id=%s and thread_id=%s"
+            " and requesting_member_id=%s and tool_name=%s and resource_constraint=%s::jsonb"
+            " and max_risk_class=%s and revoked_at is null and expires_at > now()"
+            " for update",
+            (team_id, thread_id, requester_id, tool_name, Json(resource), risk),
+        ).fetchone()
+        if row is None:
+            return None
+        approved = conn.execute(
+            "update public.consent_queue set status='approved'"
+            " where id=%s and team_id=%s and status='pending' returning id",
+            (consent_id, team_id),
+        ).fetchone()
+    return str(row[0]) if approved is not None else None
 
 
 def propose_batch(team_id: str, requester_id: str, items: list[dict]) -> dict:
@@ -291,13 +348,60 @@ def _requeue_permission_run(team_id: str, run_id: str | None) -> None:
 # So every requester-side statement below carries team_id explicitly. The row
 # either belongs to the named team or is not found.
 
-def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
+def _create_thread_grant(
+    team_id: str, requester_id: str, consent_id: str, tool_name: str,
+    args: dict, thread_id: str | None,
+) -> str:
+    risk, resource = _grantable(tool_name, thread_id, args)
+    with user_session(requester_id) as conn:
+        existing = conn.execute(
+            "select id from public.permission_grants where team_id=%s and thread_id=%s"
+            " and requesting_member_id=%s and tool_name=%s and resource_constraint=%s::jsonb"
+            " and revoked_at is null and expires_at > now()",
+            (team_id, thread_id, requester_id, tool_name, Json(resource)),
+        ).fetchone()
+        if existing is not None:
+            return str(existing[0])
+        row = conn.execute(
+            "insert into public.permission_grants (team_id, thread_id,"
+            " requesting_member_id, tool_name, resource_constraint, max_risk_class,"
+            " source_consent_id, expires_at)"
+            " values (%s,%s,%s,%s,%s,%s,%s, now() + interval '24 hours') returning id",
+            (team_id, thread_id, requester_id, tool_name, Json(resource), risk, consent_id),
+        ).fetchone()
+    return str(row[0])
+
+
+def revoke_permission_grant(team_id: str, grant_id: str, requester_id: str) -> bool:
+    """Revoke one requester-owned thread grant. Resolved grants stay revoked."""
+    with user_session(requester_id) as conn:
+        row = conn.execute(
+            "update public.permission_grants set revoked_at=now()"
+            " where id=%s and team_id=%s and revoked_at is null returning id",
+            (grant_id, team_id),
+        ).fetchone()
+    return row is not None
+
+
+def approve_consent(
+    team_id: str, consent_id: str, approver_id: str, *, grant_for_thread: bool = False,
+) -> dict:
     """Requester approves a pending item; it executes immediately.
 
     Since §10 removed T3, approval is always the last key. There is no
     waiting state.
     """
     with user_session(approver_id) as conn:
+        consent = conn.execute(
+            "select tool_name, tool_args, thread_id from public.consent_queue"
+            " where id=%s and team_id=%s and status='pending' for update",
+            (consent_id, team_id),
+        ).fetchone()
+        if consent is None:
+            return {"status": "not_approved", "reason": "not pending or not yours"}
+        tool_name, args, thread_id = consent
+        if grant_for_thread:
+            _grantable(tool_name, str(thread_id) if thread_id else None, args)
         row = conn.execute(
             "update public.consent_queue set status='approved'"
             " where id=%s and team_id=%s and status='pending' returning id",
@@ -307,6 +411,16 @@ def approve_consent(team_id: str, consent_id: str, approver_id: str) -> dict:
         return {"status": "not_approved", "reason": "not pending or not yours"}
     result = execute_consent(team_id, consent_id)
     if result.get("status") == "executed":
+        if grant_for_thread:
+            try:
+                result["permission_grant_id"] = _create_thread_grant(
+                    team_id, approver_id, consent_id, tool_name, args,
+                    str(thread_id) if thread_id else None,
+                )
+            except psycopg.Error as exc:
+                # Consent already executed. Do not lie that it did not; report
+                # the failed optional grant so caller can retry with Allow once.
+                result["permission_grant_error"] = str(exc)
         _requeue_permission_run(team_id, result.get("agent_run_id"))
     return result
 

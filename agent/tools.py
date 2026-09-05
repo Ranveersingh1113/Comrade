@@ -37,8 +37,9 @@ def fetch_team_state(team_id: str, requester_id: str) -> dict:
     `authenticated` can see every team the member belongs to — there is no
     current_team() to scope by, unlike the worker roles.
 
-    Consequence, and correct: open_consent returns only the caller's OWN
-    pending items, because that is what au_consent_queue_select allows.
+    Consent cards in threads the caller can access are intentionally visible:
+    participants need to see the exact action, though only its requester may
+    resolve it.
     """
     with user_session(requester_id) as conn:
         team = conn.execute(

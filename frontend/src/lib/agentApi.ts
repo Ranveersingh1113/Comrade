@@ -66,8 +66,10 @@ export interface ConsentActionResult {
   result?: unknown;
 }
 
-export function approveConsent(consentId: string, teamId: string) {
-  return request<ConsentActionResult>(`/consent/${consentId}/approve`, { team_id: teamId });
+export function approveConsent(consentId: string, teamId: string, grantForThread = false) {
+  return request<ConsentActionResult>(`/consent/${consentId}/approve`, grantForThread
+    ? { team_id: teamId, grant_for_thread: true }
+    : { team_id: teamId });
 }
 
 export function rejectConsent(consentId: string, teamId: string, reason?: string) {
@@ -207,7 +209,7 @@ export async function streamTurn(
 /**
  * Ask a teammate to leave. This does NOT remove them.
  *
- * It files a consent card in THEIR inbox, which only they can see and only
+ * It files a consent card in THEIR private thread, which only they can see and only
  * they can approve — §23.1's "nobody configures another member's
  * participation", implemented with the mechanism already here rather than a
  * remove button with a confirmation dialog on it.

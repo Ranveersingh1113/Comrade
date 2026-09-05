@@ -57,7 +57,7 @@ export function useMessages(threadId: string): MessagesState {
   useEffect(() => {
     void refresh();
   }, [refresh]);
-  useTeamRealtime('messages', teamId, refresh);
+  useTeamRealtime('messages', teamId, refresh, `thread_id=eq.${threadId}`);
 
   return { messages, compilationsByMessage, loading, error, refresh };
 }

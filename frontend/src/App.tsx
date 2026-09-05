@@ -18,7 +18,6 @@ import { TeamGate } from './screens/TeamGate';
 import { Tasks } from './screens/Tasks';
 import { Wiki } from './screens/Wiki';
 import { Documents } from './screens/Documents';
-import { ConsentInbox } from './screens/ConsentInbox';
 import { Setup } from './screens/Setup';
 import { Team } from './screens/Team';
 import { GitHubCallback } from './screens/GitHubCallback';
@@ -193,7 +192,6 @@ export default function App() {
             <Route path="tasks" element={<Tasks />} />
             <Route path="wiki" element={<Wiki />} />
             <Route path="docs" element={<Documents />} />
-            <Route path="inbox" element={<ConsentInbox />} />
             <Route path="setup" element={<Setup />} />
             <Route path="team" element={<Team />} />
           </Route>

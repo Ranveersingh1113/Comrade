@@ -40,9 +40,10 @@ def test_agent_runs_has_cost_and_lineage_columns(admin):
     assert cols.get("parent_run_id") == "uuid"
 
 
-def test_consent_queue_has_batch_trace_and_reason_columns(admin):
+def test_consent_queue_has_thread_trace_and_reason_columns(admin):
     cols = _columns(admin, "consent_queue")
-    assert cols.get("batch_id") == "uuid"
+    assert "batch_id" not in cols
+    assert cols.get("thread_id") == "uuid"
     assert cols.get("agent_run_id") == "uuid"
     assert cols.get("resolution_reason") == "text"
 

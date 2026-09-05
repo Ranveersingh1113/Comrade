@@ -9,7 +9,7 @@ file tool".
 
 WHY THIS IS NOT THE CONSENT PROTOCOL
 --------------------------------------
-Consent grades TEAM blast radius, resolves through a card in someone's inbox
+Consent grades TEAM blast radius, resolves through a card in a member's thread
 after the turn ends, collapses duplicate pending requests by hash, and expires
 after seven days. A local file write affects no teammate, has to resolve in
 under a second inside the loop, is not idempotent, and is stale in thirty. Four

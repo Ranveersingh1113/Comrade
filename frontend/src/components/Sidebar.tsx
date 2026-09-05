@@ -5,7 +5,6 @@ import type { MemoryCompilation, Milestone } from '../lib/types';
 import { daysUntil } from '../lib/format';
 import { useAuth } from '../state/AuthContext';
 import { useTeam } from '../state/TeamContext';
-import { useTeamRealtime } from '../hooks/useRealtime';
 import { Avatar } from './Avatar';
 
 const NAV_ITEMS = [
@@ -13,7 +12,6 @@ const NAV_ITEMS = [
   { to: 'tasks', icon: '☑', label: 'Tasks' },
   { to: 'wiki', icon: '✦', label: 'Team wiki' },
   { to: 'docs', icon: '▤', label: 'Documents' },
-  { to: 'inbox', icon: '✳', label: 'Consent inbox' },
 ] as const;
 
 const navBase: React.CSSProperties = {
@@ -36,29 +34,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const navigate = useNavigate();
   const teamId = team?.id ?? '';
 
-  // null = we do not know yet. The count is a HEAD request that is routinely
-  // aborted (a re-render cancels it), and `count ?? 0` turned every one of
-  // those into a confident "consent queue clear" — the D2 defect, in the one
-  // place it costs the most: a card nobody knows is waiting. Since D4 that
-  // card may be a teammate asking you to leave.
-  const [pendingCount, setPendingCount] = useState<number | null>(null);
   const [lastCompile, setLastCompile] = useState<MemoryCompilation | null>(null);
   const [nextMilestone, setNextMilestone] = useState<Milestone | null>(null);
 
   const loadSignals = useCallback(async () => {
     if (!teamId) return;
-    const [{ count, error: countErr }, { data: compiles }, { data: mss }] =
+    const [{ data: compiles }, { data: mss }] =
       await Promise.all([
-      supabase
-        .from('consent_queue')
-        .select('id', { count: 'exact', head: true })
-        .eq('team_id', teamId)
-        .eq('status', 'pending')
-        // Past its 7-day backstop it cannot be approved, so counting it as
-        // "awaiting your key" sends a member to an inbox that has nothing
-        // they can act on. Filter server-side: the count is a head request
-        // and never fetches the rows to filter locally.
-        .or(`expires_at.is.null,expires_at.gt.${new Date().toISOString()}`),
       supabase
         .from('memory_compilations')
         .select('*')
@@ -74,9 +56,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         .order('due_at', { ascending: true })
         .limit(1),
     ]);
-    // Keep the last known figure rather than overwriting it with a zero we
-    // did not receive.
-    if (!countErr) setPendingCount(count ?? 0);
     setLastCompile(((compiles as MemoryCompilation[] | null) ?? [])[0] ?? null);
     setNextMilestone(((mss as Milestone[] | null) ?? [])[0] ?? null);
   }, [teamId]);
@@ -84,7 +63,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   useEffect(() => {
     loadSignals();
   }, [loadSignals]);
-  useTeamRealtime('consent_queue', teamId, loadSignals);
 
   return (
     <nav
@@ -182,11 +160,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               animation: 'tickerPulse 3.4s ease-in-out infinite',
             }}
           >
-            {pendingCount === null
-              ? 'watching'
-              : pendingCount > 0
-                ? `watching · ${pendingCount} awaiting key`
-                : 'watching · all clear'}
+            ready in your thread
           </span>
         </span>
       </NavLink>
@@ -205,26 +179,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           >
             <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>{item.icon}</span>
             {item.label}
-            {item.to === 'inbox' && pendingCount !== null && pendingCount > 0 && (
-              <span
-                style={{
-                  marginLeft: 'auto',
-                  minWidth: 17,
-                  height: 17,
-                  borderRadius: 9,
-                  background: 'var(--terracotta)',
-                  color: '#fff',
-                  fontSize: 10,
-                  fontWeight: 700,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  padding: '0 5px',
-                }}
-              >
-                {pendingCount}
-              </span>
-            )}
           </NavLink>
         ))}
       </div>
@@ -310,14 +264,6 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               {lastCompile.entries_added} facts
             </div>
           )}
-          <div>
-            <span style={{ color: 'var(--lavender)' }}>✳</span>{' '}
-            {pendingCount === null
-              ? 'checking the consent queue'
-              : pendingCount === 0
-                ? 'consent queue clear'
-                : `${pendingCount} consent${pendingCount > 1 ? 's' : ''} awaiting key`}
-          </div>
           {nextMilestone?.due_at && (
             <div>
               <span style={{ color: 'var(--ink-faint)' }}>◆</span>{' '}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   streamTurn, agentErrorText, rememberMessage, suppressObservation,
@@ -7,13 +7,15 @@ import { activityLabel } from '../lib/toolActivity';
 import { useIsNarrow } from '../hooks/useIsNarrow';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
 import { classifyMessage, memberBars } from '../lib/roomModel';
-import type { DocumentRow, MemoryCompilation, Message, Milestone, Task, Thread } from '../lib/types';
+import type { ConsentItem, DocumentRow, MemoryCompilation, Message, Milestone, Task, Thread } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { useMessages } from '../hooks/useMessages';
+import { useTeamRealtime } from '../hooks/useRealtime';
 import { taskCell, taskMark, taskPill, useTasks, type TaskActions } from '../hooks/useTasks';
 import { Avatar, AiOrb } from '../components/Avatar';
 import { MemoryDiffCard } from '../components/MemoryDiffCard';
 import { ComposerMode, type ComposerModeValue } from '../components/ComposerMode';
+import { ConsentCard } from '../components/ConsentCard';
 
 type RoomLayout = 'classic' | 'split' | 'board';
 
@@ -21,6 +23,8 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
   const { messages, compilationsByMessage, error, refresh } = useMessages(thread.id);
+  const [consents, setConsents] = useState<ConsentItem[]>([]);
+  const [consentError, setConsentError] = useState<string | null>(null);
   const taskState = useTasks();
   const [layout, setLayout] = useState<RoomLayout>(
     () => (localStorage.getItem('comrade.roomLayout') as RoomLayout | null) ?? 'classic',
@@ -50,6 +54,26 @@ export function GroupRoom({ thread }: { thread: Thread }) {
 
   const teamId = team?.id ?? '';
 
+  const refreshConsents = useCallback(async () => {
+    if (!teamId) return;
+    const { data, error: err } = await supabase
+      .from('consent_queue')
+      .select('*')
+      .eq('team_id', teamId)
+      .eq('thread_id', thread.id)
+      .order('created_at');
+    if (err) setConsentError(err.message);
+    else {
+      setConsents((data as ConsentItem[] | null) ?? []);
+      setConsentError(null);
+    }
+  }, [teamId, thread.id]);
+
+  useEffect(() => {
+    void refreshConsents();
+  }, [refreshConsents]);
+  useTeamRealtime('consent_queue', teamId, refreshConsents, `thread_id=eq.${thread.id}`);
+
   const pickLayout = (l: RoomLayout) => {
     setLayout(l);
     localStorage.setItem('comrade.roomLayout', l);
@@ -76,7 +100,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   useEffect(() => {
     const el = chatRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, aiTyping]);
+  }, [messages.length, consents.length, aiTyping]);
 
   const send = async () => {
     const text = draft.trim();
@@ -178,6 +202,13 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   };
 
   const nextMilestone = milestones.find((m) => m.due_at && new Date(m.due_at) > new Date());
+  const timeline = useMemo(
+    () => [
+      ...messages.map((item) => ({ kind: 'message' as const, item })),
+      ...consents.map((item) => ({ kind: 'consent' as const, item })),
+    ].sort((a, b) => a.item.created_at.localeCompare(b.item.created_at)),
+    [messages, consents],
+  );
 
   return (
     <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -254,25 +285,29 @@ export function GroupRoom({ thread }: { thread: Thread }) {
       >
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <div ref={chatRef} style={{ flex: 1, overflowY: 'auto', padding: '20px 0 8px' }}>
-            {error && (
+            {(error || consentError) && (
               <div style={{ padding: '10px 28px', fontSize: 12, color: 'var(--terracotta)' }}>
-                {error}
+                {error ?? consentError}
               </div>
             )}
-            {messages.map((m) => (
+            {timeline.map((entry) => entry.kind === 'consent' ? (
+              <div key={entry.item.id} style={{ padding: '0 28px' }}>
+                <ConsentCard item={entry.item} onResolved={refreshConsents} viewerId={myUserId} />
+              </div>
+            ) : (
               <MessageRow
-                key={m.id}
-                m={m}
+                key={entry.item.id}
+                m={entry.item}
                 senderName={
-                  m.sender_kind === 'ai'
+                  entry.item.sender_kind === 'ai'
                     ? 'Comrade'
-                    : (profileOf(m.sender_id)?.display_name ?? 'Former member')
+                    : (profileOf(entry.item.sender_id)?.display_name ?? 'Former member')
                 }
-                mine={m.sender_id === myUserId}
-                compilation={compilationsByMessage.get(m.id) ?? null}
-                onDelete={() => void deleteForEveryone(m)}
-                onSuppress={() => void suppressObs(m)}
-                onRemember={() => void remember(m)}
+                mine={entry.item.sender_id === myUserId}
+                compilation={compilationsByMessage.get(entry.item.id) ?? null}
+                onDelete={() => void deleteForEveryone(entry.item)}
+                onSuppress={() => void suppressObs(entry.item)}
+                onRemember={() => void remember(entry.item)}
               />
             ))}
             {aiTyping && (
@@ -451,6 +486,7 @@ function MessageRow({
   return (
     <div
       className="fade-up"
+      data-sender={m.sender_kind}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{

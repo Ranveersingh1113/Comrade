@@ -17,7 +17,7 @@ therefore an explicit scope as well as an RLS-authorized one.
 """
 from google.genai import types
 
-from shared.db import user_session
+from shared.db import Role, team_session, user_session
 
 # Newest-first with an explicit LIMIT (so the DB does the capping), reversed
 # below into chronological order. `id is distinct from %s` also holds when the
@@ -75,15 +75,26 @@ def steering_messages(
     team_id: str, requester_id: str, thread_id: str, run_id: str, seen: list[str],
 ) -> list[tuple[str, str]]:
     """Participant messages added after a run started and not yet shown to it."""
+    # `agent_runs` intentionally has no authenticated grant: it contains private
+    # prompts and tool results. Read only this run's boundary metadata as the
+    # team-scoped worker, then still read message bodies as the requester.
+    with team_session(Role.AGENT, team_id) as conn:
+        run = conn.execute(
+            "select input_message_id, created_at from public.agent_runs"
+            " where id=%s and thread_id=%s",
+            (run_id, thread_id),
+        ).fetchone()
+    if run is None:
+        return []
+    input_message_id, started_at = run
     with user_session(requester_id) as conn:
         rows = conn.execute(
             "select m.id, m.body from public.messages m"
-            " join public.agent_runs r on r.id=%s"
             " where m.team_id=%s and m.thread_id=%s and m.sender_kind='user'"
-            " and m.id is distinct from r.input_message_id"
-            " and m.created_at >= r.created_at"
+            " and m.id is distinct from %s::uuid"
+            " and m.created_at >= %s"
             " and not (m.id = any(%s::uuid[]))"
             " order by m.created_at, m.id",
-            (run_id, team_id, thread_id, seen),
+            (team_id, thread_id, input_message_id, started_at, seen),
         ).fetchall()
     return [(str(message_id), body) for message_id, body in rows]

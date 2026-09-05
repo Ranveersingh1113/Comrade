@@ -456,8 +456,8 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
     """Propose the changes you have made as a pull request.
 
     Call this once, after the whole change is made — not per file. It captures
-    everything you edited in the working copy and puts a card in the member's
-    consent inbox showing the literal diff. If they approve, Comrade pushes a
+    everything you edited in the working copy and puts an approval card in the
+    current thread showing the literal diff. If they approve, Comrade pushes a
     `comrade/...` branch and opens the pull request; nothing is pushed to the
     team's main branch, ever.
 

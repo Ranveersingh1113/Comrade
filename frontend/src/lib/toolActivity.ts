@@ -30,7 +30,6 @@ const LABELS: Record<string, string> = {
   // would be a lie told at exactly the wrong moment.
   team_propose_task: 'drafting a task for your approval',
   task_propose_update: 'drafting a task change for your approval',
-  team_propose_batch: 'drafting a few things for your approval',
 
   // The agent's one ungated write (findings §9). It happens whether or not
   // this line renders, which is the reason the line should render.

@@ -1,6 +1,6 @@
 import { describe, expect, it, test } from 'vitest';
 import {
-  argsPretty, batchProgressLabel, consentPhase, isActionable, isExpired, pendingQueueRows,
+  argsPretty, consentPhase, isActionable, isExpired,
 } from '../../src/lib/consentModel';
 import type { ConsentItem } from '../../src/lib/types';
 
@@ -8,7 +8,7 @@ const item = (over: Partial<ConsentItem>): ConsentItem => ({
   id: 'c1', team_id: 't1', requesting_member_id: 'u1', tool_name: 'task_create',
   tool_args: { body: 'hi' }, source_snippet: null, action_hash: 'h', status: 'pending',
   reversible: true, expires_at: null, created_at: '1', resolved_at: null,
-  tier: 'T2', batch_id: null,
+  tier: 'T2', thread_id: 'thread-1', agent_run_id: null, resolution_reason: null,
   ...over,
 });
 
@@ -34,86 +34,6 @@ describe('consentPhase', () => {
       requesting_member_id: 'someone-else',
     });
     expect(consentPhase(viewedByTeammate, 'me', false)).toBe('pending');
-  });
-});
-
-describe('batchProgressLabel', () => {
-  test('counts executed / approved / edited as approved, out of the whole batch', () => {
-    const items = [
-      item({ id: 'a', status: 'executed' }),
-      item({ id: 'b', status: 'pending' }),
-      item({ id: 'c', status: 'rejected' }),
-      item({ id: 'd', status: 'pending' }),
-      item({ id: 'e', status: 'pending' }),
-    ];
-    expect(batchProgressLabel(items)).toBe('1 of 5 approved');
-  });
-  test('a fresh batch with nothing resolved yet', () => {
-    const items = [item({ id: 'a' }), item({ id: 'b' })];
-    expect(batchProgressLabel(items)).toBe('0 of 2 approved');
-  });
-});
-
-describe('pendingQueueRows — task 6: grouping is a display concern only', () => {
-  test('ungrouped pending items each render as their own single row, in order', () => {
-    const all = [item({ id: 'a', batch_id: null }), item({ id: 'b', batch_id: null })];
-    const rows = pendingQueueRows(all, all);
-    expect(rows).toEqual([
-      { kind: 'single', item: all[0] },
-      { kind: 'single', item: all[1] },
-    ]);
-  });
-
-  test('items sharing a batch_id collapse into one batch row', () => {
-    const batchId = 'batch-1';
-    const a = item({ id: 'a', batch_id: batchId });
-    const b = item({ id: 'b', batch_id: batchId });
-    const c = item({ id: 'c', batch_id: null });
-    const rows = pendingQueueRows([a, b, c], [a, b, c]);
-
-    expect(rows).toEqual([
-      { kind: 'batch', batchId, items: [a, b], totalCount: 2, progressLabel: '0 of 2 approved' },
-      { kind: 'single', item: c },
-    ]);
-  });
-
-  test('progress counts already-resolved siblings that no longer appear in the pending list', () => {
-    const batchId = 'batch-1';
-    const approved = item({ id: 'a', batch_id: batchId, status: 'executed' });
-    const rejected = item({ id: 'b', batch_id: batchId, status: 'rejected' });
-    const stillPending = item({ id: 'c', batch_id: batchId, status: 'pending' });
-    // The inbox's `pending` list only ever holds still-pending items.
-    const rows = pendingQueueRows([approved, rejected, stillPending], [stillPending]);
-
-    expect(rows).toEqual([
-      {
-        kind: 'batch',
-        batchId,
-        items: [stillPending], // only the actionable one gets a card
-        totalCount: 3,
-        progressLabel: '1 of 3 approved',
-      },
-    ]);
-  });
-
-  test('a fully-resolved batch contributes no row once nothing is left pending', () => {
-    const batchId = 'batch-1';
-    const approved = item({ id: 'a', batch_id: batchId, status: 'executed' });
-    const rejected = item({ id: 'b', batch_id: batchId, status: 'rejected' });
-    expect(pendingQueueRows([approved, rejected], [])).toEqual([]);
-  });
-
-  test('two distinct batches each get their own row', () => {
-    const a1 = item({ id: 'a1', batch_id: 'batch-1' });
-    const a2 = item({ id: 'a2', batch_id: 'batch-1' });
-    const b1 = item({ id: 'b1', batch_id: 'batch-2' });
-    const rows = pendingQueueRows([a1, a2, b1], [a1, a2, b1]);
-
-    expect(rows.map((r) => r.kind)).toEqual(['batch', 'batch']);
-    expect(rows).toEqual([
-      { kind: 'batch', batchId: 'batch-1', items: [a1, a2], totalCount: 2, progressLabel: '0 of 2 approved' },
-      { kind: 'batch', batchId: 'batch-2', items: [b1], totalCount: 1, progressLabel: '0 of 1 approved' },
-    ]);
   });
 });
 
@@ -143,7 +63,9 @@ describe('expiry', () => {
     expires_at: new Date(now + 24 * HOUR).toISOString(),
     created_at: new Date(now - HOUR).toISOString(),
     resolved_at: null,
-    batch_id: null,
+    thread_id: 'thread-1',
+    agent_run_id: null,
+    resolution_reason: null,
     ...over,
   });
 

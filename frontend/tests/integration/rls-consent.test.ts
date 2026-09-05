@@ -9,6 +9,7 @@ describe.skipIf(!stackUp())('consent_queue RLS through supabase-js', () => {
   let member: TestUser;
   let teamId: string;
   let t2Id: string;
+  let sharedId: string;
 
   beforeAll(async () => {
     leader = await createUser('con-lead');
@@ -17,6 +18,10 @@ describe.skipIf(!stackUp())('consent_queue RLS through supabase-js', () => {
 
     const sql = await adminSql();
     try {
+      const general = await sql.query(
+        "select id from public.threads where team_id=$1 and title='General'",
+        [teamId],
+      );
       const t2 = await sql.query(
         "insert into public.consent_queue (team_id, requesting_member_id, tool_name,"
         + " tool_args, action_hash, tier) values ($1, $2, 'task_create',"
@@ -24,6 +29,13 @@ describe.skipIf(!stackUp())('consent_queue RLS through supabase-js', () => {
         [teamId, leader.id],
       );
       t2Id = t2.rows[0].id;
+      const shared = await sql.query(
+        "insert into public.consent_queue (team_id, thread_id, requesting_member_id, tool_name,"
+        + " tool_args, action_hash, tier) values ($1, $2, $3, 'task_create',"
+        + " '{\"body\":\"shared\"}', 'shared-hash', 'T2') returning id",
+        [teamId, general.rows[0].id, leader.id],
+      );
+      sharedId = shared.rows[0].id;
     } finally {
       await sql.end();
     }
@@ -37,5 +49,15 @@ describe.skipIf(!stackUp())('consent_queue RLS through supabase-js', () => {
     const { data } = await member.client
       .from('consent_queue').select('id').eq('id', t2Id);
     expect(data).toEqual([]);
+  });
+
+  test('a thread participant sees the card but cannot resolve it', async () => {
+    const { data } = await member.client
+      .from('consent_queue').select('id').eq('id', sharedId);
+    expect(data).toEqual([{ id: sharedId }]);
+
+    const { data: changed } = await member.client
+      .from('consent_queue').update({ status: 'rejected' }).eq('id', sharedId).select('id');
+    expect(changed).toEqual([]);
   });
 });

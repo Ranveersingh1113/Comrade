@@ -50,7 +50,7 @@ export function Threads() {
   };
 
   const active = threads.find((thread) => thread.id === threadId);
-  if (threadId && active) return <GroupRoom thread={active} />;
+  if (threadId && active) return <GroupRoom key={active.id} thread={active} />;
 
   return <main style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
     <header style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

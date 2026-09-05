@@ -111,7 +111,7 @@ REGISTRY: dict[str, ToolSpec] = {
     # An edit changes a WORKING COPY nobody else can see. It reaches the team
     # only when a member approves the pull request, which is the reviewable
     # action and is gated by the consent queue. Asking for approval per file
-    # would put a card in someone's inbox for each step of one change, which is
+    # would put a card in someone's thread for each step of one change, which is
     # the consent fatigue §5 exists to avoid.
     #
     # writes=True is what arms the per-turn write cap in the chokepoint. That

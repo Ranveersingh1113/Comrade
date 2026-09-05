@@ -1,7 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
 // E2E against the real stack: local Supabase must already be up
-// (`npx supabase start` in the repo root). Playwright boots vite + uvicorn.
+// (`npx supabase start` in the repo root). Playwright boots Vite, API, and
+// the durable agent worker; the API only enqueues agent turns.
 export default defineConfig({
   testDir: 'tests/e2e',
   timeout: 45_000,
@@ -26,6 +27,10 @@ export default defineConfig({
       url: 'http://localhost:8000/health',
       reuseExistingServer: true,
       timeout: 60_000,
+    },
+    {
+      command: 'uv run python -m agent.worker',
+      cwd: '..',
     },
   ],
 });

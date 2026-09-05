@@ -12,7 +12,7 @@ read every file on the disk" or "has no file tool", and neither is usable.
 WHY NOT THE CONSENT PROTOCOL
 ------------------------------
 shared/consent.py grades TEAM blast radius, resolves through a card in a
-member's inbox after the turn ends, collapses duplicate pending requests by
+member's thread after the turn ends, collapses duplicate pending requests by
 action_hash, and expires after seven days. A local file write affects no
 teammate, must resolve inside the loop in under a second, is not idempotent,
 and is stale in thirty seconds. Four structural mismatches; this is a separate

@@ -9,7 +9,7 @@ explaining why this product does not have those.
 The way out is the mechanism already here. A departure is filed as a consent
 proposal whose `requesting_member_id` is **the person being asked** — and
 au_consent_queue_update lets only the requester resolve their own items. So
-the card appears in their inbox, the asker cannot even see it, and the only
+the card appears in their private thread, the asker cannot even see it, and the only
 key that turns is the one belonging to the person who would leave.
 
 That makes the identity check load-bearing rather than decorative, and most of
@@ -171,7 +171,7 @@ def test_a_stranger_cannot_resolve_your_card(seeded, admin):
 def test_the_agent_cannot_propose_a_departure():
     """The invariant survives the tool that used to carry it.
 
-    This was asserted through team_propose_batch, which was the one place a
+    This used to be asserted through team_propose_batch, which was the one place a
     tool name chosen by the MODEL reached the consent queue. That tool was
     removed 2026-09-04, so the property now holds by construction — every
     remaining proposal tool hardcodes its own action name and the model
@@ -181,7 +181,7 @@ def test_the_agent_cannot_propose_a_departure():
     property, so it is re-anchored on the set itself rather than deleted with
     the tool. member_depart executes fine; the bar it fails is "should the
     MODEL be able to name this", because "Comrade suggests you leave the team"
-    is not a card this product puts in anyone's inbox — and the pending-hash
+    is not a card this product puts in anyone's thread — and the pending-hash
     index means such a card would block the real one a teammate tried to send.
     """
     from shared.consent import AGENT_PROPOSABLE
@@ -210,7 +210,7 @@ def test_a_card_left_lying_around_after_you_already_left(seeded, admin):
 
 def test_asking_twice_reuses_the_one_card(seeded, admin):
     """uq_consent_pending_hash. Two teammates asking the same person is one
-    question, not two — and it must not stack cards in their inbox."""
+    question, not two — and it must not stack cards in their private thread."""
     first = _ask(A2)
     second = _ask(A2)
     assert first["consent_id"] == second["consent_id"]

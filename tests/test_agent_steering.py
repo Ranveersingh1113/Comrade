@@ -39,6 +39,21 @@ def test_message_during_active_run_is_durable_steering(seeded):
     ]
 
 
+def test_steering_reads_run_metadata_without_granting_users_agent_runs(seeded):
+    """Run metadata is worker-only; the requester still RLS-reads messages."""
+    from agent.history import steering_messages
+
+    thread_id = _thread_id()
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "inspect the failing test")
+    active = claim_next_run("worker-one")
+    assert active is not None and active.id == run_id
+    enqueue_turn(TEAM_A, A1, thread_id, "also check the migration")
+
+    messages = steering_messages(TEAM_A, A1, thread_id, active.id, [])
+
+    assert [body for _, body in messages] == ["also check the migration"]
+
+
 def test_steering_is_injected_before_the_next_model_call(monkeypatch):
     """The runner cannot receive a message during a tool, only before LLM work."""
     from agent.permission_plugin import ChokepointPlugin

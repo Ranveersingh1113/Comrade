@@ -11,6 +11,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface SeedState {
   teamId: string;
+  generalThreadId: string;
   leader: { id: string; email: string };
   member: { id: string; email: string };
   password: string;
@@ -83,14 +84,13 @@ test.describe.serial('Comrade journeys', () => {
     await expect(page.getByText('REVERT QUEUED')).toBeVisible({ timeout: 10000 });
   });
 
-  test('5. consent inbox: approving the T2 item executes it', async () => {
-    await page.goto(`/t/${state.teamId}/inbox`);
+  test('5. inline consent: approving the T2 item executes it', async () => {
+    await page.goto(`/t/${state.teamId}/threads/${state.generalThreadId}`);
     const t2Card = page
       .getByTestId('consent-card')
       .filter({ hasText: 'standup moved to 3pm' });
     await expect(t2Card.getByText('task_create').first()).toBeVisible();
-    await t2Card.getByRole('button', { name: 'APPROVE' }).click();
-    // executed items leave Pending and reappear as a compact History row
+    await t2Card.getByRole('button', { name: 'ALLOW ONCE' }).click();
     await expect(page.getByText('EXECUTED', { exact: false }).first()).toBeVisible({
       timeout: 15000,
     });
@@ -157,7 +157,7 @@ test('9. no screen scrolls sideways on a phone', async ({ browser }) => {
   const phone = await ctx.newPage();
   await signIn(phone, state.leader.email);
 
-  for (const path of ['threads', 'tasks', 'wiki', 'docs', 'inbox', 'thread']) {
+  for (const path of ['threads', 'tasks', 'wiki', 'docs', 'thread']) {
     await phone.goto(`/t/${state.teamId}/${path}`);
     await phone.waitForLoadState('networkidle');
     const overflows = await phone.evaluate(

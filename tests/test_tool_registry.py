@@ -44,7 +44,7 @@ def test_task_propose_update_is_a_gated_write_like_task_create():
 
 
 def test_team_propose_batch_is_gone():
-    """Removed 2026-09-04. It batched cards for a detached consent inbox, and
+    """Removed 2026-09-04. It batched cards before inline thread permissions, and
     approvals are moving into the thread that asked for them — at which point
     grouping unrelated-looking cards is solving a problem that no longer
     exists.

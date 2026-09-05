@@ -28,7 +28,9 @@ const item = (over: Partial<ConsentItem> = {}): ConsentItem => ({
   expires_at: null,
   created_at: '2026-07-20T10:00:00Z',
   resolved_at: null,
-  batch_id: null,
+  thread_id: 'thread-1',
+  agent_run_id: null,
+  resolution_reason: null,
   ...over,
 });
 
@@ -57,7 +59,29 @@ describe('the warrant card shows the literal action (hard design rule)', () => {
 });
 
 describe('approve / reject call the backend as specified', () => {
-  test('APPROVE posts to /consent/{id}/approve with team_id', async () => {
+  test('only requester receives approval controls in a shared thread', () => {
+    renderInApp(<ConsentCard item={item()} onResolved={() => {}} viewerId="u2" />);
+    expect(screen.queryByRole('button', { name: 'ALLOW ONCE' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'ALLOW FOR THIS THREAD' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument();
+    expect(screen.getByText("AWAITING REQUESTER'S KEY")).toBeInTheDocument();
+  });
+
+  test('ALLOW FOR THIS THREAD requests a bounded reusable permission', async () => {
+    let seenBody: unknown = null;
+    server.use(
+      http.post(`${BASE}/consent/:id/approve`, async ({ request }) => {
+        seenBody = await request.json();
+        return HttpResponse.json({ status: 'executed', result: {} });
+      }),
+    );
+    const user = userEvent.setup();
+    renderInApp(<ConsentCard item={item()} onResolved={() => {}} viewerId="u1" />);
+    await user.click(screen.getByRole('button', { name: 'ALLOW FOR THIS THREAD' }));
+    await waitFor(() => expect(seenBody).toEqual({ team_id: 'team-1', grant_for_thread: true }));
+  });
+
+  test('ALLOW ONCE posts to /consent/{id}/approve with team_id', async () => {
     let seenBody: unknown = null;
     server.use(
       http.post(`${BASE}/consent/:id/approve`, async ({ request, params }) => {
@@ -69,7 +93,7 @@ describe('approve / reject call the backend as specified', () => {
     const onResolved = vi.fn();
     const user = userEvent.setup();
     renderInApp(<ConsentCard item={item()} onResolved={onResolved} viewerId="u1" />);
-    await user.click(screen.getByRole('button', { name: 'APPROVE' }));
+    await user.click(screen.getByRole('button', { name: 'ALLOW ONCE' }));
     await waitFor(() => expect(onResolved).toHaveBeenCalled());
     expect(seenBody).toEqual({ team_id: 'team-1' });
   });
@@ -116,6 +140,31 @@ describe('approve / reject call the backend as specified', () => {
   });
 });
 
+describe('resolved cards keep their result in the timeline', () => {
+  test('shows rejection reason', () => {
+    renderInApp(
+      <ConsentCard
+        item={item({ status: 'rejected', resolution_reason: 'already covered in standup' })}
+        onResolved={() => {}}
+        viewerId="u1"
+      />,
+    );
+    expect(screen.getByText(/Rejected — already covered in standup/)).toBeInTheDocument();
+  });
+
+  test('shows expiry without offering an action', () => {
+    renderInApp(
+      <ConsentCard
+        item={item({ expires_at: '2020-01-01T00:00:00Z' })}
+        onResolved={() => {}}
+        viewerId="u1"
+      />,
+    );
+    expect(screen.getByText('Expired — nothing ran.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'ALLOW ONCE' })).not.toBeInTheDocument();
+  });
+});
+
 describe('stale (409) is a distinct state from resolved-elsewhere (404)', () => {
   test('409 renders the went-stale explanation and removes the action row', async () => {
     server.use(
@@ -125,10 +174,10 @@ describe('stale (409) is a distinct state from resolved-elsewhere (404)', () => 
     );
     const user = userEvent.setup();
     renderInApp(<ConsentCard item={item()} onResolved={() => {}} viewerId="u1" />);
-    await user.click(screen.getByRole('button', { name: 'APPROVE' }));
+    await user.click(screen.getByRole('button', { name: 'ALLOW ONCE' }));
     expect(await screen.findByText(/went stale/)).toBeInTheDocument();
     expect(screen.getByText(/STALE — NOTHING RAN/)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'APPROVE' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'ALLOW ONCE' })).not.toBeInTheDocument();
   });
 
   test('404 renders already-resolved copy, NOT the stale copy', async () => {
@@ -139,7 +188,7 @@ describe('stale (409) is a distinct state from resolved-elsewhere (404)', () => 
     );
     const user = userEvent.setup();
     renderInApp(<ConsentCard item={item()} onResolved={() => {}} viewerId="u1" />);
-    await user.click(screen.getByRole('button', { name: 'APPROVE' }));
+    await user.click(screen.getByRole('button', { name: 'ALLOW ONCE' }));
     expect(await screen.findByText(/no longer pending/)).toBeInTheDocument();
     expect(screen.queryByText(/went stale/)).not.toBeInTheDocument();
   });

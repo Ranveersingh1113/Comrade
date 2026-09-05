@@ -8,7 +8,7 @@ import { supabase } from '../lib/supabase';
  * Each caller gets its own uniquely-named channel: supabase-js returns the
  * existing channel object for a repeated name, and adding an `.on()` handler
  * to an already-subscribed channel throws. Two components watching the same
- * table (e.g. the sidebar badge and the consent inbox) must not collide.
+ * table must not collide.
  *
  * Tables are published server-side by migration
  * 20260719120000_realtime_publication.sql; the focus-refetch remains as a
@@ -18,6 +18,7 @@ export function useTeamRealtime(
   table: 'messages' | 'tasks' | 'consent_queue',
   teamId: string,
   onChange: () => void,
+  filter = `team_id=eq.${teamId}`,
 ): void {
   const cbRef = useRef(onChange);
   cbRef.current = onChange;
@@ -34,10 +35,10 @@ export function useTeamRealtime(
     }
 
     const channel = supabase
-      .channel(`rt:${table}:${teamId}:${instanceId}`)
+      .channel(`rt:${table}:${filter}:${instanceId}`)
       .on(
         'postgres_changes',
-        { event: '*', schema: 'public', table, filter: `team_id=eq.${teamId}` },
+        { event: '*', schema: 'public', table, filter },
         () => cbRef.current(),
       )
       .subscribe();
@@ -46,5 +47,5 @@ export function useTeamRealtime(
       window.removeEventListener('focus', onFocus);
       void supabase.removeChannel(channel);
     };
-  }, [table, teamId, instanceId]);
+  }, [table, teamId, filter, instanceId]);
 }

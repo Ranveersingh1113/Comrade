@@ -15,7 +15,7 @@ import { useTeam } from '../state/TeamContext';
  * The whole screen is arranged around one claim: your participation is yours.
  * You can take your history and go, at any time, without asking. Nobody has a
  * button that removes you — the only thing a teammate can do is put a question
- * in your inbox.
+ * in your private thread.
  */
 export function Team() {
   const { team, roster, myUserId, loading } = useTeam();
@@ -83,7 +83,7 @@ export function Team() {
     setNote(null);
     try {
       await askToLeave(teamId, memberId, reason);
-      setNote('Asked. It is their decision — the card is in their inbox, not yours.');
+      setNote('Asked. It is their decision — the card is in their private thread, not yours.');
       setAsking(null);
       setReason('');
       // Deliberately no roster refresh: nothing has changed yet, and reloading
@@ -144,7 +144,7 @@ export function Team() {
                 <div style={{ marginTop: 12, paddingLeft: 39 }}>
                   <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.55 }}>
                     This does not remove {profile.display_name}. It puts the question in their
-                    consent inbox, where only they can answer it — you will not see the card.
+                    private thread, where only they can answer it — you will not see the card.
                   </div>
                   <input
                     value={reason}

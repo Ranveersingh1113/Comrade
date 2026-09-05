@@ -3,7 +3,7 @@
 Phase C1. `repo_edit` writes into the team's checkout — a scratch tree only
 this turn can see. The reviewable action is the pull request (C2), gated by the
 consent queue; asking for approval per file would put a card in a member's
-inbox for every step of one change, which is the consent fatigue §5 exists to
+thread for every step of one change, which is the consent fatigue §5 exists to
 avoid.
 
 REPLACEMENT, NOT REWRITING

@@ -335,9 +335,9 @@ async def stream_turn(
             )
             # 🔴 "Nothing was changed" was true for one of these two cases and
             # asserted for both. Found 2026-09-04 by the four-person scenario:
-            # a turn called team_propose_batch, wrote three consent rows, said
-            # nothing, and told the member nothing had changed. Three
-            # approvals were waiting in the queue while it said so.
+            # a turn proposed an action, wrote a consent row, said nothing,
+            # and told the member nothing had changed. An approval was waiting
+            # in the thread while it said so.
             #
             # The retry above is correctly unavailable once a tool has run —
             # re-asking would run it twice. That is precisely why this message

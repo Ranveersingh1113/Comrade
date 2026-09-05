@@ -104,7 +104,7 @@ def test_the_agent_may_propose_exactly_three_things(seeded):
     behind a human key. It is "should the MODEL be able to name this".
 
     member_depart fails that bar: it executes, but "Comrade suggests you leave
-    the team" is not a card this product puts in anyone's inbox.
+    the team" is not a card this product puts in anyone's thread.
 
     repo_open_pr passes it, and more cleanly than either task tool. Proposing a
     change and having a human approve it is the entire point of the capability

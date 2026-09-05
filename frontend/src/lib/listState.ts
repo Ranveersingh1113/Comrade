@@ -7,13 +7,10 @@
  * error AND the empty state together:
  *
  *   Tasks         "No tasks yet."
- *   Consent inbox "Queue clear — nothing awaiting your key."
  *
  * Both are POSITIVE ASSERTIONS about the world, and both are false when the
- * request simply did not come back. The consent one is the dangerous one: it
- * tells a member there is nothing awaiting their key, on the screen whose
- * entire job is to tell them when something is. A member who half-reads a red
- * banner and fully reads "queue clear" walks away reassured and wrong.
+ * request simply did not come back. A member who half-reads a red banner and
+ * fully reads a reassuring empty-state walks away reassured and wrong.
  *
  * "Empty" must mean "the server told us there is nothing", never "we do not
  * know".

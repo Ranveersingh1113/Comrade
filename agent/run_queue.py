@@ -129,6 +129,17 @@ def owns_run(run: Run) -> bool:
     return row is not None
 
 
+def finished_by_worker(run: Run) -> bool:
+    """The worker that closed a successful run may persist its reply."""
+    with team_session(Role.AGENT, run.team_id) as conn:
+        row = conn.execute(
+            "select 1 from public.agent_runs where id=%s and worker_id=%s"
+            " and status='done'",
+            (run.id, run.worker_id),
+        ).fetchone()
+    return row is not None
+
+
 def finish_claimed_run(run: Run, status: str, error: str | None = None) -> bool:
     """Only the worker currently holding the lease may close its run."""
     with team_session(Role.AGENT, run.team_id) as conn:

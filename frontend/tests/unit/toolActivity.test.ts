@@ -27,7 +27,6 @@ describe('activityLabel', () => {
     expect(activityLabel('team_propose_task')).toMatch(/^drafting/);
     expect(activityLabel('team_propose_task')).toMatch(/for your approval$/);
     expect(activityLabel('task_propose_update')).toMatch(/for your approval$/);
-    expect(activityLabel('team_propose_batch')).toMatch(/for your approval$/);
   });
 
   it('does not hide the one tool that acts immediately', () => {

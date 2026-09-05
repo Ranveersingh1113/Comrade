@@ -255,3 +255,13 @@ test('an ordinary message carries no provenance marker', async () => {
   await screen.findByText('morning all');
   expect(screen.queryByText(/drafted with Comrade/)).not.toBeInTheDocument();
 });
+
+test('an AI reply exposes its sender for browser journeys', async () => {
+  supaState.tables.messages = [
+    msg({ id: 'm-ai', sender_kind: 'ai', sender_id: null, body: 'Two tasks are open.' }),
+  ];
+  renderInApp(<GroupRoom thread={thread} />);
+
+  const row = (await screen.findByText('Two tasks are open.')).closest('[data-sender]');
+  expect(row).toHaveAttribute('data-sender', 'ai');
+});

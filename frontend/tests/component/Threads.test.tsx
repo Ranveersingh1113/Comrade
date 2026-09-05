@@ -65,6 +65,27 @@ test('agent mode sends the canonical thread id', async () => {
   await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'check the release', thread_id: 'thread-1' }));
 });
 
+test('shows a thread consent card inline with its messages', async () => {
+  supaState.tables.threads = [thread];
+  supaState.tables.messages = [{
+    id: 'resumed-message', team_id: 'team-1', thread_id: 'thread-1', sender_kind: 'ai',
+    sender_id: null, body: 'Comrade resumed after permission.', deleted_scope: null,
+    deleted_by: null, deleted_at: null, ai_assisted: false, created_at: '2026-09-04T11:00:00Z',
+  }];
+  supaState.tables.consent_queue = [{
+    id: 'consent-1', team_id: 'team-1', thread_id: 'thread-1', agent_run_id: null,
+    requesting_member_id: 'u1', tool_name: 'task_create', tool_args: { title: 'Publish notes' },
+    source_snippet: 'publish notes', action_hash: 'abc', status: 'pending', reversible: true,
+    tier: 'T1', expires_at: null, created_at: '2026-09-04T10:00:00Z', resolved_at: null,
+    resolution_reason: null,
+  }];
+  render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>);
+  const card = await screen.findByTestId('consent-card');
+  expect(card).toHaveAttribute('data-consent-id', 'consent-1');
+  expect(card.compareDocumentPosition(screen.getByText('Comrade resumed after permission.')))
+    .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+});
+
 test('switching thread routes resets the visible composer mode for the new thread', async () => {
   supaState.tables.threads = [
     thread,

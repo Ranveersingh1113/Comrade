@@ -31,7 +31,9 @@ def test_legacy_messages_backfill_to_general_and_private_threads(seeded, admin):
     # message in the right place.
     rows = admin.execute(
         "select t.visibility, t.title from public.messages m"
-        " join public.threads t on t.id = m.thread_id order by t.title"
+        " join public.threads t on t.id = m.thread_id"
+        " where m.team_id=%s order by t.title",
+        (TEAM_A,),
     ).fetchall()
     assert rows == [("team", "General"), ("restricted", "Private")]
 

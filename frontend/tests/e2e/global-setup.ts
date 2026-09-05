@@ -22,7 +22,13 @@ export default async function globalSetup(): Promise<void> {
   const teamId = await createTeam(leader, [member]);
 
   const sql = await adminSql();
+  let generalThreadId = '';
   try {
+    const general = await sql.query(
+      "select id from public.threads where team_id = $1 and title = 'General'",
+      [teamId],
+    );
+    generalThreadId = general.rows[0].id;
     // a proposed task for the member (journey: confirm)
     await sql.query(
       "insert into public.tasks (team_id, assignee_id, title, status,"
@@ -69,16 +75,16 @@ export default async function globalSetup(): Promise<void> {
     const t2Args = { assignee_id: member.id, title: 'Reminder: standup moved to 3pm.' };
     await sql.query(
       "insert into public.consent_queue (team_id, requesting_member_id, tool_name,"
-      + " tool_args, action_hash, tier, expires_at)"
-      + " values ($1, $2, 'task_create', $3, $4, 'T2', now() + interval '1 day')",
+      + " tool_args, action_hash, tier, thread_id, expires_at)"
+      + " values ($1, $2, 'task_create', $3, $4, 'T2', $5, now() + interval '1 day')",
       [teamId, leader.id, JSON.stringify(t2Args),
-       mkHash('task_create', teamId, leader.id, t2Args)],
+       mkHash('task_create', teamId, leader.id, t2Args), generalThreadId],
     );
     // an AI observation in the room (journey: suppress)
     await sql.query(
-      "insert into public.messages (team_id, thread_type, sender_kind, body)"
-      + " values ($1, 'group', 'ai', 'Observation: the API doc has not moved in a week.')",
-      [teamId],
+      "insert into public.messages (team_id, thread_id, sender_kind, body)"
+      + " values ($1, $2, 'ai', 'Observation: the API doc has not moved in a week.')",
+      [teamId, generalThreadId],
     );
   } finally {
     await sql.end();
@@ -88,6 +94,7 @@ export default async function globalSetup(): Promise<void> {
     resolve(__dirname, '.state.json'),
     JSON.stringify({
       teamId,
+      generalThreadId,
       leader: { id: leader.id, email: leader.email },
       member: { id: member.id, email: member.email },
       password: PASSWORD,

@@ -10,7 +10,8 @@ import threading
 import time
 
 from agent.run_queue import (
-    claim_next_run, finish_claimed_run, input_for, owns_run, renew_lease,
+    claim_next_run, finish_claimed_run, finished_by_worker, input_for, owns_run,
+    renew_lease,
 )
 from agent.runtime import run_turn_sync
 from shared.db import Role, team_session
@@ -61,7 +62,7 @@ def run_once(worker_id: str | None = None) -> bool:
             thread_id=run.thread_id, exclude_message_id=run.input_message_id,
             run_id=run.id, worker_id=worker_id, lock_held=True,
         )
-        if owns_run(run):
+        if finished_by_worker(run):
             _persist_ai_reply(run.team_id, run.thread_id, result.get("reply", ""))
     except Exception as exc:  # noqa: BLE001 - failures are durable queue state
         logger.exception("agent run failed: %s", run.id)

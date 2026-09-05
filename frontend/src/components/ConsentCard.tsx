@@ -33,12 +33,14 @@ export function ConsentCard({
 
   const phase = consentPhase(item, viewerId, stale);
   const pending = phase === 'pending';
+  const canResolve = pending && item.requesting_member_id === viewerId;
+  const canGrantForThread = item.tool_name === 'task_create' || item.tool_name === 'task_update';
   const executed = phase === 'executed';
-  const dead = phase === 'rejected' || phase === 'cancelled';
+  const dead = phase === 'rejected' || phase === 'cancelled' || phase === 'expired';
 
   const badge =
     phase === 'pending'
-      ? { text: 'AWAITING YOUR KEY', color: 'var(--peach-pale)' }
+      ? { text: canResolve ? 'AWAITING YOUR KEY' : "AWAITING REQUESTER'S KEY", color: 'var(--peach-pale)' }
       : executed
         ? { text: 'EXECUTED', color: 'var(--peach)' }
         : item.status === 'approved' || item.status === 'edited'
@@ -286,7 +288,7 @@ export function ConsentCard({
             </div>
           )}
 
-          {pending && !stale && !editing && (
+          {canResolve && !stale && !editing && (
             <input
               value={rejectReason}
               onChange={(e) => setRejectReason(e.target.value)}
@@ -307,7 +309,7 @@ export function ConsentCard({
               }}
             />
           )}
-          {pending && !stale && (
+          {canResolve && !stale && (
             <div style={{ display: 'flex', gap: 9, marginTop: 15, alignItems: 'center' }}>
               {editing ? (
                 <>
@@ -329,8 +331,17 @@ export function ConsentCard({
                     disabled={busy}
                     onClick={() => void act(() => approveConsent(item.id, item.team_id))}
                   >
-                    APPROVE
+                    ALLOW ONCE
                   </button>
+                  {canGrantForThread && (
+                    <button
+                      className="btn-secondary"
+                      disabled={busy}
+                      onClick={() => void act(() => approveConsent(item.id, item.team_id, true))}
+                    >
+                      ALLOW FOR THIS THREAD
+                    </button>
+                  )}
                   <button className="btn-secondary" disabled={busy} onClick={startEdit}>
                     Edit
                   </button>
@@ -364,7 +375,13 @@ export function ConsentCard({
           )}
           {dead && (
             <div style={{ marginTop: 15, fontSize: 12.5, color: 'var(--muted)' }}>
-              {item.status === 'rejected' ? 'Rejected — nothing ran.' : 'Cancelled.'}
+              {phase === 'expired'
+                ? 'Expired — nothing ran.'
+                : item.status === 'rejected'
+                  ? item.resolution_reason
+                    ? `Rejected — ${item.resolution_reason}`
+                    : 'Rejected — nothing ran.'
+                  : 'Cancelled.'}
             </div>
           )}
         </div>

@@ -114,7 +114,7 @@ def health(response: Response) -> dict[str, str]:
     this into /health and /ready before relying on it.
     """
     try:
-        with connect(Role.ADMIN) as conn:
+        with connect(Role.CONTROL) as conn:
             conn.execute("select 1")
     except Exception as exc:  # noqa: BLE001 - any failure to reach it counts
         logger.warning("health check could not reach the database: %s", exc)
@@ -139,7 +139,7 @@ def ready(response: Response) -> dict:
     checks: dict[str, str] = {}
 
     try:
-        with connect(Role.ADMIN) as conn:
+        with connect(Role.CONTROL) as conn:
             conn.execute("select 1")
         checks["database"] = "ok"
     except Exception as exc:  # noqa: BLE001 - any failure to reach it counts
@@ -157,7 +157,7 @@ def ready(response: Response) -> dict:
                 for path in (Path(__file__).resolve().parent.parent
                              / "supabase" / "migrations").glob("*.sql")
             )
-            with connect(Role.ADMIN) as conn:
+            with connect(Role.CONTROL) as conn:
                 applied = conn.execute(
                     "select max(version) from supabase_migrations.schema_migrations"
                 ).fetchone()[0]
@@ -172,7 +172,7 @@ def ready(response: Response) -> dict:
         # claim a dead process can keep making — but "is work actually moving",
         # which is the thing a member experiences.
         try:
-            with connect(Role.ADMIN) as conn:
+            with connect(Role.CONTROL) as conn:
                 stalled = conn.execute(
                     "select count(*) from public.agent_runs"
                     " where status='queued'"

@@ -50,7 +50,7 @@ def register(job_type: str, handler: Handler) -> None:
 
 def _finish(job_id, status: str, error: str | None = None) -> None:
     terminal = status in ("done", "failed")
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status=%s, last_error=%s,"
@@ -62,7 +62,7 @@ def _finish(job_id, status: str, error: str | None = None) -> None:
 
 def _fail_expired_leases() -> None:
     """Terminally fail work abandoned after its final lease expires."""
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status='failed', finished_at=now(),"
@@ -78,7 +78,7 @@ def run_once(handlers: dict[str, Handler] | None = None) -> bool:
     """Claim and process one pending job. Returns False if the queue was empty."""
     handlers = _HANDLERS if handlers is None else handlers
     _fail_expired_leases()
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         job = conn.execute(_CLAIM_SQL).fetchone()
     if job is None:

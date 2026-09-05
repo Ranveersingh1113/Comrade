@@ -104,7 +104,7 @@ def _pat_is_still_single_tenant() -> bool:
     repository in a developer's own database started failing a test about a
     credential it does not use.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         teams = conn.execute(
             "select count(distinct team_id) from public.github_repos"
             " where installation_id is null"
@@ -473,7 +473,7 @@ def sweep_stale_checkouts() -> list[str]:
     a reconciler converges whether the row arrived through the UI, through
     psql, or while the worker was down.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         rows = conn.execute(
             "select r.team_id, r.repo_full_name from public.github_repos r"
             " where (r.last_cloned_at is null"
@@ -529,7 +529,7 @@ def sweep_orphan_workspaces() -> list[str]:
     root = workspaces_root()
     if not root.exists():
         return []
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         live = _live_team_ids(conn)
         connected = _live_checkouts(conn)
 

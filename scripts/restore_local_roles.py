@@ -28,6 +28,7 @@ _ROLES = {
     "agent_pwd": "comrade_agent_db_url",
     "executor_pwd": "comrade_executor_db_url",
     "pipeline_pwd": "comrade_pipeline_db_url",
+    "control_pwd": "comrade_control_db_url",
     "authenticator_pwd": "comrade_authenticator_db_url",
 }
 

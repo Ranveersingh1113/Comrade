@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     comrade_agent_db_url: str       # agent: reads + proposes + private nudges
     comrade_executor_db_url: str    # executes approved consent actions only
     comrade_pipeline_db_url: str    # document parser + memory compiler
+    comrade_control_db_url: str = ""  # cross-team queue/sweep metadata only
     # PostgREST-style authenticator for user_session (SET ROLE authenticated).
     # Empty -> falls back to the admin URL (dev only; production must set it).
     comrade_authenticator_db_url: str = ""

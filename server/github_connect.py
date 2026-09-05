@@ -322,7 +322,7 @@ def _sync_failures(team_id: str) -> dict[str, str]:
     Only failures matter here: a job that succeeded is described better by
     last_cloned_at, which is on the row the member can already see.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         rows = conn.execute(
             "select distinct on (payload->>'repo_full_name')"
             "       payload->>'repo_full_name', last_error"

@@ -57,7 +57,7 @@ away.
    npx supabase link --project-ref <ref>
    npx supabase db push
    ```
-3. **you** — Create the four worker roles and their passwords. `npx supabase db
+3. **you** — Create the five worker roles and their passwords. `npx supabase db
    push` does not create them; they are login roles, not schema:
    ```bash
    uv run python scripts/restore_local_roles.py
@@ -72,7 +72,8 @@ away.
    Do **not** set `GITHUB_PAT` in a deployment: it is scoped to everything its
    owner can reach, and `_pat_is_still_single_tenant()` refuses it the moment a
    second team connects a repository.
-6. Copy `.env.example` to `.env` and fill it in. The database URLs point at
+6. Copy `.env.example` to `.env` and fill it in, including a distinct
+   `COMRADE_CONTROL_DB_URL`. The database URLs point at
    Supabase's pooler, not at `127.0.0.1:54322`.
 7. Build the sandbox image **on the host that runs the agent worker**:
    ```bash

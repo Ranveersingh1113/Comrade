@@ -40,7 +40,9 @@ def start_run(
     return str(row[0])
 
 
-def append_step(team_id: str, run_id: str, step: dict[str, Any]) -> None:
+def append_step(
+    team_id: str, run_id: str, step: dict[str, Any], *, worker_id: str | None = None
+) -> None:
     """Insert one step row (seq comes from the caller, see agent/runtime.py's
     _steps_from_event). One INSERT per step instead of rewriting a jsonb array:
     an N-step turn now writes O(N) bytes total, not O(N^2).
@@ -58,7 +60,13 @@ def append_step(team_id: str, run_id: str, step: dict[str, Any]) -> None:
             " (run_id, team_id, seq, type, tool, args, response, text)"
             " select %(run_id)s, %(team_id)s, %(seq)s, %(type)s, %(tool)s,"
             "        %(args)s, %(response)s, %(text)s"
-            " where exists (select 1 from public.agent_runs where id = %(run_id)s)",
+            " where exists (select 1 from public.agent_runs where id = %(run_id)s"
+            # Cast for the same reason as finish_run below: a bare
+            # `%(worker_id)s is null` has no column beside it to take a type
+            # from. The second occurrence sits next to worker_id and would be
+            # fine on its own, which is what makes this easy to miss.
+            " and (%(worker_id)s::text is null or (worker_id = %(worker_id)s"
+            " and status = 'running' and lease_expires_at >= now())))",
             {
                 "run_id": run_id,
                 "team_id": team_id,
@@ -68,6 +76,7 @@ def append_step(team_id: str, run_id: str, step: dict[str, Any]) -> None:
                 "args": Json(args) if args is not None else None,
                 "response": Json(response) if response is not None else None,
                 "text": step.get("text"),
+                "worker_id": worker_id,
             },
         )
         if cur.rowcount == 0:
@@ -102,6 +111,7 @@ def finish_run(
     *,
     input_tokens: int = 0,
     output_tokens: int = 0,
+    worker_id: str | None = None,
 ) -> None:
     """Close the run with a terminal status ('done' | 'failed') and what it cost.
 
@@ -116,9 +126,17 @@ def finish_run(
         cur = conn.execute(
             "update public.agent_runs set status = %s, finished_at = now(),"
             " input_tokens = %s, output_tokens = %s, cost_usd = %s"
-            " where id = %s",
+            # 🔴 The cast is load-bearing. A bare `%s is null` gives Postgres
+            # nothing to infer the parameter's type from — no column, no
+            # operator with a known operand — so it answers
+            # "could not determine data type of parameter $6" and the whole
+            # turn fails. Every other placeholder here sits beside a column and
+            # types itself; this one is the exception because its only job is
+            # to ask whether a worker id was supplied at all.
+            " where id = %s and (%s::text is null"
+            "                    or (worker_id = %s and status = 'running'))",
             (status, input_tokens, output_tokens,
-             _cost_usd(input_tokens, output_tokens), run_id),
+             _cost_usd(input_tokens, output_tokens), run_id, worker_id, worker_id),
         )
         if cur.rowcount == 0:
             raise LookupError(

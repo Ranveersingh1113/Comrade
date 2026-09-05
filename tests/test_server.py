@@ -3,18 +3,15 @@
 Token verification itself is covered in test_server_auth.py; here the identity
 dependency is overridden so these tests exercise handler behaviour instead.
 """
-from contextlib import contextmanager
-
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from server.app import ThreadScope, app
+from server.app import app
 from server.auth import current_user_id
 
 USER = "11111111-1111-1111-1111-111111111111"
 TEAM = "22222222-2222-2222-2222-222222222222"
-PRIVATE_THREAD = "33333333-3333-3333-3333-333333333333"
 GROUP_THREAD = "44444444-4444-4444-4444-444444444444"
 
 
@@ -25,38 +22,11 @@ def client(monkeypatch):
     # test_server_budget.
     monkeypatch.setattr("server.app.require_membership", lambda *_: None)
     monkeypatch.setattr("server.app._check_turn_budget", lambda *_: None)
-    def _thread(_user, _team, thread_id, legacy_type):
-        resolved = str(thread_id) if thread_id else (
-            GROUP_THREAD if legacy_type == "group" else PRIVATE_THREAD
-        )
-        is_group = resolved == GROUP_THREAD
-        return ThreadScope(resolved, "group" if is_group else "private", None if is_group else USER)
-
-    monkeypatch.setattr("server.app._resolve_thread", _thread)
-
-    @contextmanager
-    def _available(_thread_id):
-        yield True
-
-    monkeypatch.setattr("server.app.thread_lock", _available)
+    monkeypatch.setattr("server.app._resolve_thread", lambda _u, _t, thread: str(thread))
+    monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
     app.dependency_overrides[current_user_id] = lambda: USER
     yield TestClient(app)
     app.dependency_overrides.clear()
-
-
-def _stub_persistence(monkeypatch, recorder=None):
-    def _user_msg(user_id, team_id, scope, text):
-        if recorder is not None:
-            recorder["user"] = (user_id, team_id, scope, text)
-        return "msg-user"
-
-    def _ai_msg(team_id, scope, text):
-        if recorder is not None:
-            recorder["ai"] = (team_id, scope, text)
-        return "msg-ai"
-
-    monkeypatch.setattr("server.app._persist_user_message", _user_msg)
-    monkeypatch.setattr("server.app._persist_ai_reply", _ai_msg)
 
 
 def test_health_ok():
@@ -68,147 +38,54 @@ def test_health_ok():
     assert resp.json() == {"status": "ok", "database": "ok"}
 
 
-def test_agent_turn_returns_reply(client, monkeypatch):
-    def _stub(team_id, requester_id, user_text, trigger_type="user", **kw):
-        assert (team_id, requester_id, user_text) == (TEAM, USER, "status?")
-        return {"run_id": "run-1", "reply": "All caught up.", "steps": []}
-
-    monkeypatch.setattr("server.app.run_turn_sync", _stub)
-    _stub_persistence(monkeypatch)
-    resp = client.post("/agent/turn", json={"team_id": TEAM, "text": "status?"})
+def test_agent_turn_returns_a_durable_run_id(client):
+    resp = client.post("/agent/turn", json={"team_id": TEAM, "thread_id": GROUP_THREAD, "text": "status?"})
     assert resp.status_code == 200
-    assert resp.json() == {
-        "run_id": "run-1",
-        "reply": "All caught up.",
-        "user_message_id": "msg-user",
-        "reply_message_id": "msg-ai",
-    }
+    assert resp.json() == {"run_id": "run-1", "status": "queued"}
 
 
 def test_turn_identity_comes_from_the_token_not_the_body(client, monkeypatch):
     """A body-supplied requester_id must not influence who the agent runs as."""
     seen = {}
     monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda team_id, requester_id, text, trigger_type="user", **kw: seen.update(
-            requester=requester_id
-        ) or {"run_id": "r", "reply": "ok", "steps": []},
+        "server.app.enqueue_turn",
+        lambda team_id, requester_id, *_: seen.update(requester=requester_id) or "r",
     )
-    _stub_persistence(monkeypatch)
     resp = client.post(
         "/agent/turn",
-        json={"team_id": TEAM, "text": "hi", "requester_id": "someone-else"},
+        json={"team_id": TEAM, "thread_id": GROUP_THREAD, "text": "hi", "requester_id": "someone-else"},
     )
     assert resp.status_code == 200
     assert seen["requester"] == USER
 
 
-def test_runtime_is_told_the_thread_and_the_message_to_skip(client, monkeypatch):
-    """History is thread-scoped, and the member's message is persisted BEFORE
-    the turn runs — the runtime needs both facts or it replays the wrong
-    conversation, or the current question twice."""
+def test_queue_is_told_the_canonical_thread(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **kw: seen.update(kw) or
-        {"run_id": "r", "reply": "ok", "steps": []},
+        "server.app.enqueue_turn",
+        lambda team, user, thread, text: seen.update(
+            team=team, user=user, thread=thread, text=text
+        ) or "r",
     )
-    _stub_persistence(monkeypatch)
     client.post(
         "/agent/turn",
         json={"team_id": TEAM, "text": "hi", "thread_id": GROUP_THREAD},
     )
-    assert seen == {
-        "thread_id": GROUP_THREAD,
-        "exclude_message_id": "msg-user",
-        "lock_held": True,
-    }
+    assert seen == {"team": TEAM, "user": USER, "thread": GROUP_THREAD, "text": "hi"}
 
 
-def test_private_turn_carries_its_canonical_scope(client, monkeypatch):
-    rec = {}
-    monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **k: {"run_id": "r", "reply": "noted", "steps": []},
-    )
-    _stub_persistence(monkeypatch, rec)
-    client.post("/agent/turn", json={"team_id": TEAM, "text": "hi"})
-    assert rec["user"] == (
-        USER, TEAM, ThreadScope(PRIVATE_THREAD, "private", USER), "hi",
-    )
-    assert rec["ai"] == (TEAM, ThreadScope(PRIVATE_THREAD, "private", USER), "noted")
-
-
-def test_group_turn_has_no_thread_owner(client, monkeypatch):
-    rec = {}
-    monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **k: {"run_id": "r", "reply": "posted", "steps": []},
-    )
-    _stub_persistence(monkeypatch, rec)
-    client.post(
-        "/agent/turn",
-        json={"team_id": TEAM, "text": "hi", "thread_type": "group"},
-    )
-    assert rec["ai"] == (TEAM, ThreadScope(GROUP_THREAD, "group", None), "posted")
-
-
-def test_empty_reply_is_not_persisted(client, monkeypatch):
-    """A turn that produced no text must not leave a blank AI message behind."""
-    rec = {}
-    monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **k: {"run_id": "r", "reply": "", "steps": []},
-    )
-    _stub_persistence(monkeypatch, rec)
-    resp = client.post("/agent/turn", json={"team_id": TEAM, "text": "hi"})
-    assert resp.json()["reply_message_id"] is None
-    assert "ai" not in rec
-
-
-def test_busy_turn_does_not_persist_an_orphaned_message(client, monkeypatch):
-    """A rejected same-thread turn must not become history for a later run."""
-    rec = {}
-    monkeypatch.setattr(
-        "server.app.run_turn_sync",
-        lambda *a, **k: {"run_id": None, "reply": "", "steps": [], "busy": "busy"},
-    )
-    _stub_persistence(monkeypatch, rec)
-
-    @contextmanager
-    def _busy_lock(_thread_id):
-        yield False
-
-    monkeypatch.setattr("server.app.thread_lock", _busy_lock)
-
-    resp = client.post("/agent/turn", json={"team_id": TEAM, "text": "hi"})
-
-    assert resp.status_code == 409
-    assert "user" not in rec
-
-
-def test_inaccessible_thread_is_rejected_before_persisting(client, monkeypatch):
-    rec = {}
+def test_inaccessible_thread_is_rejected_before_enqueueing(client, monkeypatch):
     monkeypatch.setattr(
         "server.app._resolve_thread",
         lambda *_: (_ for _ in ()).throw(HTTPException(status_code=404)),
     )
-    _stub_persistence(monkeypatch, rec)
+    monkeypatch.setattr("server.app.enqueue_turn", lambda *_: pytest.fail("should not enqueue"))
 
     resp = client.post(
         "/agent/turn", json={"team_id": TEAM, "thread_id": GROUP_THREAD, "text": "hi"}
     )
 
     assert resp.status_code == 404
-    assert rec == {}
-
-
-def test_unknown_thread_type_is_rejected(client):
-    resp = client.post(
-        "/agent/turn",
-        json={"team_id": TEAM, "text": "hi", "thread_type": "broadcast"},
-    )
-    assert resp.status_code == 422
 
 
 def test_consent_approve_passes_the_caller_as_approver(client, monkeypatch):

@@ -10,7 +10,7 @@ import base64
 import json
 import logging
 import uuid
-from contextlib import ExitStack
+import asyncio
 
 from fastapi import (
     Depends, FastAPI, File, HTTPException, Request, UploadFile, status,
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
-from agent.runtime import run_turn_sync, stream_turn
+from agent.run_queue import enqueue_turn, get_run
 from pipeline.compiler import enqueue_document
 from pipeline.chat import enqueue_remember
 from pipeline.repo_sync import enqueue_sync
@@ -41,7 +41,7 @@ from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
     reject_consent,
 )
-from shared.db import Role, connect, team_session, thread_lock, user_session
+from shared.db import Role, connect, team_session, user_session
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +71,7 @@ class TurnRequest(TeamScoped):
 
 class TurnResponse(BaseModel):
     run_id: str
-    reply: str
-    user_message_id: str
-    reply_message_id: str | None = None
+    status: str
 
 
 class EditApproveRequest(TeamScoped):
@@ -216,106 +214,55 @@ def _check_turn_budget(team_id: str) -> None:
 
 @app.post("/agent/turn", response_model=TurnResponse)
 def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
-    """Run one agent turn and persist both sides of it to `messages`.
-
-    A direct reply to an explicit invocation is not consent-gated: the member
-    asked, and the answer is visible to exactly the people who could already see
-    the question. Actions the agent wants to take on top of that still go
-    through propose_action -> the consent queue.
-    """
+    """Persist a turn and return immediately; agent.worker executes it."""
     require_membership(user_id, req.team_id)
     _check_turn_budget(req.team_id)
     thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-    # Acquire before recording the message. A refused turn must not become
-    # phantom context for the turn that actually holds this thread.
-    with thread_lock(thread_id) as acquired:
-        if not acquired:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                "Comrade is working on someone else's question in this thread.",
-            )
-        user_message_id = _persist_user_message(user_id, req.team_id, thread_id, req.text)
-        result = run_turn_sync(
-            req.team_id, user_id, req.text, thread_id=thread_id,
-            exclude_message_id=user_message_id, lock_held=True,
-        )
-        if result.get("busy"):
-            raise HTTPException(status.HTTP_409_CONFLICT, result["busy"])
-        reply = result["reply"]
-        reply_message_id = None
-        if reply:
-            reply_message_id = _persist_ai_reply(req.team_id, thread_id, reply)
-    return TurnResponse(
-        run_id=result["run_id"],
-        reply=reply,
-        user_message_id=user_message_id,
-        reply_message_id=reply_message_id,
-    )
+    run_id = enqueue_turn(req.team_id, user_id, thread_id, req.text)
+    return TurnResponse(run_id=run_id, status="queued")
+
+
+async def _run_frames(team_id: str, run_id: str):
+    """Replay durable steps until the queued run reaches a stable state."""
+    seen = 0
+    yield json.dumps({"type": "run", "run_id": run_id, "status": "queued"}) + "\n"
+    while True:
+        run = await run_in_threadpool(get_run, team_id, run_id)
+        if run is None:
+            yield json.dumps({"type": "error", "detail": "run not found"}) + "\n"
+            return
+        for step in run["steps"]:
+            if step["seq"] >= seen:
+                seen = step["seq"] + 1
+                yield json.dumps(step) + "\n"
+        if run["status"] in {"done", "failed", "cancelled", "waiting_for_permission", "waiting_for_user"}:
+            yield json.dumps({"type": "done", "run_id": run_id, "status": run["status"], "detail": run["last_error"]}) + "\n"
+            return
+        await asyncio.sleep(0.2)
+
+
+def _visible_run(team_id: str, user_id: str, run_id: str) -> None:
+    run = get_run(team_id, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
+    _resolve_thread(user_id, team_id, run["thread_id"])
 
 
 @app.post("/agent/turn/stream")
 async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
-    """Same turn as /agent/turn, delivered as newline-delimited JSON.
-
-    NDJSON over fetch rather than SSE: EventSource cannot send an
-    Authorization header, and a token in the query string would leak into
-    logs. One JSON object per line, no frame parsing.
-
-    Both guards run BEFORE the response starts, so a non-member still gets a
-    real 403 and an over-budget team a real 429 — never a 200 whose first
-    frame is an apology.
-    """
+    """Compatibility shortcut: enqueue, then follow the durable event log."""
     require_membership(user_id, req.team_id)
     _check_turn_budget(req.team_id)
     thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-    locks = ExitStack()
-    if not locks.enter_context(thread_lock(thread_id)):
-        locks.close()
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "Comrade is working on someone else's question in this thread.",
-        )
-    try:
-        user_message_id = await run_in_threadpool(
-            _persist_user_message, user_id, req.team_id, thread_id, req.text
-        )
-    except BaseException:
-        locks.close()
-        raise
+    run_id = await run_in_threadpool(enqueue_turn, req.team_id, user_id, thread_id, req.text)
+    return StreamingResponse(_run_frames(req.team_id, run_id), media_type="application/x-ndjson")
 
-    async def frames():
-        try:
-            reply = ""
-            try:
-                async for item in stream_turn(
-                    req.team_id, user_id, req.text,
-                    thread_id=thread_id, exclude_message_id=user_message_id,
-                    lock_held=True,
-                ):
-                    if item.get("type") == "final":
-                        reply = item["reply"]
-                        continue
-                    yield json.dumps(item) + "\n"
-            except Exception as exc:  # noqa: BLE001 - the stream owns its errors
-                logger.exception("streamed turn failed")
-                yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
-                return
-            reply_message_id = None
-            if reply:
-                reply_message_id = await run_in_threadpool(
-                    _persist_ai_reply, req.team_id, thread_id, reply
-                )
-            yield json.dumps({
-                "type": "done",
-                "user_message_id": user_message_id,
-                "reply_message_id": reply_message_id,
-            }) + "\n"
-        finally:
-            locks.close()
 
-    return StreamingResponse(
-        frames(), media_type="application/x-ndjson", background=BackgroundTask(locks.close)
-    )
+@app.get("/agent/runs/{run_id}/stream")
+async def agent_run_stream(run_id: str, team_id: str, user_id: CurrentUserId):
+    require_membership(user_id, team_id)
+    await run_in_threadpool(_visible_run, team_id, user_id, run_id)
+    return StreamingResponse(_run_frames(team_id, run_id), media_type="application/x-ndjson")
 
 
 # ---------- consent ----------

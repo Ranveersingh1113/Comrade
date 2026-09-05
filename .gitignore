@@ -52,3 +52,6 @@ docs/*
 !docs/**/*.md
 docs/**/*.visual-check.*
 graphify-out/
+
+# SDD scratch workspace (subagent-driven-development ledger, briefs, review packages)
+.superpowers/

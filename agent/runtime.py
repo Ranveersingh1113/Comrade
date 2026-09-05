@@ -61,14 +61,15 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
 
 
 def _finish(
-    team_id: str, run_id: str, status: str, used_input: int, used_output: int
+    team_id: str, run_id: str, status: str, used_input: int, used_output: int,
+    worker_id: str | None = None,
 ) -> None:
     """finish_run with positional arguments — run_in_threadpool forwards no
     keywords, and the usage parameters are keyword-only so a caller cannot
     silently swap the two token counts."""
     finish_run(
         team_id, run_id, status,
-        input_tokens=used_input, output_tokens=used_output,
+        input_tokens=used_input, output_tokens=used_output, worker_id=worker_id,
     )
 
 
@@ -141,6 +142,8 @@ async def stream_turn(
     trigger_type: str = "user",
     exclude_message_id: str | None = None,
     lock_held: bool = False,
+    run_id: str | None = None,
+    worker_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run one turn, yielding each step as it happens and recording it.
 
@@ -169,10 +172,11 @@ async def stream_turn(
             }
             return
 
-        run_id = await run_in_threadpool(
-            start_run, team_id, requester_id, thread_id, exclude_message_id,
-            trigger_type, user_text[:200],
-        )
+        if run_id is None:
+            run_id = await run_in_threadpool(
+                start_run, team_id, requester_id, thread_id, exclude_message_id,
+                trigger_type, user_text[:200],
+            )
         yield {"type": "run", "run_id": run_id}
 
         message = types.Content(role="user", parts=[types.Part(text=user_text)])
@@ -255,7 +259,9 @@ async def stream_turn(
                     used_input += prompt_tokens
                     used_output += generated_tokens
                     for step in _steps_from_event(event, len(all_steps)):
-                        await run_in_threadpool(append_step, team_id, run_id, step)
+                        await run_in_threadpool(
+                            append_step, team_id, run_id, step, worker_id=worker_id
+                        )
                         all_steps.append(step)
                         yield step
                 if all_steps:
@@ -266,7 +272,7 @@ async def stream_turn(
                 )
         except Exception:
             await run_in_threadpool(
-                _finish, team_id, run_id, "failed", used_input, used_output
+                _finish, team_id, run_id, "failed", used_input, used_output, worker_id
             )
             raise
         reply = _reply_from_steps(all_steps)
@@ -292,7 +298,7 @@ async def stream_turn(
             # are the same event — you asked and got nothing. The traceback
             # path still logs its own detail.
             await run_in_threadpool(
-                _finish, team_id, run_id, "failed", used_input, used_output
+                _finish, team_id, run_id, "failed", used_input, used_output, worker_id
             )
             # 🔴 "Nothing was changed" was true for one of these two cases and
             # asserted for both. Found 2026-09-04 by the four-person scenario:
@@ -326,7 +332,7 @@ async def stream_turn(
             yield {"type": "empty", "run_id": run_id, "detail": detail}
             return
         await run_in_threadpool(
-            _finish, team_id, run_id, "done", used_input, used_output
+            _finish, team_id, run_id, "done", used_input, used_output, worker_id
         )
         yield {"type": "final", "run_id": run_id, "reply": reply}
 
@@ -340,6 +346,8 @@ async def run_turn(
     trigger_type: str = "user",
     exclude_message_id: str | None = None,
     lock_held: bool = False,
+    run_id: str | None = None,
+    worker_id: str | None = None,
 ) -> dict[str, Any]:
     """Batch form of stream_turn: drain it and return the collected result."""
     steps: list[dict[str, Any]] = []
@@ -347,7 +355,7 @@ async def run_turn(
     async for item in stream_turn(
         team_id, requester_id, user_text, thread_id=thread_id,
         trigger_type=trigger_type, exclude_message_id=exclude_message_id,
-        lock_held=lock_held,
+        lock_held=lock_held, run_id=run_id, worker_id=worker_id,
     ):
         if item.get("type") == "run":
             continue
@@ -388,6 +396,8 @@ def run_turn_sync(
     trigger_type: str = "user",
     exclude_message_id: str | None = None,
     lock_held: bool = False,
+    run_id: str | None = None,
+    worker_id: str | None = None,
 ) -> dict[str, Any]:
     """Blocking wrapper around run_turn for sync callers (the HTTP handler).
 
@@ -397,5 +407,5 @@ def run_turn_sync(
     return asyncio.run(run_turn(
         team_id, requester_id, user_text, thread_id=thread_id,
         trigger_type=trigger_type, exclude_message_id=exclude_message_id,
-        lock_held=lock_held,
+        lock_held=lock_held, run_id=run_id, worker_id=worker_id,
     ))

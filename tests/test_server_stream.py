@@ -10,18 +10,20 @@ from shared.config import settings
 from tests._seed import A1, B1, TEAM_A, as_user
 
 
-async def _fake_stream(team_id, requester_id, user_text, trigger_type="user", **kw):
-    yield {"type": "run", "run_id": "run-1"}
-    yield {"seq": 0, "type": "tool_call", "tool": "team_get_state", "args": {}}
-    yield {"seq": 1, "type": "text", "text": "The demo is Friday."}
-    yield {"type": "final", "run_id": "run-1", "reply": "The demo is Friday."}
+async def _fake_frames(team_id, run_id):
+    for frame in (
+        {"type": "run", "run_id": run_id},
+        {"seq": 0, "type": "tool_call", "tool": "team_get_state", "args": {}},
+        {"seq": 1, "type": "text", "text": "The demo is Friday."},
+        {"type": "done", "run_id": run_id, "status": "done", "detail": None},
+    ):
+        yield json.dumps(frame) + "\n"
 
 
 @pytest.fixture
 def as_a1(monkeypatch):
-    monkeypatch.setattr("server.app.stream_turn", _fake_stream)
-    monkeypatch.setattr("server.app._persist_user_message", lambda *a: "msg-user")
-    monkeypatch.setattr("server.app._persist_ai_reply", lambda *a: "msg-ai")
+    monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
+    monkeypatch.setattr("server.app._run_frames", _fake_frames)
     app.dependency_overrides[current_user_id] = lambda: A1
     yield TestClient(app)
     app.dependency_overrides.clear()
@@ -42,7 +44,7 @@ def _general_thread() -> str:
 
 def test_stream_emits_run_steps_then_final(seeded, as_a1):
     resp = as_a1.post(
-        "/agent/turn/stream", json={"team_id": TEAM_A, "text": "when is the demo?"}
+        "/agent/turn/stream", json={"team_id": TEAM_A, "thread_id": _general_thread(), "text": "when is the demo?"}
     )
     assert resp.status_code == 200
     frames = _frames(resp)
@@ -51,44 +53,39 @@ def test_stream_emits_run_steps_then_final(seeded, as_a1):
     assert any(f["type"] == "text" for f in frames)
     done = frames[-1]
     assert done["type"] == "done"
-    assert done["user_message_id"] == "msg-user"
-    assert done["reply_message_id"] == "msg-ai"
+    assert done["status"] == "done"
 
 
-def test_stream_tells_the_runtime_the_thread_and_the_message_to_skip(
+def test_stream_enqueues_the_canonical_thread(
     seeded, as_a1, monkeypatch
 ):
     seen = {}
 
-    async def _record(team_id, requester_id, user_text, trigger_type="user", **kw):
-        seen.update(kw)
-        yield {"type": "final", "run_id": "r", "reply": ""}
+    def _record(team_id, requester_id, thread_id, text):
+        seen.update(team_id=team_id, requester_id=requester_id, thread_id=thread_id, text=text)
+        return "r"
 
-    monkeypatch.setattr("server.app.stream_turn", _record)
+    monkeypatch.setattr("server.app.enqueue_turn", _record)
     as_a1.post(
         "/agent/turn/stream",
         json={"team_id": TEAM_A, "text": "hi", "thread_id": _general_thread()},
     )
-    assert seen == {
-        "thread_id": _general_thread(),
-        "exclude_message_id": "msg-user",
-        "lock_held": True,
-    }
+    assert seen == {"team_id": TEAM_A, "requester_id": A1, "thread_id": _general_thread(), "text": "hi"}
 
 
 def test_final_frame_never_reaches_the_wire(seeded, as_a1):
     """`final` is the generator's internal signal; the client sees `done`."""
-    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"})
+    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "thread_id": _general_thread(), "text": "hi"})
     assert not any(f["type"] == "final" for f in _frames(resp))
 
 
 def test_non_member_gets_403_not_a_stream(seeded, monkeypatch):
     """The guard must fail as a real status, never as a 200 whose body says no."""
-    monkeypatch.setattr("server.app.stream_turn", _fake_stream)
+    monkeypatch.setattr("server.app._run_frames", _fake_frames)
     app.dependency_overrides[current_user_id] = lambda: B1
     try:
         resp = TestClient(app).post(
-            "/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"}
+            "/agent/turn/stream", json={"team_id": TEAM_A, "thread_id": _general_thread(), "text": "hi"}
         )
     finally:
         app.dependency_overrides.clear()
@@ -109,58 +106,7 @@ def test_over_budget_gets_429_not_a_stream(seeded, as_a1, monkeypatch):
         )
     finally:
         conn.close()
-    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"})
+    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "thread_id": _general_thread(), "text": "hi"})
     assert resp.status_code == 429
 
 
-def test_empty_reply_persists_no_ai_message(seeded, as_a1, monkeypatch):
-    async def _silent(team_id, requester_id, user_text, trigger_type="user", **kw):
-        yield {"type": "run", "run_id": "run-2"}
-        yield {"type": "final", "run_id": "run-2", "reply": ""}
-
-    monkeypatch.setattr("server.app.stream_turn", _silent)
-    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"})
-    assert _frames(resp)[-1]["reply_message_id"] is None
-
-
-def test_a_failed_turn_streams_an_error_frame(seeded, as_a1, monkeypatch):
-    async def _boom(team_id, requester_id, user_text, trigger_type="user", **kw):
-        yield {"type": "run", "run_id": "run-3"}
-        raise RuntimeError("gemini exploded")
-
-    monkeypatch.setattr("server.app.stream_turn", _boom)
-    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"})
-    last = _frames(resp)[-1]
-    assert last["type"] == "error"
-    assert "gemini exploded" in last["detail"]
-
-
-def test_stream_error_releases_its_thread_lock_without_background_task(
-    seeded, as_a1, monkeypatch
-):
-    """Generator cleanup covers disconnect-capable ASGI servers too."""
-    closed = []
-
-    class _Lock:
-        def __enter__(self):
-            return True
-
-        def __exit__(self, *_):
-            closed.append(True)
-
-    class _NoopBackground:
-        async def __call__(self):
-            return None
-
-    async def _boom(*_args, **_kwargs):
-        raise RuntimeError("stream broke")
-        yield  # pragma: no cover - async generator marker
-
-    monkeypatch.setattr("server.app.thread_lock", lambda _thread_id: _Lock())
-    monkeypatch.setattr("server.app.stream_turn", _boom)
-    monkeypatch.setattr("server.app.BackgroundTask", lambda *_args: _NoopBackground())
-
-    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"})
-
-    assert _frames(resp)[-1]["type"] == "error"
-    assert closed == [True]

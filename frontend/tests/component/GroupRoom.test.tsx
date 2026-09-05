@@ -15,7 +15,7 @@ vi.mock('../../src/state/TeamContext', () => makeTeamMock());
 import { GroupRoom } from '../../src/screens/GroupRoom';
 
 const msg = (over: Record<string, unknown>) => ({
-  id: 'm-1', team_id: 'team-1', thread_type: 'group', thread_owner_id: null,
+  id: 'm-1', team_id: 'team-1', thread_id: 'thread-1',
   sender_kind: 'user', sender_id: 'u1', body: 'hello team',
   deleted_scope: null, deleted_by: null, deleted_at: null,
   created_at: '2026-07-20T09:00:00Z',
@@ -23,6 +23,11 @@ const msg = (over: Record<string, unknown>) => ({
 });
 
 const BASE = 'http://localhost:8000';
+const thread = {
+  id: 'thread-1', team_id: 'team-1', title: 'General', visibility: 'team' as const,
+  kind: 'discussion' as const, work_state: null, owner_id: null, created_by: 'u1',
+  created_at: '2026-07-20T09:00:00Z', updated_at: '2026-07-20T09:00:00Z',
+};
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => server.resetHandlers());
@@ -73,7 +78,7 @@ async function askComrade(body: ReadableStream) {
     ),
   );
   const user = userEvent.setup();
-  renderInApp(<GroupRoom />);
+  renderInApp(<GroupRoom thread={thread} />);
   await user.type(
     await screen.findByPlaceholderText(/Message the team/),
     '@comrade what is left?',
@@ -136,7 +141,7 @@ test('a deleted message renders a visible trace, never its body', async () => {
   supaState.tables.messages = [
     msg({ id: 'm-del', body: 'the secret thing', deleted_scope: 'everyone' }),
   ];
-  renderInApp(<GroupRoom />);
+  renderInApp(<GroupRoom thread={thread} />);
   expect(await screen.findByText(/removed a message — removed for everyone/)).toBeInTheDocument();
   expect(screen.queryByText('the secret thing')).not.toBeInTheDocument();
 });
@@ -145,7 +150,7 @@ test('an AI message carries the seen-by-all badge', async () => {
   supaState.tables.messages = [
     msg({ id: 'm-ai', sender_kind: 'ai', sender_id: null, body: 'Deadline noted.' }),
   ];
-  renderInApp(<GroupRoom />);
+  renderInApp(<GroupRoom thread={thread} />);
   expect(await screen.findByText('Deadline noted.')).toBeInTheDocument();
   expect(screen.getByText('AI · SEEN BY ALL')).toBeInTheDocument();
 });
@@ -165,7 +170,7 @@ test('a compilation-linked AI message renders the memory diff card', async () =>
       started_at: '2026-07-20T09:00:00Z', finished_at: '2026-07-20T09:00:05Z',
     },
   ];
-  renderInApp(<GroupRoom />);
+  renderInApp(<GroupRoom thread={thread} />);
   expect(await screen.findByText(/MEMORY UPDATED/)).toBeInTheDocument();
   expect(screen.getByText(/2 added · 1 revised · 0 removed/)).toBeInTheDocument();
 });
@@ -173,7 +178,7 @@ test('a compilation-linked AI message renders the memory diff card', async () =>
 describe('a plain user message', () => {
   test('renders body and sender name without any AI affordances', async () => {
     supaState.tables.messages = [msg({})];
-    renderInApp(<GroupRoom />);
+    renderInApp(<GroupRoom thread={thread} />);
     expect(await screen.findByText('hello team')).toBeInTheDocument();
     expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
     expect(screen.queryByText(/MEMORY UPDATED/)).not.toBeInTheDocument();
@@ -191,7 +196,7 @@ describe('remember this', () => {
       msg({ id: 'm-ai', sender_kind: 'ai', sender_id: null, body: 'Noted.' }),
     ];
     const user = userEvent.setup();
-    renderInApp(<GroupRoom />);
+    renderInApp(<GroupRoom thread={thread} />);
     await user.hover(await screen.findByText('the expiry is 90 minutes'));
     expect(await screen.findByText(/remember this/)).toBeInTheDocument();
 
@@ -215,7 +220,7 @@ describe('remember this', () => {
     );
     supaState.tables.messages = [msg({ id: 'm-human', body: 'the expiry is 90 minutes' })];
     const user = userEvent.setup();
-    renderInApp(<GroupRoom />);
+    renderInApp(<GroupRoom thread={thread} />);
     const row = await screen.findByText('the expiry is 90 minutes');
     await user.hover(row);
     // fireEvent, not userEvent: the button only exists while the row is
@@ -238,7 +243,7 @@ test('a published draft is marked without losing the member as its author', asyn
   supaState.tables.messages = [
     msg({ id: 'm-pub', body: 'Summary, trimmed.', ai_assisted: true }),
   ];
-  renderInApp(<GroupRoom />);
+  renderInApp(<GroupRoom thread={thread} />);
   expect(await screen.findByText('Summary, trimmed.')).toBeInTheDocument();
   expect(screen.getByText(/drafted with Comrade/)).toBeInTheDocument();
   expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
@@ -246,7 +251,7 @@ test('a published draft is marked without losing the member as its author', asyn
 
 test('an ordinary message carries no provenance marker', async () => {
   supaState.tables.messages = [msg({ id: 'm-plain', body: 'morning all' })];
-  renderInApp(<GroupRoom />);
+  renderInApp(<GroupRoom thread={thread} />);
   await screen.findByText('morning all');
   expect(screen.queryByText(/drafted with Comrade/)).not.toBeInTheDocument();
 });

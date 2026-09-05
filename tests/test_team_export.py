@@ -58,6 +58,41 @@ def test_a_teammates_private_thread_does_not(seeded):
     assert not any("A1 private note" in m["body"] for m in doc["messages"])
 
 
+def test_export_contains_only_visible_thread_metadata_and_content(seeded, admin):
+    visible = admin.execute(
+        "insert into public.threads (team_id, title, visibility, kind, created_by)"
+        " values (%s,'Release notes','team','discussion',%s) returning id",
+        (TEAM_A, A1),
+    ).fetchone()[0]
+    hidden = admin.execute(
+        "insert into public.threads (team_id, title, visibility, kind, owner_id, created_by)"
+        " values (%s,'A2 notes','restricted','discussion',%s,%s) returning id",
+        (TEAM_A, A2, A2),
+    ).fetchone()[0]
+    admin.execute(
+        "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+        " values (%s,%s,%s,%s)",
+        (hidden, TEAM_A, A2, A2),
+    )
+    admin.execute(
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,'team-visible export')",
+        (TEAM_A, visible, A1),
+    )
+    admin.execute(
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,'A2 export secret')",
+        (TEAM_A, hidden, A2),
+    )
+
+    doc = _export(A1)
+
+    assert str(visible) in {thread["id"] for thread in doc["threads"]}
+    assert str(hidden) not in {thread["id"] for thread in doc["threads"]}
+    assert any("team-visible export" in message["body"] for message in doc["messages"])
+    assert not any("A2 export secret" in message["body"] for message in doc["messages"])
+
+
 def test_a_stranger_gets_nothing(seeded):
     """require_membership refuses before RLS ever has to."""
     from fastapi import HTTPException
@@ -109,7 +144,7 @@ def test_every_relation_the_client_reads_is_in_the_export(seeded):
     tests/test_product_read_paths.py."""
     doc = _export(A1)
     for key in (
-        "team", "members", "messages", "tasks", "milestones", "documents",
+        "team", "members", "threads", "thread_participants", "messages", "tasks", "milestones", "documents",
         "wiki_pages", "wiki_facts", "wiki_citations", "change_log",
         "github_repos", "github_activity", "consent_queue",
     ):

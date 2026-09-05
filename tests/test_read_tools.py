@@ -59,19 +59,37 @@ def admin():
 
 
 def _group(admin, team_id, sender_id, body):
+    thread_id = _thread_id(team_id)
     return admin.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind,"
-        " sender_id, body) values (%s,'group','user',%s,%s) returning id",
-        (team_id, sender_id, body),
+        "insert into public.messages (team_id, thread_id, sender_kind,"
+        " sender_id, body) values (%s,%s,'user',%s,%s) returning id",
+        (team_id, thread_id, sender_id, body),
     ).fetchone()[0]
 
 
 def _private(admin, team_id, owner_id, body):
+    row = admin.execute(
+        "select id from public.threads where team_id=%s and owner_id=%s"
+        " and title='Private' and visibility='restricted'",
+        (team_id, owner_id),
+    ).fetchone()
+    if row is None:
+        thread_id = admin.execute(
+            "insert into public.threads (team_id, title, visibility, kind, owner_id, created_by)"
+            " values (%s,'Private','restricted','discussion',%s,%s) returning id",
+            (team_id, owner_id, owner_id),
+        ).fetchone()[0]
+        admin.execute(
+            "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+            " values (%s,%s,%s,%s)",
+            (thread_id, team_id, owner_id, owner_id),
+        )
+    else:
+        thread_id = row[0]
     return admin.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body)"
-        " values (%s,'private',%s,'user',%s,%s) returning id",
-        (team_id, owner_id, owner_id, body),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,%s) returning id",
+        (team_id, thread_id, owner_id, body),
     ).fetchone()[0]
 
 
@@ -110,7 +128,7 @@ def _thread_id(team_id, *, owner_id=None):
         else:
             row = conn.execute(
                 "select id from public.threads where team_id=%s"
-                " and legacy_thread_owner_id=%s",
+                " and owner_id=%s and title='Private' and visibility='restricted'",
                 (team_id, owner_id),
             ).fetchone()
     finally:
@@ -128,7 +146,7 @@ def test_search_finds_a_group_message(seeded):
     assert any("hello team A" in b for b in _bodies(results))
     hit = next(r for r in results if "hello team A" in unmarked(r["body"]))
     assert hit["sender"] == "A2"      # who said it
-    assert hit["thread"] == "group"   # where
+    assert hit["thread_title"] == "General"   # where
     assert hit["created_at"]          # and when
 
 
@@ -137,7 +155,7 @@ def test_search_finds_the_requesters_own_private_message(seeded):
     assert any("A1 private note" in b for b in _bodies(results))
     assert next(
         r for r in results if "A1 private" in unmarked(r["body"])
-    )["thread"] == "private"
+    )["thread_title"] == "Private"
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +194,14 @@ def test_search_never_crosses_two_threads_visible_to_the_requester(seeded, admin
             )
         thread_ids.append(thread_id)
     admin.execute(
-        "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body) values (%s,%s,'private',%s,'user',%s,%s)",
-        (TEAM_A, thread_ids[0], A1, A1, f"T1 {TOKEN}"),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,%s)",
+        (TEAM_A, thread_ids[0], A1, f"T1 {TOKEN}"),
     )
     admin.execute(
-        "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body) values (%s,%s,'private',%s,'user',%s,%s)",
-        (TEAM_A, thread_ids[1], A1, A1, f"T2 {TOKEN}"),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s,%s,'user',%s,%s)",
+        (TEAM_A, thread_ids[1], A1, f"T2 {TOKEN}"),
     )
 
     bodies = _bodies(search_messages(TEAM_A, A1, str(thread_ids[0]), TOKEN))

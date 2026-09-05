@@ -10,12 +10,17 @@ describe.skipIf(!stackUp())('messages RLS through supabase-js', () => {
   let member: TestUser;
   let excludedMember: TestUser;
   let teamId: string;
+  let generalThreadId: string;
 
   beforeAll(async () => {
     leader = await createUser('msg-lead');
     member = await createUser('msg-mem');
     excludedMember = await createUser('msg-excluded');
     teamId = await createTeam(leader, [member, excludedMember]);
+    const { data, error } = await leader.client.from('threads').select('id')
+      .eq('team_id', teamId).eq('title', 'General').single();
+    expect(error).toBeNull();
+    generalThreadId = data!.id;
   });
 
   afterAll(async () => {
@@ -24,13 +29,13 @@ describe.skipIf(!stackUp())('messages RLS through supabase-js', () => {
 
   test('a group message is visible to every member', async () => {
     const { error } = await leader.client.from('messages').insert({
-      team_id: teamId, thread_type: 'group', sender_kind: 'user',
+      team_id: teamId, thread_id: generalThreadId, sender_kind: 'user',
       sender_id: leader.id, body: 'kickoff at noon',
     });
     expect(error).toBeNull();
 
     const { data } = await member.client
-      .from('messages').select('body').eq('team_id', teamId).eq('thread_type', 'group');
+      .from('messages').select('body').eq('thread_id', generalThreadId);
     expect(data?.map((r) => r.body)).toContain('kickoff at noon');
   });
 
@@ -46,7 +51,7 @@ describe.skipIf(!stackUp())('messages RLS through supabase-js', () => {
     });
     expect(participantError).toBeNull();
     const { error } = await member.client.from('messages').insert({
-      team_id: teamId, thread_id: threadId, thread_type: 'private', thread_owner_id: member.id,
+      team_id: teamId, thread_id: threadId,
       sender_kind: 'user', sender_id: member.id, body: 'private worry',
     });
     expect(error).toBeNull();
@@ -80,7 +85,7 @@ describe.skipIf(!stackUp())('messages RLS through supabase-js', () => {
     expect(hiddenThreads).toEqual([]);
 
     const { error: messageError } = await member.client.from('messages').insert({
-      team_id: teamId, thread_id: threadId, thread_type: 'private', thread_owner_id: leader.id,
+      team_id: teamId, thread_id: threadId,
       sender_kind: 'user', sender_id: member.id, body: 'restricted update',
     });
     expect(messageError).toBeNull();
@@ -91,7 +96,7 @@ describe.skipIf(!stackUp())('messages RLS through supabase-js', () => {
 
   test('nobody can post as someone else', async () => {
     const { error } = await member.client.from('messages').insert({
-      team_id: teamId, thread_type: 'group', sender_kind: 'user',
+      team_id: teamId, thread_id: generalThreadId, sender_kind: 'user',
       sender_id: leader.id, // forged sender
       body: 'impersonation attempt',
     });

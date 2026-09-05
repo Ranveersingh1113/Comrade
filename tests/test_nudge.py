@@ -14,8 +14,10 @@ def _admin():
 
 def _private_count(conn):
     return conn.execute(
-        "select count(*) from public.messages where team_id=%s"
-        " and thread_type='private' and thread_owner_id=%s and sender_kind='ai'",
+        "select count(*) from public.messages m join public.threads t"
+        " on t.id=m.thread_id and t.team_id=m.team_id"
+        " where m.team_id=%s and t.owner_id=%s and t.title='Private'"
+        " and t.visibility='restricted' and m.sender_kind='ai'",
         (TEAM_A, A2),
     ).fetchone()[0]
 
@@ -30,7 +32,7 @@ def test_nudge_sends_immediately(seeded):
             "select count(*) from public.messages m join public.threads t"
             " on t.id=m.thread_id and t.team_id=m.team_id"
             " where m.team_id=%s and m.sender_kind='ai'"
-            " and t.legacy_thread_owner_id=%s",
+            " and t.owner_id=%s and t.title='Private' and t.visibility='restricted'",
             (TEAM_A, A2),
         ).fetchone()[0] == 1
         assert conn.execute(

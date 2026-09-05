@@ -32,7 +32,7 @@ def seed(cur):
             (uid, email),
         )
     cur.executemany(
-        # the auth.users trigger may have created the profile already — upsert
+        # the auth.users trigger may have created the profile already â€” upsert
         "insert into public.profiles (id, display_name) values (%s, %s)"
         " on conflict (id) do update set display_name = excluded.display_name",
         [(A1, "A1"), (A2, "A2"), (B1, "B1"), (B2, "B2")],
@@ -47,16 +47,29 @@ def seed(cur):
         [(TEAM_A, A1, "leader"), (TEAM_A, A2, "member"),
          (TEAM_B, B1, "leader"), (TEAM_B, B2, "member")],
     )
-    cur.execute(
-        "insert into public.messages (team_id, thread_type, thread_owner_id,"
-        " sender_kind, sender_id, body) values"
-        " (%s, 'private', %s, 'user', %s, 'A1 private note')",
+    private_thread = cur.execute(
+        "insert into public.threads (team_id, title, visibility, kind, owner_id, created_by)"
+        " values (%s, 'Private', 'restricted', 'discussion', %s, %s) returning id",
         (TEAM_A, A1, A1),
+    ).fetchone()[0]
+    cur.execute(
+        "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+        " values (%s, %s, %s, %s)",
+        (private_thread, TEAM_A, A1, A1),
     )
     cur.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind,"
-        " sender_id, body) values (%s, 'group', 'user', %s, 'hello team A')",
-        (TEAM_A, A2),
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s, %s, 'user', %s, 'A1 private note')",
+        (TEAM_A, private_thread, A1),
+    )
+    general_thread = cur.execute(
+        "select id from public.threads where team_id=%s and title='General'",
+        (TEAM_A,),
+    ).fetchone()[0]
+    cur.execute(
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+        " values (%s, %s, 'user', %s, 'hello team A')",
+        (TEAM_A, general_thread, A2),
     )
     cur.execute(
         "insert into public.memory_entries (id, team_id) values (%s, %s)",

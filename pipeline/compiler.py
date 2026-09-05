@@ -526,8 +526,8 @@ def apply_compilation(
         (team_id,),
     ).fetchone()[0]
     msg_id = conn.execute(
-        "insert into public.messages (team_id, thread_id, thread_type, sender_kind, body)"
-        " values (%s,%s,'group','ai',%s) returning id",
+        "insert into public.messages (team_id, thread_id, sender_kind, body)"
+        " values (%s,%s,'ai',%s) returning id",
         (team_id, general_thread_id, body),
     ).fetchone()[0]
 

@@ -34,7 +34,6 @@ export interface Membership {
   created_at: string;
 }
 
-export type ThreadType = 'group' | 'private';
 export type ThreadVisibility = 'team' | 'restricted';
 export type ThreadKind = 'discussion' | 'work';
 
@@ -64,8 +63,7 @@ export type DeletedScope = 'everyone' | 'me' | null;
 export interface Message {
   id: string;
   team_id: string;
-  thread_type: ThreadType;
-  thread_owner_id: string | null;
+  thread_id: string;
   sender_kind: SenderKind;
   sender_id: string | null;
   body: string;

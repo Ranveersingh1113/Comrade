@@ -17,10 +17,10 @@ import { ComposerMode, type ComposerModeValue } from '../components/ComposerMode
 
 type RoomLayout = 'classic' | 'split' | 'board';
 
-export function GroupRoom({ thread }: { thread?: Thread }) {
+export function GroupRoom({ thread }: { thread: Thread }) {
   const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
-  const { messages, compilationsByMessage, error, refresh } = useMessages(thread?.id ?? 'group');
+  const { messages, compilationsByMessage, error, refresh } = useMessages(thread.id);
   const taskState = useTasks();
   const [layout, setLayout] = useState<RoomLayout>(
     () => (localStorage.getItem('comrade.roomLayout') as RoomLayout | null) ?? 'classic',
@@ -93,7 +93,7 @@ export function GroupRoom({ thread }: { thread?: Thread }) {
       setPending('');
       setStep('');
       try {
-        await streamTurn(teamId, text, thread?.id ?? 'group', (f) => {
+        await streamTurn(teamId, text, thread.id, (f) => {
           if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
           // The runtime already says what it is doing; the room was throwing
           // it away and showing three dots instead.
@@ -123,9 +123,7 @@ export function GroupRoom({ thread }: { thread?: Thread }) {
     } else {
       const { error: err } = await supabase.from('messages').insert({
         team_id: teamId,
-        thread_type: thread?.visibility === 'restricted' ? 'private' : 'group',
-        ...(thread?.visibility === 'restricted' ? { thread_owner_id: thread.owner_id ?? thread.created_by } : {}),
-        ...(thread ? { thread_id: thread.id } : {}),
+        thread_id: thread.id,
         sender_kind: 'user',
         sender_id: myUserId,
         body: text,

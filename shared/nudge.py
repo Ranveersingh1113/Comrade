@@ -35,14 +35,13 @@ def send_nudge(
             return {"status": "suppressed", "reason": "cooldown"}
 
         thread_id = conn.execute(
-            "select public.ensure_legacy_private_thread(%s,%s)",
+            "select public.ensure_private_thread(%s,%s)",
             (team_id, member_id),
         ).fetchone()[0]
         conn.execute(
             "insert into public.messages"
-            " (team_id, thread_id, thread_type, thread_owner_id, sender_kind, body)"
-            " values (%s,%s,'private',%s,'ai',%s)",
-            (team_id, thread_id, member_id, body),
+            " (team_id, thread_id, sender_kind, body) values (%s,%s,'ai',%s)",
+            (team_id, thread_id, body),
         )
         conn.execute(
             "insert into public.nudge_log (team_id, member_id, nudge_type, subject)"

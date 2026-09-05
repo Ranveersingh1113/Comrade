@@ -162,21 +162,16 @@ export interface StreamFrame {
 export async function streamTurn(
   teamId: string,
   text: string,
-  threadIdOrLegacyType: string,
+  threadId: string,
   onFrame: (frame: StreamFrame) => void,
 ): Promise<void> {
-  const legacy = threadIdOrLegacyType === 'private' || threadIdOrLegacyType === 'group';
   const res = await fetch(`${BASE}/agent/turn/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: await authHeader(),
     },
-    body: JSON.stringify(
-      legacy
-        ? { team_id: teamId, text, thread_type: threadIdOrLegacyType }
-        : { team_id: teamId, text, thread_id: threadIdOrLegacyType },
-    ),
+    body: JSON.stringify({ team_id: teamId, text, thread_id: threadId }),
   });
   if (!res.ok || !res.body) {
     let detail = res.statusText;

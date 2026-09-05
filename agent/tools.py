@@ -158,9 +158,10 @@ def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
 # ponytail: one thread's messages scanned per search. If a thread outgrows it,
 # add a date bound; its exact UUID is both the security boundary and index key.
 _SEARCH_SQL = (
-    "select m.id, m.body, m.thread_type, m.created_at, m.sender_kind,"
+    "select m.id, m.body, m.thread_id, th.title, m.created_at, m.sender_kind,"
     " p.display_name"
     " from public.messages m"
+    " join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
     " left join public.profiles p on p.id = m.sender_id"
     " where m.team_id = %(team_id)s and m.thread_id = %(thread_id)s::uuid"
     " and m.deleted_scope is null"
@@ -203,12 +204,13 @@ def search_messages(
         {
             "message_id": str(message_id),
             "sender": "Comrade" if kind == "ai" else (name or "a former member"),
-            "thread": thread_type,
+            "thread_id": str(thread_id),
+            "thread_title": thread_title,
             "created_at": created_at.isoformat(),
             "body": spotlight(body[:MESSAGE_BODY_CHARS]),
             "truncated": len(body) > MESSAGE_BODY_CHARS,
         }
-        for message_id, body, thread_type, created_at, kind, name in rows
+        for message_id, body, thread_id, thread_title, created_at, kind, name in rows
     ]
 
 

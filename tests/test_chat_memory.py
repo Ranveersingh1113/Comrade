@@ -18,10 +18,14 @@ def _admin():
 
 
 def _post_group(cur, team_id, sender, body):
+    thread_id = cur.execute(
+        "select id from public.threads where team_id=%s and title='General'",
+        (team_id,),
+    ).fetchone()[0]
     return str(cur.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind,"
-        " sender_id, body) values (%s,'group','user',%s,%s) returning id",
-        (team_id, sender, body),
+        "insert into public.messages (team_id, thread_id, sender_kind,"
+        " sender_id, body) values (%s,%s,'user',%s,%s) returning id",
+        (team_id, thread_id, sender, body),
     ).fetchone()[0])
 
 
@@ -93,21 +97,34 @@ def test_fetch_excludes_ai_deleted_and_private(seeded):
     try:
         with conn.cursor() as cur:
             keep = _post_group(cur, TEAM_A, A2, "real message")
-            cur.execute(
-                "insert into public.messages (team_id, thread_type, sender_kind,"
-                " body) values (%s,'group','ai','Memory updated — 1 added.')",
+            general_thread = cur.execute(
+                "select id from public.threads where team_id=%s and title='General'",
                 (TEAM_A,),
+            ).fetchone()[0]
+            cur.execute(
+                "insert into public.messages (team_id, thread_id, sender_kind,"
+                " body) values (%s,%s,'ai','Memory updated — 1 added.')",
+                (TEAM_A, general_thread),
             )
             deleted = _post_group(cur, TEAM_A, A2, "oops")
             cur.execute(
                 "update public.messages set deleted_scope='everyone' where id=%s",
                 (deleted,),
             )
-            cur.execute(
-                "insert into public.messages (team_id, thread_type,"
-                " thread_owner_id, sender_kind, sender_id, body)"
-                " values (%s,'private',%s,'user',%s,'private note')",
+            private_thread = cur.execute(
+                "insert into public.threads (team_id, title, visibility, kind, owner_id, created_by)"
+                " values (%s,'A1 note','restricted','discussion',%s,%s) returning id",
                 (TEAM_A, A1, A1),
+            ).fetchone()[0]
+            cur.execute(
+                "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+                " values (%s,%s,%s,%s)",
+                (private_thread, TEAM_A, A1, A1),
+            )
+            cur.execute(
+                "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+                " values (%s,%s,'user',%s,'private note')",
+                (TEAM_A, private_thread, A1),
             )
     finally:
         conn.close()
@@ -118,6 +135,29 @@ def test_fetch_excludes_ai_deleted_and_private(seeded):
     assert "oops" not in texts and "private note" not in texts
     assert not any("Memory updated" in t for t in texts)
     assert [m["text"] for m in by_id] == ["real message"]  # deleted dropped on re-fetch
+
+
+def test_fetch_includes_messages_from_any_team_visible_thread(seeded):
+    """A public work discussion is eligible even without legacy group identity."""
+    conn = _admin()
+    try:
+        thread_id = conn.execute(
+            "insert into public.threads (team_id, title, visibility, kind, created_by)"
+            " values (%s,'Release notes','team','discussion',%s) returning id",
+            (TEAM_A, A1),
+        ).fetchone()[0]
+        conn.execute(
+            "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
+            " values (%s,%s,'user',%s,'public thread decision')",
+            (TEAM_A, thread_id, A2),
+        )
+    finally:
+        conn.close()
+
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
+        texts = {m["text"] for m in fetch_new_chat_messages(conn, TEAM_A, None)}
+
+    assert "public thread decision" in texts
 
 
 def test_enqueue_debounces_below_threshold(seeded):
@@ -261,16 +301,10 @@ def test_the_sweep_ignores_a_team_below_the_threshold(seeded):
     try:
         with conn.cursor() as cur:
             # TEAM_A well over the threshold, TEAM_B just under it.
-            cur.executemany(
-                "insert into public.messages (team_id, thread_type, sender_kind,"
-                " sender_id, body) values (%s,'group','user',%s,%s)",
-                [(TEAM_A, A2, f"a{i}") for i in range(8)],
-            )
-            cur.executemany(
-                "insert into public.messages (team_id, thread_type, sender_kind,"
-                " sender_id, body) values (%s,'group','user',%s,%s)",
-                [(TEAM_B, B2, f"b{i}") for i in range(2)],
-            )
+            for i in range(8):
+                _post_group(cur, TEAM_A, A2, f"a{i}")
+            for i in range(2):
+                _post_group(cur, TEAM_B, B2, f"b{i}")
     finally:
         conn.close()
 

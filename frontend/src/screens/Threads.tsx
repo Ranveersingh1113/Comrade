@@ -83,7 +83,7 @@ export function LegacyThreadRedirect({ privateThread = false }: { privateThread?
     setMissing(false);
     let query = supabase.from('threads').select('id').eq('team_id', teamId);
     query = privateThread
-      ? query.eq('legacy_thread_owner_id', myUserId)
+      ? query.eq('owner_id', myUserId).eq('title', 'Private').eq('visibility', 'restricted')
       : query.eq('title', 'General').eq('visibility', 'team').eq('kind', 'discussion');
     void query.maybeSingle().then(({ data }) => {
       const id = (data as { id: string } | null)?.id;

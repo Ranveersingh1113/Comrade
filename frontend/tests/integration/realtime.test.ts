@@ -3,6 +3,7 @@
  * then stays silent forever (unpublished table) is only catchable live.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import type { RealtimeChannel } from '@supabase/supabase-js';
 import {
   cleanupTeam, createTeam, createUser, stackUp, type TestUser,
@@ -35,11 +36,16 @@ describe.skipIf(!stackUp())('postgres_changes round-trip', () => {
   let a: TestUser;
   let b: TestUser;
   let teamId: string;
+  let generalThreadId: string;
 
   beforeAll(async () => {
     a = await createUser('rt-a');
     b = await createUser('rt-b');
     teamId = await createTeam(a, [b]);
+    const { data, error } = await a.client.from('threads').select('id')
+      .eq('team_id', teamId).eq('title', 'General').single();
+    expect(error).toBeNull();
+    generalThreadId = data!.id;
   });
 
   afterAll(async () => {
@@ -77,7 +83,7 @@ describe.skipIf(!stackUp())('postgres_changes round-trip', () => {
     await subscribed(channel);
 
     const { error } = await b.client.from('messages').insert({
-      team_id: teamId, thread_type: 'group', sender_kind: 'user',
+      team_id: teamId, thread_id: generalThreadId, sender_kind: 'user',
       sender_id: b.id, body: marker,
     });
     expect(error).toBeNull();
@@ -134,8 +140,18 @@ describe.skipIf(!stackUp())('postgres_changes round-trip', () => {
       );
     await subscribed(channel);
 
+    const threadId = randomUUID();
+    const { error: threadError } = await b.client.from('threads').insert({
+      id: threadId, team_id: teamId, title: 'Private', visibility: 'restricted',
+      kind: 'discussion', owner_id: b.id, created_by: b.id,
+    });
+    expect(threadError).toBeNull();
+    const { error: participantError } = await b.client.from('thread_participants').insert({
+      thread_id: threadId, team_id: teamId, user_id: b.id, added_by: b.id,
+    });
+    expect(participantError).toBeNull();
     const { error } = await b.client.from('messages').insert({
-      team_id: teamId, thread_type: 'private', thread_owner_id: b.id,
+      team_id: teamId, thread_id: threadId,
       sender_kind: 'user', sender_id: b.id, body: 'private realtime secret',
     });
     expect(error).toBeNull();

@@ -35,7 +35,7 @@ _FETCH_COLUMNS = (
     " from public.messages m"
     " join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
     " join public.profiles p on p.id = m.sender_id"
-    " where m.team_id = %s and th.visibility = 'team' and m.thread_type = 'group'"
+    " where m.team_id = %s and th.visibility = 'team'"
     " and m.sender_kind = 'user' and m.deleted_scope is null"
 )
 
@@ -141,9 +141,7 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
             # watermark subquery runs once per TEAM; and because the inner
             # count carries a literal t.id, the partial index
             # idx_messages_group_human can serve it as a range scan. The
-            # redundant legacy type condition is safe because the canonical
-            # trigger rejects mismatches; it lets PostgreSQL prove the partial
-            # index predicate. In the
+            # thread visibility is the canonical eligibility boundary. In the
             # steady state the tick actually sees — everything already swept —
             # that is a Bitmap Index Scan returning nothing.
             #
@@ -154,7 +152,7 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
             " cross join lateral ("
             "   select count(*) as n from public.messages m"
             "   join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
-            "    where m.team_id = t.id and th.visibility='team' and m.thread_type='group'"
+            "    where m.team_id = t.id and th.visibility='team'"
             "      and m.sender_kind='user' and m.deleted_scope is null"
             "      and m.created_at > coalesce(("
             "            select max(c.chat_through)"

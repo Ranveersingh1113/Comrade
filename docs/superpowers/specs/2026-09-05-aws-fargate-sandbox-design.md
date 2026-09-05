@@ -139,6 +139,27 @@ omits `taskRoleArn`, Secrets Manager injection, ECS Exec, and environment
 credentials. That preserves the codebase rule that untrusted code never gets
 platform credentials.
 
+### Per-thread task-definition revisions
+
+ECS stores an EFS access-point ID in a task definition; `RunTask` can override
+the command/environment but not an EFS volume. Consequently, a static task
+definition cannot safely mount a different thread root for each run.
+
+CloudFormation creates and protects the reviewed task-definition **template**
+(image digest, runner user, logging, network mode, execution role, resource
+limits, and no task role). The control plane copies that template into a
+thread-bound run or setup revision only after creating/reusing the two recorded
+EFS access points. Its only variable fields are the two access-point IDs and
+their read-only mount modes. It launches that exact revision, never a family
+name or "latest" revision. When the workspace is deleted and no task references
+it, the control plane deregisters its revisions and deletes its access points.
+
+The control-plane deployment role is narrowly permitted to register only the
+two known sandbox families and to pass only the fixed execution role to ECS.
+It cannot choose an image, task role, cluster, or arbitrary family from model
+input. Registration input is assembled from an immutable application template,
+not accepted from the agent/tool request.
+
 IAM policy actions and resource conditions will be generated from the actual
 AWS SDK calls during implementation and verified against AWS's service
 authorization reference; they will not be hand-waved from this document.
@@ -169,9 +190,9 @@ phase. Replaying a job cannot create a second live sandbox for the same run.
 AWS production requires these explicit settings:
 
 * `COMRADE_SANDBOX_BACKEND=fargate`
-* AWS region, ECS cluster, run/setup task-definition ARNs, run/setup subnet
-  IDs, run/setup security group IDs, EFS filesystem ID, EFS root mount path,
-  CloudWatch log group, and ECR image digest
+* AWS region, ECS cluster, run/setup task-definition template ARNs, run/setup
+  subnet IDs, run/setup security group IDs, EFS filesystem ID, EFS root mount
+  path, CloudWatch log group, and ECR image digest
 * maximum concurrent tasks per team and a global task cap
 
 `COMRADE_SANDBOX_BACKEND=docker` is allowed only in development/test.
@@ -225,4 +246,5 @@ passes, then rejected by production configuration rather than silently used.
 * [Amazon ECS/Fargate task networking](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html)
 * [Private Fargate connectivity requirements](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/vpc-endpoints.html)
 * [EFS volumes for ECS](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/efs-volumes.html)
+* [EFS access points in ECS task definitions](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/specify-efs-config.html)
 * [CodeBuild proxy network pattern](https://docs.aws.amazon.com/codebuild/latest/userguide/use-proxy-server-transparent-components.html)

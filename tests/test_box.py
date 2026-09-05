@@ -60,7 +60,7 @@ def test_command_uses_fixed_argv_and_never_retries_gateway_failure():
         client.run("bx_23456789", ["pytest", "-q"], timeout=120)
     assert len(calls) == 1
     assert json.loads(calls[0].content) == {
-        "command": "pytest -q", "cwd": "/home/user/comrade-workspace",
+        "command": "pytest -q", "cwd": ".",
         "timeoutSeconds": 120, "detached": False,
     }
 
@@ -81,3 +81,20 @@ def test_get_and_delete_use_only_the_box_id():
         ("GET", "/api/box/v1/boxes/bx_23456789"),
         ("DELETE", "/api/box/v1/boxes/bx_23456789"),
     ]
+    assert requests[1].headers["x-ascii-confirm-delete"] == "bx_23456789"
+
+
+def test_write_file_base64_encodes_bytes_and_keeps_path_in_box():
+    from agent.box import BoxClient
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True, "type": "file.written"})
+
+    client = BoxClient("box-test", transport=httpx.MockTransport(handler))
+    client.write_file("bx_23456789", "/home/user/upload.tar.gz", b"\x00source")
+    assert json.loads(seen[0].content) == {
+        "path": "/home/user/upload.tar.gz", "content": "AHNvdXJjZQ==", "encoding": "base64"
+    }

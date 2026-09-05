@@ -1,6 +1,7 @@
 """Small, server-only client for the ASCII Box execution boundary."""
 import hashlib
 import io
+import base64
 import shlex
 import tarfile
 from pathlib import Path
@@ -58,7 +59,7 @@ class BoxClient:
                 f"/boxes/{box_id}/commands",
                 json={
                     "command": shlex.join(argv),
-                    "cwd": "/home/user/comrade-workspace",
+                    "cwd": ".",
                     "timeoutSeconds": timeout,
                     "detached": False,
                 },
@@ -78,8 +79,24 @@ class BoxClient:
         body = response.json()
         return body.get("box", body)
 
+    def write_file(self, box_id: str, path: str, content: bytes) -> None:
+        if not (path.startswith("/home/user/") or path.startswith("/tmp/")):
+            raise BoxError("Box file path must be under /home/user or /tmp")
+        response = self._client.put(
+            f"/boxes/{box_id}/files",
+            json={
+                "path": path,
+                "content": base64.b64encode(content).decode(),
+                "encoding": "base64",
+            },
+        )
+        if response.status_code >= 400:
+            self._raise(response)
+
     def delete(self, box_id: str) -> None:
-        response = self._client.delete(f"/boxes/{box_id}")
+        response = self._client.delete(
+            f"/boxes/{box_id}", headers={"X-Ascii-Confirm-Delete": box_id}
+        )
         if response.status_code >= 400:
             self._raise(response)
 

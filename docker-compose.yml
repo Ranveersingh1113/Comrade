@@ -1,0 +1,79 @@
+# Comrade, deployable.
+#
+# THE SPLIT THAT MATTERS. `repo_run` executes a team's code in a container, so
+# the agent worker needs a Docker daemon. A normal application container on
+# Fly/Render/Railway does not have one. So the agent worker is pinned to a host
+# with a Docker socket; the API, the pipeline worker and the frontend can go
+# anywhere. Pretending one image fits everywhere is how this fails on the day
+# somebody connects a repository.
+#
+# Postgres is NOT here. Comrade's whole authorization model is Supabase RLS
+# plus four separate database roles, and a bare postgres container has none of
+# that. Point this at a Supabase project — hosted, or `npx supabase start`
+# locally.
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    env_file: [.env]
+    ports: ["8000:8000"]
+    restart: unless-stopped
+    healthcheck:
+      # /health, not /ready: this decides whether to RESTART the container, and
+      # a stalled queue or a migration behind is not something restarting the
+      # API fixes. /ready is for the load balancer and the deploy check.
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Documents, memory compilation, repository clones, environment builds.
+  pipeline-worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    command: ["python", "-m", "pipeline.worker"]
+    env_file: [.env]
+    restart: unless-stopped
+    volumes:
+      - workspaces:/workspaces
+    # Long enough for the drain to finish the job in hand. Both workers catch
+    # SIGTERM and stop after the current item rather than abandoning a lease
+    # that then takes minutes to expire.
+    stop_grace_period: 120s
+
+  # Agent turns. THIS is the one that needs Docker.
+  agent-worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    command: ["python", "-m", "agent.worker"]
+    env_file: [.env]
+    restart: unless-stopped
+    volumes:
+      - workspaces:/workspaces
+      # The sandbox runs as a sibling container, not a child. The bind mounts
+      # it passes are resolved by the HOST daemon, so the workspaces volume
+      # must be mounted at the same path on the host — see docs/operations.md.
+      - /var/run/docker.sock:/var/run/docker.sock
+    stop_grace_period: 300s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        # BUILD arguments, not runtime environment: Vite bakes them into the
+        # bundle. Setting them on the running container changes nothing.
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+        VITE_AGENT_API_URL: ${VITE_AGENT_API_URL}
+    ports: ["8080:80"]
+    restart: unless-stopped
+    depends_on: [api]
+
+volumes:
+  workspaces:

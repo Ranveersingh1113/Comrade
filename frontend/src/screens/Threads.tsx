@@ -85,11 +85,20 @@ export function LegacyThreadRedirect({ privateThread = false }: { privateThread?
     query = privateThread
       ? query.eq('owner_id', myUserId).eq('title', 'Private').eq('visibility', 'restricted')
       : query.eq('title', 'General').eq('visibility', 'team').eq('kind', 'discussion');
-    void query.maybeSingle().then(({ data }) => {
-      const id = (data as { id: string } | null)?.id;
-      if (id) navigate(`/t/${teamId}/threads/${id}`, { replace: true });
-      else setMissing(true);
-    }).catch(() => setMissing(true));
+    // Two-argument `then`, not `.catch`. A Supabase query builder is a
+    // THENABLE, not a Promise, so `.catch` does not exist on it — and the
+    // production build is the only thing that says so: `npm run build` runs
+    // `tsc -b`, which resolves tsconfig.app.json, while the gate's
+    // `tsc --noEmit` does not. The typecheck lane was green while the image
+    // could not be built at all.
+    void query.maybeSingle().then(
+      ({ data }) => {
+        const id = (data as { id: string } | null)?.id;
+        if (id) navigate(`/t/${teamId}/threads/${id}`, { replace: true });
+        else setMissing(true);
+      },
+      () => setMissing(true),
+    );
   }, [teamId, myUserId, privateThread, navigate]);
   if (missing) return <main style={{ flex: 1, padding: 28 }}>
     <p>{privateThread ? 'No private thread exists yet.' : 'The General thread is unavailable.'}</p>

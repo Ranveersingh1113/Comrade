@@ -8,6 +8,7 @@ model never receives team_id / requester_id as tool arguments.
 """
 import base64
 import json
+from pathlib import Path
 import logging
 import uuid
 import asyncio
@@ -120,6 +121,81 @@ def health(response: Response) -> dict[str, str]:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "degraded", "database": "unreachable"}
     return {"status": "ok", "database": "ok"}
+
+
+@app.get("/ready")
+def ready(response: Response) -> dict:
+    """Can this deployment actually serve a turn, as opposed to answer a ping.
+
+    /health says the process is alive and can reach Postgres. That is what an
+    orchestrator should restart on. READINESS is a different question, and
+    conflating them is how a deploy goes green while nothing works: the schema
+    is a version behind, or no worker is draining the queue, so every turn a
+    member sends is accepted and then sits there.
+
+    Each check reports its own verdict. A single boolean would tell an operator
+    that something is wrong and nothing about which thing.
+    """
+    checks: dict[str, str] = {}
+
+    try:
+        with connect(Role.ADMIN) as conn:
+            conn.execute("select 1")
+        checks["database"] = "ok"
+    except Exception as exc:  # noqa: BLE001 - any failure to reach it counts
+        logger.warning("readiness: database unreachable: %s", exc)
+        checks["database"] = "unreachable"
+
+    # The migration the CODE expects against the one the DATABASE has applied.
+    # An app deployed ahead of its schema fails on the first request that
+    # touches a new column, which reads as a code bug rather than a half
+    # finished release.
+    if checks["database"] == "ok":
+        try:
+            newest_on_disk = max(
+                path.name.split("_", 1)[0]
+                for path in (Path(__file__).resolve().parent.parent
+                             / "supabase" / "migrations").glob("*.sql")
+            )
+            with connect(Role.ADMIN) as conn:
+                applied = conn.execute(
+                    "select max(version) from supabase_migrations.schema_migrations"
+                ).fetchone()[0]
+            checks["migrations"] = (
+                "ok" if applied and applied >= newest_on_disk
+                else f"behind: code expects {newest_on_disk}, database has {applied}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            checks["migrations"] = f"unknown: {exc}"
+
+        # A queue nobody is draining. Not "is a worker registered" — that is a
+        # claim a dead process can keep making — but "is work actually moving",
+        # which is the thing a member experiences.
+        try:
+            with connect(Role.ADMIN) as conn:
+                stalled = conn.execute(
+                    "select count(*) from public.agent_runs"
+                    " where status='queued'"
+                    "   and created_at < now() - make_interval(mins => %s)",
+                    (READY_STALL_MINUTES,),
+                ).fetchone()[0]
+            checks["agent_queue"] = (
+                "ok" if not stalled
+                else f"{stalled} run(s) queued over {READY_STALL_MINUTES}m — is a worker running?"
+            )
+        except Exception as exc:  # noqa: BLE001
+            checks["agent_queue"] = f"unknown: {exc}"
+
+    ok = all(v == "ok" for v in checks.values())
+    if not ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {"status": "ready" if ok else "not_ready", "checks": checks}
+
+
+#: How long a run may sit queued before readiness calls the queue stalled.
+#: Longer than the slowest legitimate turn, so a busy worker is never reported
+#: as a missing one.
+READY_STALL_MINUTES = 10
 
 
 # ---------- agent ----------

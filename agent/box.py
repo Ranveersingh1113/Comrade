@@ -1,6 +1,7 @@
 """Small, server-only client for the ASCII Box execution boundary."""
 import hashlib
 import io
+import shlex
 import tarfile
 from pathlib import Path
 from uuid import UUID
@@ -49,6 +50,38 @@ class BoxClient:
             self._raise(response)
         body = response.json()
         return body.get("box", body)
+
+    def run(self, box_id: str, argv: list[str], *, timeout: int) -> dict:
+        """Execute one already-authorized argv; ambiguous submission is fatal."""
+        try:
+            response = self._client.post(
+                f"/boxes/{box_id}/commands",
+                json={
+                    "command": shlex.join(argv),
+                    "cwd": "/home/user/comrade-workspace",
+                    "timeoutSeconds": timeout,
+                    "detached": False,
+                },
+            )
+        except httpx.TransportError as exc:
+            raise BoxCommandAmbiguous("Box command submission state is unknown") from exc
+        if response.status_code >= 500:
+            raise BoxCommandAmbiguous("Box command submission state is unknown")
+        if response.status_code >= 400:
+            self._raise(response)
+        return response.json()
+
+    def get(self, box_id: str) -> dict:
+        response = self._client.get(f"/boxes/{box_id}")
+        if response.status_code >= 400:
+            self._raise(response)
+        body = response.json()
+        return body.get("box", body)
+
+    def delete(self, box_id: str) -> None:
+        response = self._client.delete(f"/boxes/{box_id}")
+        if response.status_code >= 400:
+            self._raise(response)
 
     @staticmethod
     def _raise(response: httpx.Response) -> None:

@@ -44,3 +44,40 @@ def test_archive_excludes_secret_git_and_escaping_symlink(tmp_path):
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         assert tar.getnames() == ["src/app.py"]
     assert fingerprint
+
+
+def test_command_uses_fixed_argv_and_never_retries_gateway_failure():
+    from agent.box import BoxClient, BoxCommandAmbiguous
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(502, json={"code": "box_direct_failed"})
+
+    client = BoxClient("box-test", transport=httpx.MockTransport(handler))
+    with __import__("pytest").raises(BoxCommandAmbiguous):
+        client.run("bx_23456789", ["pytest", "-q"], timeout=120)
+    assert len(calls) == 1
+    assert json.loads(calls[0].content) == {
+        "command": "pytest -q", "cwd": "/home/user/comrade-workspace",
+        "timeoutSeconds": 120, "detached": False,
+    }
+
+
+def test_get_and_delete_use_only_the_box_id():
+    from agent.box import BoxClient
+
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"box": {"state": "ready"}})
+
+    client = BoxClient("box-test", transport=httpx.MockTransport(handler))
+    assert client.get("bx_23456789")["state"] == "ready"
+    client.delete("bx_23456789")
+    assert [(r.method, r.url.path) for r in requests] == [
+        ("GET", "/api/box/v1/boxes/bx_23456789"),
+        ("DELETE", "/api/box/v1/boxes/bx_23456789"),
+    ]

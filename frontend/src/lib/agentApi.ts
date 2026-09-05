@@ -151,7 +151,8 @@ export interface StreamFrame {
   run_id?: string;
   tool?: string;
   text?: string;
-  /** Carried by 'busy', 'empty' and 'error'. */
+  /** Carried by 'busy', 'empty', 'error', and a terminal 'done'
+   *  whose run recorded a reason (agent_runs.last_error). */
   detail?: string;
   user_message_id?: string;
   reply_message_id?: string | null;

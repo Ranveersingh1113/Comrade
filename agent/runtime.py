@@ -66,7 +66,7 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
 
 def _finish(
     team_id: str, run_id: str, status: str, used_input: int, used_output: int,
-    worker_id: str | None = None,
+    worker_id: str | None = None, last_error: str | None = None,
 ) -> None:
     """finish_run with positional arguments — run_in_threadpool forwards no
     keywords, and the usage parameters are keyword-only so a caller cannot
@@ -74,6 +74,7 @@ def _finish(
     finish_run(
         team_id, run_id, status,
         input_tokens=used_input, output_tokens=used_output, worker_id=worker_id,
+        last_error=last_error,
     )
 
 
@@ -351,9 +352,6 @@ async def stream_turn(
             # product's side "raised an exception" and "produced no answer"
             # are the same event — you asked and got nothing. The traceback
             # path still logs its own detail.
-            await run_in_threadpool(
-                _finish, team_id, run_id, "failed", used_input, used_output, worker_id
-            )
             # 🔴 "Nothing was changed" was true for one of these two cases and
             # asserted for both. Found 2026-09-04 by the four-person scenario:
             # a turn proposed an action, wrote a consent row, said nothing,
@@ -383,6 +381,16 @@ async def stream_turn(
                     "Comrade had nothing to say that time — the model came"
                     " back empty. Nothing was changed. Try asking again."
                 )
+            # 🔴 Written down, not only yielded. The durable queue moved the
+            # consumer of this generator from the browser to the worker, so
+            # the member now reads the RUN ROW (server/app.py:_run_frames).
+            # An explanation that lives only in the frame reaches nobody, and
+            # the empty turn goes back to looking exactly like a hang — the
+            # regression this whole path exists to prevent.
+            await run_in_threadpool(
+                _finish, team_id, run_id, "failed", used_input, used_output,
+                worker_id, detail,
+            )
             yield {"type": "empty", "run_id": run_id, "detail": detail}
             return
         await run_in_threadpool(

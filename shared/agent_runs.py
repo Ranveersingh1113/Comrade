@@ -112,6 +112,7 @@ def finish_run(
     input_tokens: int = 0,
     output_tokens: int = 0,
     worker_id: str | None = None,
+    last_error: str | None = None,
 ) -> None:
     """Close the run with a terminal status ('done' | 'failed') and what it cost.
 
@@ -125,7 +126,13 @@ def finish_run(
     with team_session(Role.AGENT, team_id) as conn:
         cur = conn.execute(
             "update public.agent_runs set status = %s, finished_at = now(),"
-            " input_tokens = %s, output_tokens = %s, cost_usd = %s"
+            " input_tokens = %s, output_tokens = %s, cost_usd = %s,"
+            # coalesce, not assignment: a caller that has nothing to add must
+            # not erase a reason something earlier already recorded. This is
+            # what the MEMBER reads — the browser replays the run row, not the
+            # generator — so a failure with no last_error reaches them as a
+            # blank screen.
+            " last_error = coalesce(%s, last_error)"
             # 🔴 The cast is load-bearing. A bare `%s is null` gives Postgres
             # nothing to infer the parameter's type from — no column, no
             # operator with a known operand — so it answers
@@ -136,7 +143,8 @@ def finish_run(
             " where id = %s and (%s::text is null"
             "                    or (worker_id = %s and status = 'running'))",
             (status, input_tokens, output_tokens,
-             _cost_usd(input_tokens, output_tokens), run_id, worker_id, worker_id),
+             _cost_usd(input_tokens, output_tokens), last_error,
+             run_id, worker_id, worker_id),
         )
         if cur.rowcount == 0:
             raise LookupError(

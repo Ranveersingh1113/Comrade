@@ -133,6 +133,15 @@ export function GroupRoom({ thread }: { thread: Thread }) {
           // here is why — and emphatically not an error banner: nothing they
           // did went wrong.
           else if (f.type === 'empty') setAgentNote(f.detail ?? null);
+          // 🔴 And the same thing again, one layer down. Since the durable
+          // queue the agent no longer runs inside this request: the browser
+          // replays the run row, so the reason a turn produced nothing now
+          // arrives on the TERMINAL frame instead of as 'empty'. Dropping it
+          // put the blank screen back — indicator stops, no reply, no reason.
+          //
+          // Gated on the detail, not the status: this frame ends every turn,
+          // including the ones that answered.
+          else if (f.type === 'done' && f.detail) setAgentNote(f.detail);
           else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
         });
       } catch (e) {
@@ -366,6 +375,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 is the same one. */}
             {agentNote && (
               <div
+                data-agent-note
                 style={{
                   display: 'flex',
                   gap: 14,

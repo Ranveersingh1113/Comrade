@@ -139,8 +139,14 @@ test.describe.serial('Comrade journeys', () => {
     // turn round-trips through the server and the member is told something
     // either way. A blank screen fails both branches, which is the regression
     // worth catching.
+    //
+    // The explanation is matched by its SLOT, not its wording. There are two
+    // of them — "the model came back empty" and "attempted <tools> and then
+    // stopped" — and which one the member gets depends on whether the model
+    // called a tool before going quiet. Matching one sentence made this assert
+    // on model behaviour again, the exact thing the paragraph above rejects.
     const answered = page.locator('[data-sender="ai"]').last();
-    const explained = page.getByText(/came back empty/);
+    const explained = page.locator('[data-agent-note]');
     await expect(answered.or(explained)).toBeVisible({ timeout: 30000 });
     if (await answered.count()) {
       await expect(answered).not.toBeEmpty();

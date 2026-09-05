@@ -155,15 +155,15 @@ def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
 # leakproof `team_id = %s` IS promotable, and idx_messages_team_thread is what
 # bounds the scan to one team in practice.
 #
-# ponytail: one team's messages scanned per search. Fine at pilot scale
-# (~100ms over 24k rows measured). If a room outgrows it, the fix is a
-# LEAKPROOF `@@` (superuser, unavailable on Supabase) or narrowing by date.
+# ponytail: one thread's messages scanned per search. If a thread outgrows it,
+# add a date bound; its exact UUID is both the security boundary and index key.
 _SEARCH_SQL = (
     "select m.id, m.body, m.thread_type, m.created_at, m.sender_kind,"
     " p.display_name"
     " from public.messages m"
     " left join public.profiles p on p.id = m.sender_id"
-    " where m.team_id = %(team_id)s and m.deleted_scope is null"
+    " where m.team_id = %(team_id)s and m.thread_id = %(thread_id)s::uuid"
+    " and m.deleted_scope is null"
     " and to_tsvector('english', m.body) @@ plainto_tsquery('english', %(q)s)"
     " order by ts_rank_cd(to_tsvector('english', m.body),"
     " plainto_tsquery('english', %(q)s)) desc, m.created_at desc"
@@ -174,17 +174,17 @@ _SEARCH_SQL = (
 def search_messages(
     team_id: str,
     requester_id: str,
+    thread_id: str,
     query: str,
     limit: int = SEARCH_LIMIT_DEFAULT,
 ) -> list[dict]:
-    """Ranked matches from this team's chat, read as the requesting member.
+    """Ranked matches from one thread, read as the requesting member.
 
     findings §2.1/§4.1: comrade_agent has no SELECT on `messages` at all, so
     this runs under the member's own RLS and au_messages_select — is_team_member
-    AND (group OR thread_owner_id = auth.uid()) — is what keeps another
-    member's private thread out of the results. The explicit team_id is not
-    optional: `authenticated` has no current_team(), and a member of two teams
-    would otherwise search both at once.
+    AND canonical thread participation — is what authorizes the read. Exact
+    `thread_id` keeps another visible thread out of this turn's context; the
+    explicit team_id keeps a member of two teams out of the other team.
 
     Tombstoned messages (deleted_scope set) are excluded — a message someone
     retracted must not come back through search.
@@ -194,6 +194,7 @@ def search_messages(
             _SEARCH_SQL,
             {
                 "team_id": team_id,
+                "thread_id": thread_id,
                 "q": query.strip(),
                 "limit": max(1, min(limit, SEARCH_LIMIT_MAX)),
             },
@@ -605,9 +606,8 @@ def messages_search(query: str, tool_context: ToolContext) -> list[dict]:
     """Search what has actually been said in this team's chat.
 
     Use this whenever the question is about something said, agreed, asked or
-    promised in conversation — search for it rather than guessing. It covers
-    the group room and your private thread with the person asking; you cannot
-    see anyone else's private thread, so say so rather than speculating.
+    promised in this thread — search for it rather than guessing. It cannot
+    search another thread, even one you personally can read.
     Each result gives the sender, the thread, when it was sent, and the text —
     quote who said it and when. `truncated` means the body was cut short.
     An empty list means nothing matched; say that instead of inventing a quote.
@@ -617,7 +617,8 @@ def messages_search(query: str, tool_context: ToolContext) -> list[dict]:
             slides". Content words only — it matches on words, not phrases.
     """
     return search_messages(
-        tool_context.state["team_id"], tool_context.state["requester_id"], query
+        tool_context.state["team_id"], tool_context.state["requester_id"],
+        tool_context.state["thread_id"], query,
     )
 
 

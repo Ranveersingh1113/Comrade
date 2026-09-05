@@ -520,10 +520,15 @@ def apply_compilation(
             )
 
     body = f"Memory updated — {added} added, {revised} revised, {removed} removed."
+    general_thread_id = conn.execute(
+        "select id from public.threads where team_id=%s and visibility='team'"
+        " and kind='discussion' and title='General'",
+        (team_id,),
+    ).fetchone()[0]
     msg_id = conn.execute(
-        "insert into public.messages (team_id, thread_type, sender_kind, body)"
-        " values (%s,'group','ai',%s) returning id",
-        (team_id, body),
+        "insert into public.messages (team_id, thread_id, thread_type, sender_kind, body)"
+        " values (%s,%s,'group','ai',%s) returning id",
+        (team_id, general_thread_id, body),
     ).fetchone()[0]
 
     conn.execute(

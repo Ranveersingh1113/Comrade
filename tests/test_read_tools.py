@@ -99,12 +99,32 @@ def _join_team_b(admin, user_id):
     )
 
 
+def _thread_id(team_id, *, owner_id=None):
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        if owner_id is None:
+            row = conn.execute(
+                "select id from public.threads where team_id=%s and title='General'",
+                (team_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and legacy_thread_owner_id=%s",
+                (team_id, owner_id),
+            ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
+
+
 # ---------------------------------------------------------------------------
 # search: it can see
 # ---------------------------------------------------------------------------
 
 def test_search_finds_a_group_message(seeded):
-    results = search_messages(TEAM_A, A1, "hello")
+    results = search_messages(TEAM_A, A1, _thread_id(TEAM_A), "hello")
     assert any("hello team A" in b for b in _bodies(results))
     hit = next(r for r in results if "hello team A" in unmarked(r["body"]))
     assert hit["sender"] == "A2"      # who said it
@@ -113,7 +133,7 @@ def test_search_finds_a_group_message(seeded):
 
 
 def test_search_finds_the_requesters_own_private_message(seeded):
-    results = search_messages(TEAM_A, A1, "private note")
+    results = search_messages(TEAM_A, A1, _thread_id(TEAM_A, owner_id=A1), "private note")
     assert any("A1 private note" in b for b in _bodies(results))
     assert next(
         r for r in results if "A1 private" in unmarked(r["body"])
@@ -133,10 +153,43 @@ def test_another_members_private_thread_never_appears(seeded, admin):
     _private(admin, TEAM_A, A1, f"A1 own {TOKEN} plan")
     _private(admin, TEAM_A, A2, f"A2 secret {TOKEN} plan")
 
-    bodies = _bodies(search_messages(TEAM_A, A1, TOKEN))
+    bodies = _bodies(search_messages(TEAM_A, A1, _thread_id(TEAM_A, owner_id=A1), TOKEN))
 
     assert any("A1 own" in b for b in bodies), "the query is blind, not private"
     assert not any("A2 secret" in b for b in bodies)
+
+
+def test_search_never_crosses_two_threads_visible_to_the_requester(seeded, admin):
+    """RLS permits both; the turn's bound thread UUID permits only one."""
+    thread_ids = []
+    for title in ("T1", "T2"):
+        thread_id = admin.execute(
+            "insert into public.threads (team_id, title, visibility, kind, owner_id, created_by)"
+            " values (%s,%s,'restricted','discussion',%s,%s) returning id",
+            (TEAM_A, title, A1, A1),
+        ).fetchone()[0]
+        for user_id in (A1, A2):
+            admin.execute(
+                "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+                " values (%s,%s,%s,%s)",
+                (thread_id, TEAM_A, user_id, A1),
+            )
+        thread_ids.append(thread_id)
+    admin.execute(
+        "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
+        " sender_kind, sender_id, body) values (%s,%s,'private',%s,'user',%s,%s)",
+        (TEAM_A, thread_ids[0], A1, A1, f"T1 {TOKEN}"),
+    )
+    admin.execute(
+        "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
+        " sender_kind, sender_id, body) values (%s,%s,'private',%s,'user',%s,%s)",
+        (TEAM_A, thread_ids[1], A1, A1, f"T2 {TOKEN}"),
+    )
+
+    bodies = _bodies(search_messages(TEAM_A, A1, str(thread_ids[0]), TOKEN))
+
+    assert any("T1" in body for body in bodies)
+    assert not any("T2" in body for body in bodies)
 
 
 def test_a_team_b_message_never_appears_in_a_team_a_search(seeded, admin):
@@ -159,7 +212,7 @@ def test_a_team_b_message_never_appears_in_a_team_a_search(seeded, admin):
             (TEAM_B, f"%{TOKEN}%"),
         ) == 1
 
-    bodies = _bodies(search_messages(TEAM_A, A1, TOKEN))
+    bodies = _bodies(search_messages(TEAM_A, A1, _thread_id(TEAM_A), TOKEN))
 
     assert any("team A" in b for b in bodies), "the query is blind, not scoped"
     assert not any("team B" in b for b in bodies)
@@ -174,7 +227,7 @@ def test_a_tombstoned_message_is_not_returned(seeded, admin):
         (A1, gone),
     )
 
-    results = search_messages(TEAM_A, A1, TOKEN)
+    results = search_messages(TEAM_A, A1, _thread_id(TEAM_A), TOKEN)
     ids = {r["message_id"] for r in results}
 
     assert str(kept) in ids, "the query is blind, not delete-aware"
@@ -189,15 +242,17 @@ def test_search_caps_how_many_results_come_back(seeded, admin):
     for i in range(SEARCH_LIMIT_MAX + 10):
         _group(admin, TEAM_A, A1, f"note {i} about {TOKEN}")
 
-    assert len(search_messages(TEAM_A, A1, TOKEN)) == SEARCH_LIMIT_DEFAULT
+    assert len(search_messages(TEAM_A, A1, _thread_id(TEAM_A), TOKEN)) == SEARCH_LIMIT_DEFAULT
     # a caller asking for more than the ceiling gets the ceiling
-    assert len(search_messages(TEAM_A, A1, TOKEN, limit=500)) == SEARCH_LIMIT_MAX
+    assert len(search_messages(
+        TEAM_A, A1, _thread_id(TEAM_A), TOKEN, limit=500
+    )) == SEARCH_LIMIT_MAX
 
 
 def test_a_long_body_comes_back_truncated(seeded, admin):
     _group(admin, TEAM_A, A1, ("padding word " * 400) + TOKEN)
 
-    hit = search_messages(TEAM_A, A1, TOKEN)[0]
+    hit = search_messages(TEAM_A, A1, _thread_id(TEAM_A), TOKEN)[0]
 
     assert len(hit["body"]) <= MESSAGE_BODY_CHARS
     assert hit["truncated"] is True
@@ -275,12 +330,16 @@ def test_read_document_survives_an_id_the_model_invented(seeded):
 # the ADK wrappers bind ids from session state, never from model arguments
 # ---------------------------------------------------------------------------
 
-def _ctx(team_id=TEAM_A, requester_id=A1):
-    return SimpleNamespace(state={"team_id": team_id, "requester_id": requester_id})
+def _ctx(team_id=TEAM_A, requester_id=A1, thread_id=None):
+    return SimpleNamespace(state={
+        "team_id": team_id,
+        "requester_id": requester_id,
+        "thread_id": thread_id or _thread_id(team_id, owner_id=requester_id),
+    })
 
 
 def test_the_search_wrapper_reads_ids_from_state(seeded):
-    results = messages_search("hello", _ctx())
+    results = messages_search("hello", _ctx(thread_id=_thread_id(TEAM_A)))
     assert any("hello team A" in unmarked(r["body"]) for r in results)
 
 

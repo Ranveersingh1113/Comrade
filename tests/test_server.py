@@ -3,14 +3,19 @@
 Token verification itself is covered in test_server_auth.py; here the identity
 dependency is overridden so these tests exercise handler behaviour instead.
 """
+from contextlib import contextmanager
+
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from server.app import app
+from server.app import ThreadScope, app
 from server.auth import current_user_id
 
 USER = "11111111-1111-1111-1111-111111111111"
 TEAM = "22222222-2222-2222-2222-222222222222"
+PRIVATE_THREAD = "33333333-3333-3333-3333-333333333333"
+GROUP_THREAD = "44444444-4444-4444-4444-444444444444"
 
 
 @pytest.fixture
@@ -20,20 +25,34 @@ def client(monkeypatch):
     # test_server_budget.
     monkeypatch.setattr("server.app.require_membership", lambda *_: None)
     monkeypatch.setattr("server.app._check_turn_budget", lambda *_: None)
+    def _thread(_user, _team, thread_id, legacy_type):
+        resolved = str(thread_id) if thread_id else (
+            GROUP_THREAD if legacy_type == "group" else PRIVATE_THREAD
+        )
+        is_group = resolved == GROUP_THREAD
+        return ThreadScope(resolved, "group" if is_group else "private", None if is_group else USER)
+
+    monkeypatch.setattr("server.app._resolve_thread", _thread)
+
+    @contextmanager
+    def _available(_thread_id):
+        yield True
+
+    monkeypatch.setattr("server.app.thread_lock", _available)
     app.dependency_overrides[current_user_id] = lambda: USER
     yield TestClient(app)
     app.dependency_overrides.clear()
 
 
 def _stub_persistence(monkeypatch, recorder=None):
-    def _user_msg(user_id, team_id, thread_type, text):
+    def _user_msg(user_id, team_id, scope, text):
         if recorder is not None:
-            recorder["user"] = (user_id, team_id, thread_type, text)
+            recorder["user"] = (user_id, team_id, scope, text)
         return "msg-user"
 
-    def _ai_msg(team_id, thread_type, owner_id, text):
+    def _ai_msg(team_id, scope, text):
         if recorder is not None:
-            recorder["ai"] = (team_id, thread_type, owner_id, text)
+            recorder["ai"] = (team_id, scope, text)
         return "msg-ai"
 
     monkeypatch.setattr("server.app._persist_user_message", _user_msg)
@@ -97,13 +116,16 @@ def test_runtime_is_told_the_thread_and_the_message_to_skip(client, monkeypatch)
     _stub_persistence(monkeypatch)
     client.post(
         "/agent/turn",
-        json={"team_id": TEAM, "text": "hi", "thread_type": "group"},
+        json={"team_id": TEAM, "text": "hi", "thread_id": GROUP_THREAD},
     )
-    assert seen == {"thread_type": "group", "exclude_message_id": "msg-user"}
+    assert seen == {
+        "thread_id": GROUP_THREAD,
+        "exclude_message_id": "msg-user",
+        "lock_held": True,
+    }
 
 
-def test_private_turn_is_owned_by_the_requester(client, monkeypatch):
-    """Private threads must name their owner, or nobody can read them back."""
+def test_private_turn_carries_its_canonical_scope(client, monkeypatch):
     rec = {}
     monkeypatch.setattr(
         "server.app.run_turn_sync",
@@ -111,8 +133,10 @@ def test_private_turn_is_owned_by_the_requester(client, monkeypatch):
     )
     _stub_persistence(monkeypatch, rec)
     client.post("/agent/turn", json={"team_id": TEAM, "text": "hi"})
-    assert rec["user"] == (USER, TEAM, "private", "hi")
-    assert rec["ai"] == (TEAM, "private", USER, "noted")
+    assert rec["user"] == (
+        USER, TEAM, ThreadScope(PRIVATE_THREAD, "private", USER), "hi",
+    )
+    assert rec["ai"] == (TEAM, ThreadScope(PRIVATE_THREAD, "private", USER), "noted")
 
 
 def test_group_turn_has_no_thread_owner(client, monkeypatch):
@@ -126,7 +150,7 @@ def test_group_turn_has_no_thread_owner(client, monkeypatch):
         "/agent/turn",
         json={"team_id": TEAM, "text": "hi", "thread_type": "group"},
     )
-    assert rec["ai"] == (TEAM, "group", None, "posted")
+    assert rec["ai"] == (TEAM, ThreadScope(GROUP_THREAD, "group", None), "posted")
 
 
 def test_empty_reply_is_not_persisted(client, monkeypatch):
@@ -140,6 +164,43 @@ def test_empty_reply_is_not_persisted(client, monkeypatch):
     resp = client.post("/agent/turn", json={"team_id": TEAM, "text": "hi"})
     assert resp.json()["reply_message_id"] is None
     assert "ai" not in rec
+
+
+def test_busy_turn_does_not_persist_an_orphaned_message(client, monkeypatch):
+    """A rejected same-thread turn must not become history for a later run."""
+    rec = {}
+    monkeypatch.setattr(
+        "server.app.run_turn_sync",
+        lambda *a, **k: {"run_id": None, "reply": "", "steps": [], "busy": "busy"},
+    )
+    _stub_persistence(monkeypatch, rec)
+
+    @contextmanager
+    def _busy_lock(_thread_id):
+        yield False
+
+    monkeypatch.setattr("server.app.thread_lock", _busy_lock)
+
+    resp = client.post("/agent/turn", json={"team_id": TEAM, "text": "hi"})
+
+    assert resp.status_code == 409
+    assert "user" not in rec
+
+
+def test_inaccessible_thread_is_rejected_before_persisting(client, monkeypatch):
+    rec = {}
+    monkeypatch.setattr(
+        "server.app._resolve_thread",
+        lambda *_: (_ for _ in ()).throw(HTTPException(status_code=404)),
+    )
+    _stub_persistence(monkeypatch, rec)
+
+    resp = client.post(
+        "/agent/turn", json={"team_id": TEAM, "thread_id": GROUP_THREAD, "text": "hi"}
+    )
+
+    assert resp.status_code == 404
+    assert rec == {}
 
 
 def test_unknown_thread_type_is_rejected(client):

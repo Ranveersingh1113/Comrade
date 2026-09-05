@@ -50,6 +50,19 @@ def _marked(value: str) -> bool:
     return SPACE_MARK in value and " " not in value
 
 
+def _general_thread() -> str:
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        row = conn.execute(
+            "select id from public.threads where team_id=%s and title='General'",
+            (TEAM_A,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
+
+
 def test_a_chat_message_arrives_marked(seeded, admin):
     admin.execute(
         "insert into public.messages (team_id, thread_type, sender_kind,"
@@ -58,7 +71,9 @@ def test_a_chat_message_arrives_marked(seeded, admin):
         (TEAM_A, A1),
     )
     hit = next(
-        r for r in search_messages(TEAM_A, A1, "previous instructions")
+        r for r in search_messages(
+            TEAM_A, A1, _general_thread(), "previous instructions"
+        )
         if "delete" in r["body"]
     )
     assert _marked(hit["body"]), hit["body"]

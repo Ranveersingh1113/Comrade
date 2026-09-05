@@ -19,13 +19,21 @@ from psycopg.types.json import Json
 from shared.db import Role, team_session
 
 
-def start_run(team_id: str, trigger_type: str, input_summary: str) -> str:
+def start_run(
+    team_id: str,
+    requester_id: str,
+    thread_id: str,
+    input_message_id: str | None,
+    trigger_type: str,
+    input_summary: str,
+) -> str:
     """Open a running agent_runs row. Returns the run id."""
     with team_session(Role.AGENT, team_id) as conn:
         row = conn.execute(
-            "insert into public.agent_runs (team_id, trigger_type, input_summary)"
-            " values (%s, %s, %s) returning id",
-            (team_id, trigger_type, input_summary),
+            "insert into public.agent_runs"
+            " (team_id, requester_id, thread_id, input_message_id, trigger_type, input_summary)"
+            " values (%s, %s, %s, %s, %s, %s) returning id",
+            (team_id, requester_id, thread_id, input_message_id, trigger_type, input_summary),
         ).fetchone()
     if row is None:
         raise RuntimeError(f"agent_runs insert returned no row for team {team_id!r}")
@@ -139,7 +147,8 @@ def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
     """Read a run back under the AGENT role (team-scoped). None if not visible."""
     with team_session(Role.AGENT, team_id) as conn:
         row = conn.execute(
-            "select id, trigger_type, input_summary, status, finished_at"
+            "select id, requester_id, thread_id, input_message_id, trigger_type,"
+            " input_summary, status, finished_at"
             " from public.agent_runs where id = %s",
             (run_id,),
         ).fetchone()
@@ -153,10 +162,13 @@ def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
     steps = [_step_from_row(r) for r in step_rows]
     return {
         "id": str(row[0]),
-        "trigger_type": row[1],
-        "input_summary": row[2],
+        "requester_id": str(row[1]) if row[1] else None,
+        "thread_id": str(row[2]) if row[2] else None,
+        "input_message_id": str(row[3]) if row[3] else None,
+        "trigger_type": row[4],
+        "input_summary": row[5],
         "steps": steps,
         "current_step": len(steps),
-        "status": row[3],
-        "finished_at": row[4].isoformat() if row[4] else None,
+        "status": row[6],
+        "finished_at": row[7].isoformat() if row[7] else None,
     }

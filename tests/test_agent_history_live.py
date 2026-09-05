@@ -10,7 +10,7 @@ import asyncio
 import pytest
 
 from agent.runtime import run_turn
-from server.app import _persist_ai_reply, _persist_user_message
+from server.app import _persist_ai_reply, _persist_user_message, _resolve_thread
 from shared.config import settings
 from tests._seed import A1, TEAM_A
 
@@ -25,14 +25,14 @@ CODENAME = "Falcon Ridge"
 
 
 def _turn(text: str, thread_type: str = "private") -> str:
-    owner = None if thread_type == "group" else A1
-    message_id = _persist_user_message(A1, TEAM_A, thread_type, text)
+    scope = _resolve_thread(A1, TEAM_A, None, thread_type)
+    message_id = _persist_user_message(A1, TEAM_A, scope, text)
     result = asyncio.run(run_turn(
         TEAM_A, A1, text,
-        thread_type=thread_type, exclude_message_id=message_id,
+        thread_id=scope.id, exclude_message_id=message_id,
     ))
     if result["reply"]:
-        _persist_ai_reply(TEAM_A, thread_type, owner, result["reply"])
+        _persist_ai_reply(TEAM_A, scope, result["reply"])
     return result["reply"]
 
 

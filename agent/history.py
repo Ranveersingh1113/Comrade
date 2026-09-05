@@ -12,10 +12,8 @@ shape; four more such tables would undo the work.
 of both thread kinds, already has per-thread RLS, and is already read as the
 requesting member (findings §4.1).
 
-Scoping note: `authenticated` has no current_team(), and au_messages_select
-legitimately lets a member read BOTH the group room and their own private
-thread. So team_id / thread_type / thread_owner_id here are SCOPING filters
-that RLS cannot do for us — the authorization is still RLS's job.
+Scoping note: a member can read more than one visible thread. `thread_id` is
+therefore an explicit scope as well as an RLS-authorized one.
 """
 from google.genai import types
 
@@ -25,11 +23,13 @@ from shared.db import user_session
 # below into chronological order. `id is distinct from %s` also holds when the
 # exclusion is NULL, so one statement covers both callers.
 _SQL = (
-    "select m.sender_kind, m.body, p.display_name"
+    "select m.sender_kind, m.body, p.display_name, t.visibility,"
+    " (select count(*) > 1 from public.thread_participants tp"
+    "  where tp.thread_id = t.id)"
     " from public.messages m"
+    " join public.threads t on t.id = m.thread_id and t.team_id = m.team_id"
     " left join public.profiles p on p.id = m.sender_id"
-    " where m.team_id = %s and m.thread_type = %s"
-    " and m.thread_owner_id is not distinct from %s::uuid"
+    " where m.team_id = %s and m.thread_id = %s::uuid"
     " and m.deleted_scope is null"
     " and m.id is distinct from %s::uuid"
     " order by m.created_at desc, m.id desc limit %s"
@@ -39,7 +39,7 @@ _SQL = (
 def recent_turns(
     team_id: str,
     requester_id: str,
-    thread_type: str,
+    thread_id: str,
     limit: int,
     exclude_message_id: str | None = None,
 ) -> list[types.Content]:
@@ -49,24 +49,23 @@ def recent_turns(
     persists the member's message BEFORE the runtime runs, so without it the
     model would receive the current question twice.
 
-    Group bodies carry their sender's name — a room has several humans in it,
-    and ADK's user role alone would merge them into one voice.
+    Shared-thread bodies carry their sender's name — ADK's user role alone
+    would merge several people into one voice.
     """
     if limit <= 0:
         return []
-    owner = requester_id if thread_type == "private" else None
     with user_session(requester_id) as conn:
         rows = conn.execute(
-            _SQL, (team_id, thread_type, owner, exclude_message_id, limit)
+            _SQL, (team_id, thread_id, exclude_message_id, limit)
         ).fetchall()
     return [
         types.Content(
             role="user" if kind == "user" else "model",
             parts=[types.Part(
                 text=f"{name}: {body}"
-                if thread_type == "group" and kind == "user" and name
+                if kind == "user" and name and (visibility == "team" or shared)
                 else body
             )],
         )
-        for kind, body, name in reversed(rows)
+        for kind, body, name, visibility, shared in reversed(rows)
     ]

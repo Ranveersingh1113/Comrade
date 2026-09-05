@@ -4,13 +4,14 @@ These tests deliberately avoid the database — they assert that requests are
 rejected *before* any handler logic runs, which is the property that matters.
 """
 import time
+from contextlib import nullcontext
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 
-from server.app import app
+from server.app import ThreadScope, app
 from server.auth import _decode
 from shared.config import settings
 
@@ -128,6 +129,10 @@ def test_es256_token_is_accepted(es256_client, monkeypatch):
     )
     monkeypatch.setattr("server.app._persist_user_message", lambda *a: "m1")
     monkeypatch.setattr("server.app._persist_ai_reply", lambda *a: "m2")
+    monkeypatch.setattr(
+        "server.app._resolve_thread", lambda *_: ThreadScope("thread", "private", USER)
+    )
+    monkeypatch.setattr("server.app.thread_lock", lambda _: nullcontext(True))
     resp = _turn(es256_client, {"Authorization": f"Bearer {_es256_token()}"})
     assert resp.status_code == 200
 

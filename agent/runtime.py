@@ -22,7 +22,7 @@ from agent.agent import APP_NAME, app
 from agent.history import recent_turns
 from agent.repo_tools import connected_repo
 from shared.agent_runs import append_step, finish_run, start_run
-from shared.db import room_lock
+from shared.db import thread_lock
 from shared.config import settings
 
 logger = logging.getLogger(__name__)
@@ -136,17 +136,18 @@ async def stream_turn(
     team_id: str,
     requester_id: str,
     user_text: str,
+    *,
+    thread_id: str,
     trigger_type: str = "user",
-    thread_type: str = "private",
     exclude_message_id: str | None = None,
+    lock_held: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run one turn, yielding each step as it happens and recording it.
 
     team_id / requester_id are SERVER-BOUND here and injected into ADK session
     state — the model receives them via state, never as tool arguments.
 
-    thread_type says WHICH conversation this is; history is thread-scoped, and
-    a private turn must never be shown the room (or vice versa).
+    thread_id says WHICH conversation this is; history is thread-scoped.
     exclude_message_id is the member's just-persisted message: the server
     writes it before calling us, so without this the model gets it twice.
 
@@ -154,30 +155,23 @@ async def stream_turn(
     {"type": "final", ...}. run_turn() below consumes this, so the
     orchestration exists once rather than twice.
     """
-    # findings §4.3: one agent turn at a time per ROOM. Two runs in one group
-    # room are two agents that cannot see each other — duplicated work,
-    # contradictory answers, and a race on the consent queue. Private threads
-    # share no surface, so they stay parallel and take no lock at all.
-    #
-    # ExitStack because the lock's lifetime is the whole turn but only SOME
-    # turns take one; a plain `with` would need the body duplicated.
+    # One agent turn at a time per thread. Different threads remain parallel.
+    # The HTTP layer may already hold this lock before it records the input,
+    # which prevents a rejected busy turn becoming later history.
     with ExitStack() as stack:
-        if thread_type == "group":
-            if not stack.enter_context(room_lock(team_id)):
-                # Decision Q6: say what is actually happening. A spinner here
-                # reads as a hang, and the member has no way to tell the
-                # difference between "thinking" and "stuck".
-                yield {
-                    "type": "busy",
-                    "detail": (
-                        "Comrade is working on someone else's question in this"
-                        " room. Yours is next — send it again in a moment."
-                    ),
-                }
-                return
+        if not lock_held and not stack.enter_context(thread_lock(thread_id)):
+            yield {
+                "type": "busy",
+                "detail": (
+                    "Comrade is working on someone else's question in this"
+                    " thread. Yours is next — send it again in a moment."
+                ),
+            }
+            return
 
         run_id = await run_in_threadpool(
-            start_run, team_id, trigger_type, user_text[:200]
+            start_run, team_id, requester_id, thread_id, exclude_message_id,
+            trigger_type, user_text[:200],
         )
         yield {"type": "run", "run_id": run_id}
 
@@ -192,7 +186,7 @@ async def stream_turn(
         # leave it 'running' forever.
         try:
             history = await run_in_threadpool(
-                recent_turns, team_id, requester_id, thread_type,
+                recent_turns, team_id, requester_id, thread_id,
                 settings.agent_history_turns, exclude_message_id,
             )
             # Resolved once per turn rather than per tool call: it is a DB read
@@ -215,6 +209,8 @@ async def stream_turn(
                     state={
                         "team_id": team_id,
                         "requester_id": requester_id,
+                        "thread_id": thread_id,
+                        "agent_run_id": run_id,
                         # Server-bound like the two above. The repo tools
                         # derive the checkout path from these; the model names
                         # neither, so it cannot ask to work in another team's
@@ -339,16 +335,19 @@ async def run_turn(
     team_id: str,
     requester_id: str,
     user_text: str,
+    *,
+    thread_id: str,
     trigger_type: str = "user",
-    thread_type: str = "private",
     exclude_message_id: str | None = None,
+    lock_held: bool = False,
 ) -> dict[str, Any]:
     """Batch form of stream_turn: drain it and return the collected result."""
     steps: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
     async for item in stream_turn(
-        team_id, requester_id, user_text, trigger_type,
-        thread_type, exclude_message_id,
+        team_id, requester_id, user_text, thread_id=thread_id,
+        trigger_type=trigger_type, exclude_message_id=exclude_message_id,
+        lock_held=lock_held,
     ):
         if item.get("type") == "run":
             continue
@@ -384,9 +383,11 @@ def run_turn_sync(
     team_id: str,
     requester_id: str,
     user_text: str,
+    *,
+    thread_id: str,
     trigger_type: str = "user",
-    thread_type: str = "private",
     exclude_message_id: str | None = None,
+    lock_held: bool = False,
 ) -> dict[str, Any]:
     """Blocking wrapper around run_turn for sync callers (the HTTP handler).
 
@@ -394,6 +395,7 @@ def run_turn_sync(
     a new loop and raises if one is already running.
     """
     return asyncio.run(run_turn(
-        team_id, requester_id, user_text, trigger_type,
-        thread_type, exclude_message_id,
+        team_id, requester_id, user_text, thread_id=thread_id,
+        trigger_type=trigger_type, exclude_message_id=exclude_message_id,
+        lock_held=lock_held,
     ))

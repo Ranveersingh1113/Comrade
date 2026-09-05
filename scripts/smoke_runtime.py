@@ -28,7 +28,18 @@ def main() -> None:
     finally:
         conn.close()
     try:
-        result = run_turn_sync(TEAM_A, A1, "Give me a short status summary.")
+        conn = _admin()
+        try:
+            thread_id = str(conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and legacy_thread_owner_id=%s",
+                (TEAM_A, A1),
+            ).fetchone()[0])
+        finally:
+            conn.close()
+        result = run_turn_sync(
+            TEAM_A, A1, "Give me a short status summary.", thread_id=thread_id
+        )
         print(f"[REPLY] {result['reply']}")
         run = get_run(TEAM_A, result["run_id"])
         print(f"[RUN] status={run['status']} steps={run['current_step']}")

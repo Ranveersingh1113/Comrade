@@ -27,6 +27,13 @@ def test_nudge_sends_immediately(seeded):
     try:
         assert _private_count(conn) == 1
         assert conn.execute(
+            "select count(*) from public.messages m join public.threads t"
+            " on t.id=m.thread_id and t.team_id=m.team_id"
+            " where m.team_id=%s and m.sender_kind='ai'"
+            " and t.legacy_thread_owner_id=%s",
+            (TEAM_A, A2),
+        ).fetchone()[0] == 1
+        assert conn.execute(
             "select count(*) from public.nudge_log where member_id=%s", (A2,)
         ).fetchone()[0] == 1
     finally:

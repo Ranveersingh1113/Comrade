@@ -17,7 +17,20 @@ import pytest
 from agent.runtime import _usage_from_event
 from shared.agent_runs import _cost_usd, finish_run, start_run
 from shared.config import settings
-from tests._seed import TEAM_A
+from tests._seed import A1, TEAM_A
+
+
+def _start(team_id: str, summary: str) -> str:
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        row = conn.execute(
+            "select id from public.threads where team_id=%s and title='General'",
+            (team_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return start_run(team_id, A1, str(row[0]), None, "user", summary)
 
 
 class _Usage:
@@ -106,7 +119,7 @@ def test_a_configured_rate_is_applied_per_million(monkeypatch):
 def test_finish_run_records_what_the_turn_used(seeded, admin, monkeypatch):
     monkeypatch.setattr("shared.config.settings.gemini_input_usd_per_mtok", 0.30)
     monkeypatch.setattr("shared.config.settings.gemini_output_usd_per_mtok", 2.50)
-    run_id = start_run(TEAM_A, "user", "how are the tasks going")
+    run_id = _start(TEAM_A, "how are the tasks going")
     finish_run(TEAM_A, run_id, "done", input_tokens=12_000, output_tokens=800)
 
     row = admin.execute(
@@ -127,7 +140,7 @@ def test_a_failed_turn_still_records_what_it_burned(seeded, admin):
     that failed after three empty-turn retries is the most expensive kind
     there is.
     """
-    run_id = start_run(TEAM_A, "user", "a turn that will fail")
+    run_id = _start(TEAM_A, "a turn that will fail")
     finish_run(TEAM_A, run_id, "failed", input_tokens=9_540, output_tokens=0)
 
     row = admin.execute(
@@ -141,7 +154,7 @@ def test_usage_defaults_to_zero_so_old_callers_still_work(seeded, admin):
     """finish_run's usage arguments are optional: a caller that has nothing to
     report writes zeros rather than failing, and the column stops being null
     for reasons nobody can distinguish from 'never ran'."""
-    run_id = start_run(TEAM_A, "user", "no usage reported")
+    run_id = _start(TEAM_A, "no usage reported")
     finish_run(TEAM_A, run_id, "done")
     row = admin.execute(
         "select input_tokens, output_tokens from public.agent_runs where id = %s",

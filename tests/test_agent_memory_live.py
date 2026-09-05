@@ -22,6 +22,20 @@ def _admin():
     return conn
 
 
+def _thread_id() -> str:
+    conn = _admin()
+    try:
+        row = conn.execute(
+            "select id from public.threads where team_id=%s"
+            " and legacy_thread_owner_id=%s",
+            (TEAM_A, A1),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
+
+
 def test_agent_answers_from_a_wiki_fact(seeded):
     conn = _admin()
     try:
@@ -43,7 +57,9 @@ def test_agent_answers_from_a_wiki_fact(seeded):
     finally:
         conn.close()
 
-    result = asyncio.run(run_turn(TEAM_A, A1, "When is the final demo?"))
+    result = asyncio.run(run_turn(
+        TEAM_A, A1, "When is the final demo?", thread_id=_thread_id()
+    ))
 
     assert "18" in result["reply"] and "december" in result["reply"].lower()
     # it got there by reading the page, not by guessing

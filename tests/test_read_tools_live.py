@@ -22,6 +22,20 @@ pytestmark = [
 ]
 
 
+def _thread_id() -> str:
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        row = conn.execute(
+            "select id from public.threads where team_id=%s"
+            " and legacy_thread_owner_id=%s",
+            (TEAM_A, A1),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
+
+
 def test_agent_answers_from_something_said_in_the_room(seeded):
     conn = psycopg.connect(settings.comrade_db_url_admin)
     conn.autocommit = True
@@ -36,7 +50,10 @@ def test_agent_answers_from_something_said_in_the_room(seeded):
         conn.close()
 
     result = asyncio.run(
-        run_turn(TEAM_A, A1, "Which room did we book for the demo rehearsal?")
+        run_turn(
+            TEAM_A, A1, "Which room did we book for the demo rehearsal?",
+            thread_id=_thread_id(),
+        )
     )
 
     assert "B-114" in result["reply"]

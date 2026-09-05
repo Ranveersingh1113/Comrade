@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from server.app import app
 from server.auth import current_user_id
 from shared.config import settings
-from tests._seed import A1, B1, TEAM_A
+from tests._seed import A1, B1, TEAM_A, as_user
 
 
 async def _fake_stream(team_id, requester_id, user_text, trigger_type="user", **kw):
@@ -29,6 +29,15 @@ def as_a1(monkeypatch):
 
 def _frames(resp) -> list[dict]:
     return [json.loads(line) for line in resp.text.splitlines() if line.strip()]
+
+
+def _general_thread() -> str:
+    with as_user(A1) as conn:
+        row = conn.execute(
+            "select id from public.threads where team_id=%s and title='General'",
+            (TEAM_A,),
+        ).fetchone()
+    return str(row[0])
 
 
 def test_stream_emits_run_steps_then_final(seeded, as_a1):
@@ -58,9 +67,13 @@ def test_stream_tells_the_runtime_the_thread_and_the_message_to_skip(
     monkeypatch.setattr("server.app.stream_turn", _record)
     as_a1.post(
         "/agent/turn/stream",
-        json={"team_id": TEAM_A, "text": "hi", "thread_type": "group"},
+        json={"team_id": TEAM_A, "text": "hi", "thread_id": _general_thread()},
     )
-    assert seen == {"thread_type": "group", "exclude_message_id": "msg-user"}
+    assert seen == {
+        "thread_id": _general_thread(),
+        "exclude_message_id": "msg-user",
+        "lock_held": True,
+    }
 
 
 def test_final_frame_never_reaches_the_wire(seeded, as_a1):
@@ -120,3 +133,34 @@ def test_a_failed_turn_streams_an_error_frame(seeded, as_a1, monkeypatch):
     last = _frames(resp)[-1]
     assert last["type"] == "error"
     assert "gemini exploded" in last["detail"]
+
+
+def test_stream_error_releases_its_thread_lock_without_background_task(
+    seeded, as_a1, monkeypatch
+):
+    """Generator cleanup covers disconnect-capable ASGI servers too."""
+    closed = []
+
+    class _Lock:
+        def __enter__(self):
+            return True
+
+        def __exit__(self, *_):
+            closed.append(True)
+
+    class _NoopBackground:
+        async def __call__(self):
+            return None
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("stream broke")
+        yield  # pragma: no cover - async generator marker
+
+    monkeypatch.setattr("server.app.thread_lock", lambda _thread_id: _Lock())
+    monkeypatch.setattr("server.app.stream_turn", _boom)
+    monkeypatch.setattr("server.app.BackgroundTask", lambda *_args: _NoopBackground())
+
+    resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "text": "hi"})
+
+    assert _frames(resp)[-1]["type"] == "error"
+    assert closed == [True]

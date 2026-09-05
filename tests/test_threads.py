@@ -88,9 +88,10 @@ def test_removing_participant_revokes_thread_message_access(seeded, admin):
             " values (%s,%s,%s,%s)", (thread_id, TEAM_A, user_id, A1)
         )
     message_id = admin.execute(
-        "insert into public.messages (team_id, thread_id, thread_type, sender_kind, sender_id, body)"
-        " values (%s,%s,'group','user',%s,'restricted') returning id",
-        (TEAM_A, thread_id, A1),
+        "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
+        " sender_kind, sender_id, body)"
+        " values (%s,%s,'private',%s,'user',%s,'restricted') returning id",
+        (TEAM_A, thread_id, A1, A1),
     ).fetchone()[0]
     with as_user(A2) as conn:
         assert conn.execute("select id from public.messages where id=%s", (message_id,)).fetchone()
@@ -114,19 +115,57 @@ def test_former_creator_cannot_manage_thread_participants(seeded, admin):
         "update public.memberships set status='left' where team_id=%s and user_id=%s",
         (TEAM_A, A1),
     )
+    with as_user(A1) as conn:
+        deleted = conn.execute(
+            "delete from public.thread_participants where thread_id=%s and user_id=%s",
+            (thread_id, A2),
+        )
+        assert deleted.rowcount == 0
+    assert admin.execute(
+        "select 1 from public.thread_participants where thread_id=%s and user_id=%s",
+        (thread_id, A2),
+    ).fetchone()
     admin.execute(
         "delete from public.thread_participants where thread_id=%s and user_id=%s",
         (thread_id, A2),
     )
-    with as_user(A1, commit=True) as conn:
-        conn.execute(
-            "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
-            " values (%s,%s,%s,%s)", (thread_id, TEAM_A, A2, A1)
-        )
+    with as_user(A1) as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(
+                "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+                " values (%s,%s,%s,%s)", (thread_id, TEAM_A, A2, A1)
+            )
     assert admin.execute(
         "select 1 from public.thread_participants where thread_id=%s and user_id=%s",
         (thread_id, A2),
-    ).fetchone() == (1,)
+    ).fetchone() is None
+
+
+def test_restricted_thread_rejects_group_legacy_identity(seeded, admin):
+    thread_id = _thread(admin, TEAM_A, visibility="restricted")
+    admin.execute(
+        "insert into public.thread_participants (thread_id, team_id, user_id, added_by)"
+        " values (%s,%s,%s,%s)", (thread_id, TEAM_A, A1, A1)
+    )
+    with pytest.raises(psycopg.Error):
+        admin.execute(
+            "insert into public.messages (team_id, thread_id, thread_type, sender_kind,"
+            " sender_id, body) values (%s,%s,'group','user',%s,'not team memory')",
+            (TEAM_A, thread_id, A1),
+        )
+
+
+def test_message_legacy_identity_cannot_change_after_insert(seeded, admin):
+    message_id = admin.execute(
+        "insert into public.messages (team_id, thread_type, sender_kind, sender_id, body)"
+        " values (%s,'group','user',%s,'team message') returning id",
+        (TEAM_A, A1),
+    ).fetchone()[0]
+    with as_user(A1) as conn, pytest.raises(psycopg.errors.RaiseException, match="identity"):
+        conn.execute(
+            "update public.messages set thread_type='private', thread_owner_id=%s where id=%s",
+            (A1, message_id),
+        )
 
 
 def test_legacy_insert_receives_canonical_thread_id(seeded, admin):

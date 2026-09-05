@@ -1,10 +1,8 @@
 """Conversation history: the agent remembers the thread it is standing in.
 
 History comes from `messages` (the documented source of truth), read as the
-requesting member, and is scoped to ONE thread. `authenticated` legitimately
-lets a member read both the group room and their own private thread, so the
-group/private boundary is this module's explicit filter, not RLS -- the tests
-below prove that by first showing the member can read both.
+requesting member, and is scoped to one canonical thread UUID. RLS authorizes
+the visible set; this module selects exactly one member-visible thread from it.
 """
 import asyncio
 
@@ -44,6 +42,27 @@ def _msg(conn, team_id, thread_type, owner, kind, sender, body, order=0):
     return str(row[0])
 
 
+def _thread_id(team_id, thread_type, owner=None) -> str:
+    conn = _admin()
+    try:
+        if thread_type == "group":
+            row = conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and visibility='team' and title='General'",
+                (team_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and legacy_thread_owner_id=%s",
+                (team_id, owner),
+            ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
+
+
 def _texts(contents):
     return [p.text for c in contents for p in c.parts]
 
@@ -62,7 +81,7 @@ def test_prior_turns_come_back_oldest_first_with_adk_roles(seeded):
     finally:
         conn.close()
 
-    turns = recent_turns(TEAM_A, A1, "private", 10)
+    turns = recent_turns(TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 10)
 
     assert [c.role for c in turns][-2:] == ["user", "model"]
     assert _texts(turns)[-2:] == ["when is the demo?", "Friday at noon."]
@@ -76,11 +95,13 @@ def test_history_is_capped_to_the_most_recent_turns(seeded):
     finally:
         conn.close()
 
-    assert _texts(recent_turns(TEAM_A, A1, "private", 2)) == ["line 4", "line 5"]
+    assert _texts(recent_turns(
+        TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 2
+    )) == ["line 4", "line 5"]
 
 
 def test_zero_limit_reads_nothing(seeded):
-    assert recent_turns(TEAM_A, A1, "private", 0) == []
+    assert recent_turns(TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 0) == []
 
 
 # ---------- the boundary that matters ----------
@@ -111,7 +132,9 @@ def test_private_history_does_not_pull_in_the_group_room(seeded):
     finally:
         conn.close()
 
-    texts = " ".join(_texts(recent_turns(TEAM_A, A1, "private", 50)))
+    texts = " ".join(_texts(recent_turns(
+        TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 50
+    )))
     assert PRIVATE_MARK in texts
     assert GROUP_MARK not in texts
 
@@ -124,9 +147,37 @@ def test_group_history_does_not_pull_in_a_private_thread(seeded):
     finally:
         conn.close()
 
-    texts = " ".join(_texts(recent_turns(TEAM_A, A1, "group", 50)))
+    texts = " ".join(_texts(recent_turns(
+        TEAM_A, A1, _thread_id(TEAM_A, "group"), 50
+    )))
     assert GROUP_MARK in texts
     assert PRIVATE_MARK not in texts
+
+
+def test_history_does_not_mix_two_visible_team_threads(seeded):
+    """RLS allows both public threads; the exact UUID selects only one."""
+    conn = _admin()
+    try:
+        other = conn.execute(
+            "insert into public.threads (team_id, title, visibility, kind, created_by)"
+            " values (%s,'Release work','team','discussion',%s) returning id",
+            (TEAM_A, A1),
+        ).fetchone()[0]
+        conn.execute(
+            "insert into public.messages (team_id, thread_id, thread_type, sender_kind,"
+            " sender_id, body) values (%s,%s,'group','user',%s,'other-thread-marker')",
+            (TEAM_A, other, A2),
+        )
+    finally:
+        conn.close()
+
+    general = _thread_id(TEAM_A, "group")
+    assert "other-thread-marker" not in " ".join(_texts(recent_turns(
+        TEAM_A, A1, general, 50
+    )))
+    assert "other-thread-marker" in " ".join(_texts(recent_turns(
+        TEAM_A, A1, str(other), 50
+    )))
 
 
 def test_another_members_private_thread_never_appears(seeded):
@@ -137,10 +188,10 @@ def test_another_members_private_thread_never_appears(seeded):
         conn.close()
 
     assert "a2-only-secret" not in " ".join(
-        _texts(recent_turns(TEAM_A, A1, "private", 50))
+        _texts(recent_turns(TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 50))
     )
     assert "a2-only-secret" not in " ".join(
-        _texts(recent_turns(TEAM_A, A2, "group", 50))
+        _texts(recent_turns(TEAM_A, A2, _thread_id(TEAM_A, "group"), 50))
     )
 
 
@@ -164,7 +215,7 @@ def test_history_never_crosses_teams(seeded):
         ).fetchone()[0] > 0
 
     assert "team-b-only-marker" not in " ".join(
-        _texts(recent_turns(TEAM_A, A1, "group", 50))
+        _texts(recent_turns(TEAM_A, A1, _thread_id(TEAM_A, "group"), 50))
     )
 
 
@@ -181,7 +232,7 @@ def test_the_message_this_turn_is_about_is_not_replayed(seeded):
     finally:
         conn.close()
 
-    texts = _texts(recent_turns(TEAM_A, A1, "private", 50,
+    texts = _texts(recent_turns(TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 50,
                                 exclude_message_id=current))
     assert "earlier question" in texts
     assert "the new question" not in texts
@@ -201,7 +252,7 @@ def test_a_tombstoned_message_does_not_re_enter_context(seeded, scope):
         conn.close()
 
     assert "please forget this" not in " ".join(
-        _texts(recent_turns(TEAM_A, A1, "private", 50))
+        _texts(recent_turns(TEAM_A, A1, _thread_id(TEAM_A, "private", A1), 50))
     )
 
 
@@ -244,7 +295,9 @@ def test_stream_turn_seeds_the_session_with_the_thread_history(seeded, fake_runn
     finally:
         conn.close()
 
-    asyncio.run(_drain(stream_turn(TEAM_A, A1, "follow-up", thread_type="private")))
+    asyncio.run(_drain(stream_turn(
+        TEAM_A, A1, "follow-up", thread_id=_thread_id(TEAM_A, "private", A1)
+    )))
 
     events = fake_runner.last.session.events
     assert [e.content.role for e in events][-2:] == ["user", "model"]
@@ -255,7 +308,9 @@ def test_stream_turn_seeds_the_session_with_the_thread_history(seeded, fake_runn
 
 
 def test_stream_turn_caps_the_llm_calls(seeded, fake_runner):
-    asyncio.run(_drain(stream_turn(TEAM_A, A1, "hi")))
+    asyncio.run(_drain(stream_turn(
+        TEAM_A, A1, "hi", thread_id=_thread_id(TEAM_A, "private", A1)
+    )))
     assert settings.agent_max_llm_calls > 0
     assert (
         fake_runner.last.kwargs["run_config"].max_llm_calls
@@ -272,7 +327,9 @@ def test_stream_turn_uses_the_thread_it_was_given(seeded, fake_runner):
     finally:
         conn.close()
 
-    asyncio.run(_drain(stream_turn(TEAM_A, A1, "hi", thread_type="group")))
+    asyncio.run(_drain(stream_turn(
+        TEAM_A, A1, "hi", thread_id=_thread_id(TEAM_A, "group")
+    )))
     texts = " ".join(
         e.content.parts[0].text for e in fake_runner.last.session.events
     )
@@ -288,7 +345,7 @@ def test_stream_turn_skips_the_message_it_was_handed(seeded, fake_runner):
         conn.close()
 
     asyncio.run(_drain(stream_turn(
-        TEAM_A, A1, "the new question", thread_type="private",
+        TEAM_A, A1, "the new question", thread_id=_thread_id(TEAM_A, "private", A1),
         exclude_message_id=current,
     )))
     texts = [e.content.parts[0].text for e in fake_runner.last.session.events]

@@ -23,6 +23,20 @@ from shared.config import settings
 from tests._seed import A1, A2, TEAM_A
 
 
+def _start(summary: str) -> str:
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        row = conn.execute(
+            "select id from public.threads where team_id=%s"
+            " and legacy_thread_owner_id=%s",
+            (TEAM_A, A1),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return start_run(TEAM_A, A1, str(row[0]), None, "user", summary)
+
+
 def _as(uid):
     conn = psycopg.connect(
         settings.comrade_authenticator_db_url or settings.comrade_db_url_admin
@@ -36,7 +50,7 @@ def _as(uid):
 
 
 def test_a_teammate_cannot_read_another_members_agent_run(seeded):
-    run_id = start_run(TEAM_A, "user", "A1 private: my appointment is Tuesday")
+    run_id = _start("A1 private: my appointment is Tuesday")
     append_step(
         TEAM_A, run_id,
         {"seq": 0, "type": "tool_result", "tool": "x",
@@ -60,7 +74,7 @@ def test_a_teammate_cannot_read_agent_steps(seeded):
     table, if comrade_agent weren't the only grantee: no grant, no policy,
     for `authenticated` at all.
     """
-    run_id = start_run(TEAM_A, "user", "A1 private: my appointment is Tuesday")
+    run_id = _start("A1 private: my appointment is Tuesday")
     append_step(
         TEAM_A, run_id,
         {"seq": 0, "type": "tool_result", "tool": "x",
@@ -83,7 +97,7 @@ def test_a_member_cannot_read_even_their_own_agent_runs(seeded):
     If a "your run history" surface is ever built, that is the moment to add a
     requester column and an own-rows-only policy — not before.
     """
-    start_run(TEAM_A, "user", "A1 asked something")
+    _start("A1 asked something")
     conn = _as(A1)
     try:
         with pytest.raises(psycopg.errors.InsufficientPrivilege):

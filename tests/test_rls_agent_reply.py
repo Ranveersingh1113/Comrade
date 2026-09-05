@@ -8,7 +8,7 @@ Every HTTP test stubs `_persist_ai_reply`, which is why nothing caught it.
 import psycopg
 import pytest
 
-from server.app import _persist_ai_reply
+from server.app import _persist_ai_reply, _resolve_thread
 from shared.config import settings
 from shared.db import Role, team_session
 from tests._seed import A1, TEAM_A, count
@@ -53,7 +53,8 @@ def test_persist_ai_reply_returns_the_id_it_wrote(seeded):
     """The real function, unstubbed. §4.1 took SELECT on messages away, so it
     now supplies the id instead of reading it back with RETURNING — and this
     file exists because every HTTP test stubs this function out."""
-    message_id = _persist_ai_reply(TEAM_A, "group", None, "The demo is Friday.")
+    scope = _resolve_thread(A1, TEAM_A, None, "group")
+    message_id = _persist_ai_reply(TEAM_A, scope, "The demo is Friday.")
 
     conn = psycopg.connect(settings.comrade_db_url_admin)
     try:

@@ -10,6 +10,8 @@ import base64
 import json
 import logging
 import uuid
+from contextlib import ExitStack
+from dataclasses import dataclass
 
 from fastapi import (
     Depends, FastAPI, File, HTTPException, Request, UploadFile, status,
@@ -18,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 
 from agent.runtime import run_turn_sync, stream_turn
 from pipeline.compiler import enqueue_document
@@ -39,7 +42,7 @@ from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
     reject_consent,
 )
-from shared.db import Role, connect, team_session, user_session
+from shared.db import Role, connect, team_session, thread_lock, user_session
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +67,9 @@ class TeamScoped(BaseModel):
 
 class TurnRequest(TeamScoped):
     text: str
+    thread_id: uuid.UUID | None = None
+    # Temporary wire compatibility for clients still sending group/private.
+    # Canonical routing below always resolves it to a thread UUID.
     thread_type: str = Field(default="private", pattern="^(private|group)$")
 
 
@@ -117,23 +123,96 @@ def health(response: Response) -> dict[str, str]:
 
 # ---------- agent ----------
 
+@dataclass(frozen=True)
+class ThreadScope:
+    id: str
+    legacy_type: str
+    legacy_owner_id: str | None
+
+
+def _scope(row: tuple) -> ThreadScope:
+    thread_id, visibility, legacy_owner_id, owner_id, created_by = row
+    if visibility == "team":
+        return ThreadScope(str(thread_id), "group", None)
+    owner = legacy_owner_id or owner_id or created_by
+    if owner is None:
+        raise RuntimeError(f"restricted thread {thread_id!s} has no legacy owner")
+    return ThreadScope(str(thread_id), "private", str(owner))
+
+
+def _resolve_thread(
+    user_id: str, team_id: str, thread_id: str | uuid.UUID | None, legacy_type: str
+) -> ThreadScope:
+    """Resolve the one thread a turn may touch, as the requesting member.
+
+    A direct ID is read under RLS, so a guessed private ID looks exactly like a
+    missing one. Old clients name only group/private; that bridge resolves
+    General or creates the member's legacy private thread once.
+    """
+    with user_session(user_id) as conn:
+        if thread_id:
+            row = conn.execute(
+                "select id, visibility, legacy_thread_owner_id, owner_id, created_by"
+                " from public.threads where id=%s and team_id=%s",
+                (thread_id, team_id),
+            ).fetchone()
+        elif legacy_type == "group":
+            row = conn.execute(
+                "select id, visibility, legacy_thread_owner_id, owner_id, created_by"
+                " from public.threads where team_id=%s and visibility='team'"
+                " and kind='discussion' and title='General'",
+                (team_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select id, visibility, legacy_thread_owner_id, owner_id, created_by"
+                " from public.threads where team_id=%s"
+                " and legacy_thread_owner_id=%s",
+                (team_id, user_id),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "insert into public.threads"
+                    " (team_id, title, visibility, kind, owner_id, created_by,"
+                    "  legacy_thread_owner_id)"
+                    " values (%s,'Private','restricted','discussion',%s,%s,%s)"
+                    " on conflict do nothing"
+                    " returning id, visibility, legacy_thread_owner_id, owner_id, created_by",
+                    (team_id, user_id, user_id, user_id),
+                ).fetchone()
+                if row is not None:
+                    conn.execute(
+                        "insert into public.thread_participants"
+                        " (thread_id, team_id, user_id, added_by) values (%s,%s,%s,%s)",
+                        (row[0], team_id, user_id, user_id),
+                    )
+                else:
+                    row = conn.execute(
+                        "select id, visibility, legacy_thread_owner_id, owner_id, created_by"
+                        " from public.threads where team_id=%s"
+                        " and legacy_thread_owner_id=%s",
+                        (team_id, user_id),
+                    ).fetchone()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "thread not found")
+    return _scope(row)
+
 def _persist_user_message(
-    user_id: str, team_id: str, thread_type: str, text: str
+    user_id: str, team_id: str, scope: ThreadScope, text: str
 ) -> str:
     """Insert the member's message as themselves, so RLS authorises the write."""
-    owner = None if thread_type == "group" else user_id
     with user_session(user_id) as conn:
         row = conn.execute(
-            "insert into public.messages (team_id, thread_type, thread_owner_id,"
-            " sender_kind, sender_id, body) values (%s,%s,%s,'user',%s,%s)"
+            "insert into public.messages (team_id, thread_id, thread_type, thread_owner_id,"
+            " sender_kind, sender_id, body) values (%s,%s,%s,%s,'user',%s,%s)"
             " returning id",
-            (team_id, thread_type, owner, user_id, text),
+            (team_id, scope.id, scope.legacy_type, scope.legacy_owner_id, user_id, text),
         ).fetchone()
     return str(row[0])
 
 
 def _persist_ai_reply(
-    team_id: str, thread_type: str, owner_id: str | None, text: str
+    team_id: str, scope: ThreadScope, text: str
 ) -> str:
     """Insert the reply as the AI itself — never attributed to the requester.
 
@@ -143,9 +222,9 @@ def _persist_ai_reply(
     message_id = str(uuid.uuid4())
     with team_session(Role.AGENT, team_id) as conn:
         conn.execute(
-            "insert into public.messages (id, team_id, thread_type,"
-            " thread_owner_id, sender_kind, body) values (%s,%s,%s,%s,'ai',%s)",
-            (message_id, team_id, thread_type, owner_id, text),
+            "insert into public.messages (id, team_id, thread_id, thread_type,"
+            " thread_owner_id, sender_kind, body) values (%s,%s,%s,%s,%s,'ai',%s)",
+            (message_id, team_id, scope.id, scope.legacy_type, scope.legacy_owner_id, text),
         )
     return message_id
 
@@ -211,25 +290,26 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     """
     require_membership(user_id, req.team_id)
     _check_turn_budget(req.team_id)
-    user_message_id = _persist_user_message(
-        user_id, req.team_id, req.thread_type, req.text
-    )
-    result = run_turn_sync(
-        req.team_id, user_id, req.text,
-        thread_type=req.thread_type, exclude_message_id=user_message_id,
-    )
-    if result.get("busy"):
-        # §4.3 + decision Q6: another member's turn holds this room. Say so
-        # plainly — a 200 with an empty reply would read as the agent
-        # ignoring them, which is worse than being told to wait.
-        raise HTTPException(status.HTTP_409_CONFLICT, result["busy"])
-    reply = result["reply"]
-    reply_message_id = None
-    if reply:
-        owner = None if req.thread_type == "group" else user_id
-        reply_message_id = _persist_ai_reply(
-            req.team_id, req.thread_type, owner, reply
+    scope = _resolve_thread(user_id, req.team_id, req.thread_id, req.thread_type)
+    # Acquire before recording the message. A refused turn must not become
+    # phantom context for the turn that actually holds this thread.
+    with thread_lock(scope.id) as acquired:
+        if not acquired:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "Comrade is working on someone else's question in this thread.",
+            )
+        user_message_id = _persist_user_message(user_id, req.team_id, scope, req.text)
+        result = run_turn_sync(
+            req.team_id, user_id, req.text, thread_id=scope.id,
+            exclude_message_id=user_message_id, lock_held=True,
         )
+        if result.get("busy"):
+            raise HTTPException(status.HTTP_409_CONFLICT, result["busy"])
+        reply = result["reply"]
+        reply_message_id = None
+        if reply:
+            reply_message_id = _persist_ai_reply(req.team_id, scope, reply)
     return TurnResponse(
         run_id=result["run_id"],
         reply=reply,
@@ -252,38 +332,55 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     """
     require_membership(user_id, req.team_id)
     _check_turn_budget(req.team_id)
-    owner = None if req.thread_type == "group" else user_id
-    user_message_id = await run_in_threadpool(
-        _persist_user_message, user_id, req.team_id, req.thread_type, req.text
-    )
+    scope = _resolve_thread(user_id, req.team_id, req.thread_id, req.thread_type)
+    locks = ExitStack()
+    if not locks.enter_context(thread_lock(scope.id)):
+        locks.close()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Comrade is working on someone else's question in this thread.",
+        )
+    try:
+        user_message_id = await run_in_threadpool(
+            _persist_user_message, user_id, req.team_id, scope, req.text
+        )
+    except BaseException:
+        locks.close()
+        raise
 
     async def frames():
-        reply = ""
         try:
-            async for item in stream_turn(
-                req.team_id, user_id, req.text,
-                thread_type=req.thread_type, exclude_message_id=user_message_id,
-            ):
-                if item.get("type") == "final":
-                    reply = item["reply"]
-                    continue
-                yield json.dumps(item) + "\n"
-        except Exception as exc:  # noqa: BLE001 - the stream owns its errors
-            logger.exception("streamed turn failed")
-            yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
-            return
-        reply_message_id = None
-        if reply:
-            reply_message_id = await run_in_threadpool(
-                _persist_ai_reply, req.team_id, req.thread_type, owner, reply
-            )
-        yield json.dumps({
-            "type": "done",
-            "user_message_id": user_message_id,
-            "reply_message_id": reply_message_id,
-        }) + "\n"
+            reply = ""
+            try:
+                async for item in stream_turn(
+                    req.team_id, user_id, req.text,
+                    thread_id=scope.id, exclude_message_id=user_message_id,
+                    lock_held=True,
+                ):
+                    if item.get("type") == "final":
+                        reply = item["reply"]
+                        continue
+                    yield json.dumps(item) + "\n"
+            except Exception as exc:  # noqa: BLE001 - the stream owns its errors
+                logger.exception("streamed turn failed")
+                yield json.dumps({"type": "error", "detail": str(exc)}) + "\n"
+                return
+            reply_message_id = None
+            if reply:
+                reply_message_id = await run_in_threadpool(
+                    _persist_ai_reply, req.team_id, scope, reply
+                )
+            yield json.dumps({
+                "type": "done",
+                "user_message_id": user_message_id,
+                "reply_message_id": reply_message_id,
+            }) + "\n"
+        finally:
+            locks.close()
 
-    return StreamingResponse(frames(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        frames(), media_type="application/x-ndjson", background=BackgroundTask(locks.close)
+    )
 
 
 # ---------- consent ----------
@@ -575,8 +672,10 @@ def remember_message(team_id: str, message_id: str, user_id: CurrentUserId) -> d
     require_membership(user_id, team_id)
     with user_session(user_id) as conn:
         row = conn.execute(
-            "select 1 from public.messages where id=%s and team_id=%s"
-            " and thread_type='group' and deleted_scope is null",
+            "select 1 from public.messages m join public.threads t"
+            " on t.id=m.thread_id and t.team_id=m.team_id"
+            " where m.id=%s and m.team_id=%s and t.visibility='team'"
+            " and m.deleted_scope is null",
             (message_id, team_id),
         ).fetchone()
     if row is None:
@@ -627,8 +726,9 @@ def observation_suppress(
             "insert into public.observation_suppressions"
             " (team_id, member_id, kind, message_id)"
             " select %s, %s, %s, m.id from public.messages m"
+            " join public.threads t on t.id=m.thread_id and t.team_id=m.team_id"
             " where m.id=%s and m.team_id=%s and m.sender_kind='ai'"
-            " and m.thread_type='group'"
+            " and t.visibility='team'"
             # Diff cards are notifications, not observations: silencing them
             # would break the transparency that replaces a memory approval gate.
             " and not exists (select 1 from public.memory_compilations c"

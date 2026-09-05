@@ -144,6 +144,11 @@ def test_apply_add_writes_fact_provenance_citation_card(seeded):
             (result["diff_message_id"],),
         ).fetchone()[0]
         assert card == "Memory updated — 1 added, 0 revised, 0 removed."
+        assert conn.execute(
+            "select t.title from public.messages m join public.threads t"
+            " on t.id=m.thread_id and t.team_id=m.team_id where m.id=%s",
+            (result["diff_message_id"],),
+        ).fetchone()[0] == "General"
     finally:
         conn.close()
 

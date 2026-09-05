@@ -50,14 +50,36 @@ def silent_model(monkeypatch):
 def _frames(thread_type="private"):
     from agent.runtime import stream_turn
 
+    thread_id = _thread_id(thread_type)
+
     async def _drain():
         return [
             f async for f in stream_turn(
-                TEAM_A, A1, "what is open?", thread_type=thread_type
+                TEAM_A, A1, "what is open?", thread_id=thread_id
             )
         ]
 
     return asyncio.run(_drain())
+
+
+def _thread_id(thread_type="private") -> str:
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    try:
+        if thread_type == "group":
+            row = conn.execute(
+                "select id from public.threads where team_id=%s and title='General'",
+                (TEAM_A,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and legacy_thread_owner_id=%s",
+                (TEAM_A, A1),
+            ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None
+    return str(row[0])
 
 
 def test_an_empty_turn_tells_the_member(seeded, silent_model):
@@ -103,7 +125,9 @@ def test_run_turn_does_not_raise_on_an_empty_turn(seeded, silent_model):
     """
     from agent.runtime import run_turn
 
-    result = asyncio.run(run_turn(TEAM_A, A1, "what is open?"))
+    result = asyncio.run(run_turn(
+        TEAM_A, A1, "what is open?", thread_id=_thread_id()
+    ))
     assert result["reply"] == ""
     assert result["run_id"] is not None, "the run row exists and is worth returning"
     assert "empty" in result
@@ -129,7 +153,9 @@ def test_a_normal_turn_is_untouched(seeded, monkeypatch, admin):
 
     async def _drain():
         return [
-            f async for f in stream_turn(TEAM_A, A1, "what is open?")
+            f async for f in stream_turn(
+                TEAM_A, A1, "what is open?", thread_id=_thread_id()
+            )
         ]
 
     frames = asyncio.run(_drain())

@@ -66,8 +66,12 @@ export function ComradeLanding() {
         <DotGrid />
         <nav className="relative z-10 mx-auto flex max-w-7xl items-center justify-between px-6 py-6 lg:px-10">
           <button onClick={() => scrollTo("top")} className="group flex items-center gap-3">
-            <span className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-[12px] bg-[#fcfbf8] transition-transform group-hover:rotate-[-5deg]">
-              <img src="/__mockup/images/comrade-landing-logo.png" alt="Comrade" className="h-[74px] w-[82px] max-w-none object-contain" />
+            <span className="relative flex h-10 w-10 items-center justify-center overflow-hidden rounded-[12px] bg-[#fcfbf8] transition-transform group-hover:rotate-[-5deg]">
+              <img
+                src="/__mockup/images/comrade-landing-logo.png"
+                alt="Comrade orb"
+                className="absolute left-[-6px] top-0 h-auto w-[52px] max-w-none"
+              />
             </span>
             <span className="text-xl font-bold tracking-[-0.05em]" style={display}>comrade</span>
           </button>

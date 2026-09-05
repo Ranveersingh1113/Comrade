@@ -5,7 +5,7 @@ import pytest
 
 from shared.config import settings
 from shared.consent import ConsentError, compute_hash, execute_consent, propose_action
-from tests._seed import A1, A2, TEAM_A, TEAM_B
+from tests._seed import A1, A2, TEAM_A, TEAM_B, general_thread
 
 
 def _admin():
@@ -35,6 +35,25 @@ def _propose(title="Write tests"):
         {"assignee_id": A2, "title": title, "description": None, "deadline": None},
         source_snippet="from the Tuesday thread",
     )["consent_id"]
+
+
+def test_agent_proposal_records_its_thread_and_run_provenance(seeded):
+    from agent.run_queue import enqueue_turn
+
+    with _admin() as conn:
+        thread_id = general_thread(conn, TEAM_A)
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "create a task")
+    consent_id = propose_action(
+        TEAM_A, A1, "task_create",
+        {"assignee_id": A1, "title": "thread-bound", "description": None, "deadline": None},
+        thread_id=thread_id, agent_run_id=run_id,
+    )["consent_id"]
+
+    with _admin() as conn:
+        row = conn.execute(
+            "select thread_id, agent_run_id from public.consent_queue where id=%s", (consent_id,)
+        ).fetchone()
+    assert tuple(map(str, row)) == (thread_id, str(run_id))
 
 
 def test_propose_writes_pending_without_acting(seeded):

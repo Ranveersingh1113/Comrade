@@ -507,6 +507,8 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
         source_snippet=f"{title}\n\n{body}"[:2000],
         # Closing a pull request is one click, and nothing is merged by this.
         reversible=True,
+        thread_id=tool_context.state.get("thread_id"),
+        agent_run_id=tool_context.state.get("agent_run_id"),
     )
 
 

@@ -382,6 +382,8 @@ def propose_task_update(
     deadline: str | None = None,
     assignee_id: str = "",
     source: str | None = None,
+    thread_id: str | None = None,
+    agent_run_id: str | None = None,
 ) -> dict:
     """Propose amending an existing task. Pure, unit-testable half of
     task_propose_update.
@@ -417,6 +419,8 @@ def propose_task_update(
         args=args,
         source_snippet=source or None,
         reversible=True,
+        thread_id=thread_id,
+        agent_run_id=agent_run_id,
     )
 
 
@@ -673,6 +677,8 @@ def team_propose_task(
         args=args,
         source_snippet=source or None,
         reversible=True,
+        thread_id=tool_context.state.get("thread_id"),
+        agent_run_id=tool_context.state.get("agent_run_id"),
     )
 
 
@@ -714,6 +720,8 @@ def task_propose_update(
         deadline=deadline,
         assignee_id=assignee_id,
         source=source or None,
+        thread_id=tool_context.state.get("thread_id"),
+        agent_run_id=tool_context.state.get("agent_run_id"),
     )
 
 

@@ -88,6 +88,8 @@ def propose_action(
     reversible: bool = True,
     tier: str | None = None,
     batch_id: str | None = None,
+    thread_id: str | None = None,
+    agent_run_id: str | None = None,
 ) -> dict:
     """Write a pending consent item (does NOT perform the action). 7-day backstop.
 
@@ -119,10 +121,11 @@ def propose_action(
             conn.execute(
                 "insert into public.consent_queue (id, team_id,"
                 " requesting_member_id, tool_name, tool_args, source_snippet,"
-                " action_hash, reversible, tier, batch_id, expires_at)"
-                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
+                " action_hash, reversible, tier, batch_id, thread_id, agent_run_id, expires_at)"
+                " values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now() + interval '7 days')",
                 (consent_id, team_id, requester_id, tool_name, Json(args),
-                 source_snippet, action_hash, reversible, final_tier, batch_id),
+                 source_snippet, action_hash, reversible, final_tier, batch_id,
+                 thread_id, agent_run_id),
             )
     except psycopg.errors.UniqueViolation:
         # The same proposal is already pending. That is uq_consent_pending_hash

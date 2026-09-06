@@ -42,6 +42,19 @@ MIN_PORT, MAX_PORT = 1024, 65535
 DOCKER_TIMEOUT = 120
 LOG_CHARS = 8_000
 
+#: The network preview containers join, and the ONLY way anything reaches them.
+#:
+#: 🔴 This replaces `--network bridge` plus `-p 127.0.0.1::<port>`, and both
+#: were wrong. Publishing a host port puts an unauthenticated development
+#: server on a port of the host — and in the deployed topology it does not even
+#: work, because the API runs in its own container, so the host's loopback is
+#: not the API's. The proxy could not reach what it was meant to proxy.
+#:
+#: An `--internal` user-defined network solves both. Nothing outside it can
+#: reach a preview, the containers have no default external route, and the API
+#: joins the same network and dials containers by name through Docker's DNS.
+PREVIEW_NETWORK = "comrade-preview"
+
 
 class ProcessError(Exception):
     """The process could not be started, stopped, or read."""
@@ -72,6 +85,27 @@ def _kill(container_id: str) -> None:
             logger.warning("could not %s %s: %s", command[1], container_id[:12], exc)
 
 
+def _ensure_network() -> None:
+    """Create the preview network if it is absent. Idempotent.
+
+    `--internal` is the load-bearing flag: it gives the network no gateway to
+    the outside, so a preview container cannot reach the internet even though
+    it is on a bridge. Dependencies were installed in a separate phase that had
+    the network; running does not need one.
+    """
+    try:
+        _docker(["docker", "network", "inspect", PREVIEW_NETWORK])
+        return
+    except ProcessError:
+        pass
+    try:
+        _docker(["docker", "network", "create", "--internal", PREVIEW_NETWORK])
+    except ProcessError as exc:
+        # Another worker may have created it between the inspect and here.
+        if "already exists" not in str(exc):
+            raise
+
+
 def _run_argv(name: str, root: Path, command: str, port: int | None) -> list[str]:
     """The container line for a detached process.
 
@@ -80,22 +114,22 @@ def _run_argv(name: str, root: Path, command: str, port: int | None) -> list[str
     are the only evidence of why a server died, and `--rm` destroys them at
     exactly the moment they become interesting.
 
-    The port binds to 127.0.0.1. The preview proxy reaches it on the host;
-    publishing on 0.0.0.0 would put an unauthenticated development server
-    straight onto the internet, which is the thing the proxy exists to prevent.
+    NO port is published. The container listens on its declared port inside an
+    internal network, and the proxy — on that same network — is the only thing
+    that can reach it. Publishing to the host would put an unauthenticated
+    development server on a host port, which is the thing the proxy exists to
+    prevent.
     """
     return [
         "docker", "run", "-d", "--name", name,
-        # A development server needs to reach nothing, and the proxy reaches
-        # IT. `none` would make the published port unreachable, so this is the
-        # one place a bridge is required — with no ports published outward
-        # except the single loopback binding below.
-        "--network", "bridge",
+        # The internal preview network, and NO published port. The proxy is on
+        # the same network and dials this container by name; nothing else can
+        # reach it, and the container has no route out. See PREVIEW_NETWORK.
+        "--network", PREVIEW_NETWORK,
         "--read-only", "--tmpfs", "/tmp",
         *_git_mask(root),
         *_SECURITY_FLAGS,
         "--user", f"{SANDBOX_UID}:{SANDBOX_UID}",
-        *(["-p", f"127.0.0.1::{port}"] if port else []),
         "-v", f"{root}:{MOUNT}",
         "-w", MOUNT,
         settings.comrade_sandbox_image,
@@ -134,6 +168,7 @@ def start(
 
     name = f"comrade-proc-{uuid.uuid4().hex}"
     try:
+        _ensure_network()
         container_id = _docker(_run_argv(name, root, command, port))
     except ProcessError as exc:
         _finish(team_id, process_id, "failed", detail=str(exc))
@@ -142,9 +177,10 @@ def start(
     with team_session(Role.AGENT, team_id) as conn:
         conn.execute(
             "update public.sandbox_processes"
-            "   set container_id=%s, state='running', last_seen_at=now()"
+            "   set container_id=%s, container_name=%s, state='running',"
+            "       last_seen_at=now()"
             " where id=%s and team_id=%s",
-            (container_id, process_id, team_id),
+            (container_id, name, process_id, team_id),
         )
     return {"id": process_id, "state": "running", "port": port, "command": command}
 

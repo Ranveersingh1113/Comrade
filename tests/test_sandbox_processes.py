@@ -44,6 +44,11 @@ def no_docker(monkeypatch):
 
     def _fake(argv):
         calls.append(argv)
+        # A host that does not have the preview network yet, which is the
+        # state every host is in the first time. `inspect` failing is how
+        # _ensure_network decides to create it.
+        if argv[1:3] == ["network", "inspect"]:
+            raise processes.ProcessError("No such network")
         return "c" * 64          # a container id, as `docker run -d` prints
 
     monkeypatch.setattr(processes, "_docker", _fake)
@@ -63,6 +68,8 @@ def test_the_row_exists_before_the_container_does(seeded, admin, monkeypatch, tm
     seen: list[str | None] = []
 
     def _fake(argv):
+        if argv[1] == "network":
+            return ""            # setting the network up is not the run
         seen.append(admin.execute(
             "select state from public.sandbox_processes where thread_id=%s",
             (thread_id,),
@@ -129,7 +136,7 @@ def test_a_server_runs_detached_but_keeps_every_other_guarantee(
     no network the host can reach."""
     thread_id = _thread(admin)
     processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
-    argv = no_docker[0]
+    argv = no_docker[-1]
 
     assert "-d" in argv, "a server that blocks the worker is not a server"
     assert "--cap-drop" in argv and "ALL" in argv
@@ -141,22 +148,48 @@ def test_a_server_runs_detached_but_keeps_every_other_guarantee(
     )
 
 
-def test_the_declared_port_is_the_only_one_published(seeded, admin, no_docker, tmp_path):
-    """Bound to loopback, not 0.0.0.0. The preview proxy reaches it on the
-    host; publishing it publicly would put an unauthenticated development
-    server on the internet, which is the whole thing the proxy prevents."""
+def test_nothing_is_ever_published_to_the_host(seeded, admin, no_docker, tmp_path):
+    """🔴 The correction. This first published `-p 127.0.0.1::<port>`, which
+    the plan forbids in two separate tasks — and which does not even work in
+    the deployed topology, because the API runs in its own container so the
+    host's loopback is not the API's. The proxy could not have reached what it
+    was meant to proxy.
+
+    The container is reachable only from inside the preview network."""
     thread_id = _thread(admin)
     processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
-    published = [a for a in no_docker[0] if a.startswith("127.0.0.1:")]
+    argv = no_docker[-1]
 
-    assert len(published) == 1, no_docker[0]
-    assert published[0].endswith(":3000")
+    assert "-p" not in argv, argv
+    assert not [a for a in argv if a.startswith("127.0.0.1:")]
+    assert argv[argv.index("--network") + 1] == processes.PREVIEW_NETWORK
 
 
-def test_a_process_with_no_port_publishes_nothing(seeded, admin, no_docker, tmp_path):
+def test_the_preview_network_has_no_route_out(seeded, admin, no_docker, tmp_path):
+    """`--internal` is what keeps "no network" true for a container that is,
+    technically, on a bridge. Dependencies were installed in a phase that had
+    the network; running needs none."""
     thread_id = _thread(admin)
-    processes.start(TEAM_A, thread_id, "npm run watch", root=tmp_path, port=None)
-    assert not [a for a in no_docker[0] if a.startswith("127.0.0.1:")]
+    processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    created = [a for a in no_docker if "network" in a and "create" in a]
+
+    assert created, no_docker
+    assert "--internal" in created[0]
+
+
+def test_the_container_name_is_stored_because_it_is_the_address(
+    seeded, admin, no_docker, tmp_path
+):
+    """The proxy dials the container by name through Docker's DNS. Relying on
+    the short id resolving instead would work today and break on an upgrade
+    with no error message."""
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    name = admin.execute(
+        "select container_name from public.sandbox_processes where id=%s",
+        (proc["id"],),
+    ).fetchone()[0]
+    assert name and name.startswith("comrade-proc-")
 
 
 @pytest.mark.parametrize("bad", [0, -1, 70000, 22])

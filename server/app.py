@@ -13,6 +13,8 @@ import logging
 import uuid
 import asyncio
 
+import httpx
+
 from fastapi import (
     Depends, FastAPI, File, HTTPException, Request, UploadFile, status,
 )
@@ -34,6 +36,7 @@ from server.github_connect import (
     ConnectError, connectable_repositories, install_url,
     record_installation,
 )
+from server import previews
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
 from server.webhooks import verify_signature
@@ -860,3 +863,104 @@ def document_ingest(
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return {"job_id": job_id}
+
+
+# ---------- previews ----------
+# The one route that forwards a request into a team's own unreviewed code.
+# server/previews.py is the boundary; this is the plumbing around it.
+
+#: A development server can serve a large bundle, but nothing here should be
+#: streaming a video. Bounded because the body is buffered, and an unbounded
+#: buffer is a memory exhaustion vector any repository could trigger.
+PREVIEW_MAX_BYTES = 25 * 1024 * 1024
+PREVIEW_TIMEOUT = 30.0
+
+
+class PreviewGrant(BaseModel):
+    url: str
+    expires_in: int
+
+
+@app.post("/previews/{process_id}", response_model=PreviewGrant)
+def preview_grant(process_id: str, team_id: str, user_id: CurrentUserId) -> PreviewGrant:
+    """Mint a short-lived preview link for a process this member can see."""
+    require_membership(user_id, team_id)
+    try:
+        token = previews.mint(user_id, team_id, process_id)
+    except previews.PreviewDenied as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return PreviewGrant(
+        url=f"/previews/{process_id}/?token={token}",
+        expires_in=previews.TOKEN_TTL_SECONDS,
+    )
+
+
+@app.api_route(
+    "/previews/{process_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+)
+async def preview_proxy(process_id: str, path: str, request: Request) -> Response:
+    """Forward one request into a thread's development server.
+
+    UNAUTHENTICATED as far as FastAPI is concerned, deliberately: the browser
+    loads sub-resources (scripts, styles, images) with no Authorization header
+    and no way to add one, so the grant has to travel in the URL. The token IS
+    the authentication, and previews.authorize re-checks thread membership
+    against the database on every single request rather than trusting it.
+    """
+    token = request.query_params.get("token", "")
+    try:
+        grant = await run_in_threadpool(previews.authorize, token)
+    except previews.PreviewDenied as exc:
+        # 404, not 403: whether a given process exists is itself something a
+        # stranger should not learn.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    if grant["process_id"] != process_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "that preview is not available.")
+
+    if request.headers.get("upgrade", "").lower() == "websocket":
+        # Honest refusal rather than a hang. Proxying WebSockets needs a client
+        # that speaks it, and adding one is a dependency decision rather than a
+        # detail — so hot-reload does not work through a preview yet and the
+        # page still loads. Recorded in docs/operations.md.
+        raise HTTPException(
+            status.HTTP_501_NOT_IMPLEMENTED,
+            "live reload is not proxied through previews yet; reload the page"
+            " to see changes.",
+        )
+
+    body = await request.body()
+    if len(body) > PREVIEW_MAX_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request too large")
+
+    # The query string minus our own token: the team's server has no business
+    # receiving it, and it would end up in their access log.
+    forwarded_query = "&".join(
+        f"{k}={v}" for k, v in request.query_params.multi_items() if k != "token"
+    )
+    url = previews.upstream_url(grant, path=path, host=request.headers.get("host", ""))
+    if forwarded_query:
+        url = f"{url}?{forwarded_query}"
+
+    try:
+        async with httpx.AsyncClient(timeout=PREVIEW_TIMEOUT, follow_redirects=False) as client:
+            upstream = await client.request(
+                request.method, url,
+                headers=previews.forwardable_headers(dict(request.headers)),
+                content=body,
+            )
+    except httpx.HTTPError as exc:
+        logger.info("preview upstream failed for %s: %s", process_id, exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "the development server did not respond. It may still be starting,"
+            " or it may have crashed — check the process logs in the thread.",
+        ) from exc
+
+    content = upstream.content[:PREVIEW_MAX_BYTES]
+    return Response(
+        content=content,
+        status_code=upstream.status_code,
+        headers=previews.forwardable_headers(dict(upstream.headers)),
+        media_type=upstream.headers.get("content-type"),
+    )

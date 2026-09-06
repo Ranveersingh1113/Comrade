@@ -15,7 +15,9 @@ import { supabase } from '../lib/supabase';
  * belt-and-braces fallback for dropped websocket connections.
  */
 export function useTeamRealtime(
-  table: 'messages' | 'tasks' | 'consent_queue',
+  // Only tables in the supabase_realtime publication belong here — a
+  // subscription to one that is absent compiles and delivers nothing.
+  table: 'messages' | 'tasks' | 'consent_queue' | 'sandbox_processes',
   teamId: string,
   onChange: () => void,
   filter = `team_id=eq.${teamId}`,

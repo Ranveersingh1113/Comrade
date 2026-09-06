@@ -17,6 +17,10 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     env_file: [.env]
+    # The API is the ONLY thing that can reach a preview. Sandbox containers
+    # join `comrade-preview` and publish no host port, so the proxy dials them
+    # by name over this network — and nothing outside it can reach them at all.
+    networks: [default, preview]
     ports: ["8000:8000"]
     restart: unless-stopped
     healthcheck:
@@ -76,3 +80,13 @@ services:
     ports: ["8080:80"]
     restart: unless-stopped
     depends_on: [api]
+
+networks:
+  default:
+  # Declared here rather than left to the worker to create, so the API can join
+  # it at boot instead of failing until the first process is started.
+  # `internal` is the load-bearing flag: no gateway, so a team's development
+  # server has no route to the internet even though it is on a bridge.
+  preview:
+    name: comrade-preview
+    internal: true

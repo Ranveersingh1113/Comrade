@@ -16,6 +16,7 @@ import { Avatar, AiOrb } from '../components/Avatar';
 import { MemoryDiffCard } from '../components/MemoryDiffCard';
 import { ComposerMode, type ComposerModeValue } from '../components/ComposerMode';
 import { ConsentCard } from '../components/ConsentCard';
+import { PreviewBar } from '../components/PreviewBar';
 import { AgentActivity } from '../components/AgentActivity';
 import type { AgentStep } from '../lib/agentApi';
 
@@ -448,6 +449,11 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 {note}
               </div>
             )}
+            {/* What is running in this thread, directly above the
+                composer: a preview is a thing you go and look at, and it
+                belongs beside the place you type rather than buried in
+                the transcript where it scrolls away. */}
+            <PreviewBar teamId={teamId} threadId={thread.id} />
             <div className="composer">
               {thread && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode={thread.kind === 'work' ? 'agent' : 'team'} onChange={setComposerMode} />}
               <input

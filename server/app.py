@@ -886,64 +886,90 @@ def preview_grant(process_id: str, team_id: str, user_id: CurrentUserId) -> Prev
     """Mint a short-lived preview link for a process this member can see."""
     require_membership(user_id, team_id)
     try:
-        token = previews.mint(user_id, team_id, process_id)
+        launch = previews.launch(user_id, team_id, process_id)
+    except previews.PreviewUnconfigured as exc:
+        # 503 and the reason: an operator sees "previews are not configured"
+        # rather than a member seeing a broken button with no explanation.
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)
+        ) from exc
     except previews.PreviewDenied as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    # An ABSOLUTE url on the preview origin. The browser leaves this origin
+    # entirely, which is the point.
     return PreviewGrant(
-        url=f"/previews/{process_id}/?token={token}",
-        expires_in=previews.TOKEN_TTL_SECONDS,
+        url=launch["url"],
+        expires_in=settings.comrade_preview_grant_seconds,
     )
 
 
-@app.api_route(
-    "/previews/{process_id}/{path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
-)
-async def preview_proxy(process_id: str, path: str, request: Request) -> Response:
-    """Forward one request into a thread's development server.
 
-    UNAUTHENTICATED as far as FastAPI is concerned, deliberately: the browser
-    loads sub-resources (scripts, styles, images) with no Authorization header
-    and no way to add one, so the grant has to travel in the URL. The token IS
-    the authentication, and previews.authorize re-checks thread membership
-    against the database on every single request rather than trusting it.
-    """
-    token = request.query_params.get("token", "")
+
+# ---------- preview origins ----------
+#
+# Requests arriving on a preview hostname are handled HERE, before any
+# application route sees them. A preview host is a different site from the app:
+# it carries no Supabase token and no Comrade cookie, only the host-scoped
+# preview cookie set by the launch exchange below.
+#
+# 🔴 The same-origin `/previews/<id>/<path>` proxy that used to live on the app
+# host is GONE. It served a team's unreviewed development server from Comrade's
+# own origin, where its JavaScript could read the member's session out of
+# localStorage. It is not deprecated or disabled behind a flag — it is removed,
+# because a route that can be re-enabled is a route that will be.
+
+
+async def _serve_preview(request: Request, host: str, process_id: str) -> Response:
+    """Everything on a preview hostname."""
+    if request.url.path == "/__comrade/launch":
+        try:
+            redeemed = await run_in_threadpool(
+                previews.redeem, request.query_params.get("grant", ""), host=host,
+            )
+        except previews.PreviewDenied as exc:
+            return Response(str(exc), status_code=status.HTTP_403_FORBIDDEN)
+        cookie = previews.session_cookie(redeemed)
+        # 303 to the root: the grant is spent, and leaving it in the address bar
+        # would put a consumed credential in the member's history.
+        response = Response(status_code=status.HTTP_303_SEE_OTHER,
+                            headers={"location": "/"})
+        response.set_cookie(
+            cookie["key"], cookie["value"], max_age=cookie["max_age"],
+            httponly=cookie["httponly"], secure=cookie["secure"],
+            samesite=cookie["samesite"], path=cookie["path"],
+        )
+        return response
+
     try:
-        grant = await run_in_threadpool(previews.authorize, token)
+        grant = await run_in_threadpool(
+            previews.authorize_session,
+            request.cookies.get("comrade_preview", ""), host=host,
+        )
     except previews.PreviewDenied as exc:
-        # 404, not 403: whether a given process exists is itself something a
-        # stranger should not learn.
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        return Response(str(exc), status_code=status.HTTP_403_FORBIDDEN)
     if grant["process_id"] != process_id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "that preview is not available.")
+        return Response("that preview is not available.",
+                        status_code=status.HTTP_403_FORBIDDEN)
 
     if request.headers.get("upgrade", "").lower() == "websocket":
-        # Honest refusal rather than a hang. Proxying WebSockets needs a client
-        # that speaks it, and adding one is a dependency decision rather than a
-        # detail — so hot-reload does not work through a preview yet and the
-        # page still loads. Recorded in docs/operations.md.
-        raise HTTPException(
-            status.HTTP_501_NOT_IMPLEMENTED,
+        return Response(
             "live reload is not proxied through previews yet; reload the page"
             " to see changes.",
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
         )
 
     body = await request.body()
     if len(body) > PREVIEW_MAX_BYTES:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request too large")
+        return Response("request too large",
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
-    # The query string minus our own token: the team's server has no business
-    # receiving it, and it would end up in their access log.
-    forwarded_query = "&".join(
-        f"{k}={v}" for k, v in request.query_params.multi_items() if k != "token"
-    )
-    url = previews.upstream_url(grant, path=path, host=request.headers.get("host", ""))
-    if forwarded_query:
-        url = f"{url}?{forwarded_query}"
-
+    url = previews.upstream_url(grant, path=request.url.path, host=host)
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
     try:
-        async with httpx.AsyncClient(timeout=PREVIEW_TIMEOUT, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            timeout=PREVIEW_TIMEOUT, follow_redirects=False,
+        ) as client:
             upstream = await client.request(
                 request.method, url,
                 headers=previews.forwardable_headers(dict(request.headers)),
@@ -951,16 +977,31 @@ async def preview_proxy(process_id: str, path: str, request: Request) -> Respons
             )
     except httpx.HTTPError as exc:
         logger.info("preview upstream failed for %s: %s", process_id, exc)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
+        return Response(
             "the development server did not respond. It may still be starting,"
             " or it may have crashed — check the process logs in the thread.",
-        ) from exc
+            status_code=status.HTTP_502_BAD_GATEWAY,
+        )
 
-    content = upstream.content[:PREVIEW_MAX_BYTES]
     return Response(
-        content=content,
+        content=upstream.content[:PREVIEW_MAX_BYTES],
         status_code=upstream.status_code,
-        headers=previews.forwardable_headers(dict(upstream.headers)),
-        media_type=upstream.headers.get("content-type"),
+        headers=previews.response_headers(dict(upstream.headers)),
     )
+
+
+@app.middleware("http")
+async def preview_origin(request: Request, call_next):
+    """Route by HOSTNAME before any application route matches.
+
+    Caddy passes the original host in X-Comrade-Preview-Host; falling back to
+    Host covers a direct connection. Either way the hostname only ever selects
+    WHICH process — it never authorizes, which is done against the database on
+    the next line down.
+    """
+    host = (request.headers.get("x-comrade-preview-host")
+            or request.headers.get("host", ""))
+    process_id = previews.process_for_host(host)
+    if process_id is None:
+        return await call_next(request)
+    return await _serve_preview(request, host, process_id)

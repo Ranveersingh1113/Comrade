@@ -88,3 +88,40 @@ Useful production checks:
 - Monitor costs, queue depth, errors, and sandbox usage before inviting untrusted teams.
 - Treat dependency-environment setup as privileged: it executes a repository’s dependency graph with necessary package-registry network access, even though it receives no Comrade credentials.
 - Use GitHub branch protection on `master`; Comrade proposes pull requests and must not be relied on as the sole review gate.
+
+## Previews
+
+A preview serves a team's own development server — code written by a model and
+reviewed by nobody — to a browser. It is served from a **separate domain**, one
+hostname per process, and that is a security boundary rather than a naming
+choice.
+
+**Why.** The boundary a browser enforces is the origin. A preview on Comrade's
+own origin can read `localStorage` on that origin, which holds the member's
+Supabase session. Header stripping at the proxy does not change it. Previews
+therefore answer on `p-<process-id>.$COMRADE_PREVIEW_DOMAIN`, which is a
+different site, so no Comrade cookie or token can travel there.
+
+**How access works.** The app origin mints a single-use launch grant; the
+browser carries it once to the preview origin, which exchanges it for a
+host-scoped `HttpOnly` cookie with no `Domain` attribute. Participant access is
+re-checked against the database on every request, so removing someone from a
+thread ends their preview immediately rather than at expiry.
+
+**Configuring it**
+
+1. Point a wildcard DNS record at the host: `*.previews.example.com`.
+2. Set `COMRADE_PREVIEW_DOMAIN=previews.example.com`. It must not be the
+   application's domain; the API refuses at startup if it is.
+3. Wildcard TLS needs a DNS challenge, so set `COMRADE_DNS_PROVIDER` and
+   `COMRADE_DNS_TOKEN` and build Caddy with that provider module. On-demand
+   issuance is deliberately not used: it would ask a rate-limited CA for a
+   certificate for any hostname a caller invents.
+
+**Leaving it unset is a supported state.** Previews are then disabled and say
+so. That is the correct posture for any deployment that cannot yet give them
+their own domain — including local development, where there is no wildcard
+certificate. Do not work around it by pointing the preview domain at the app.
+
+**Known limit.** WebSockets are not proxied, so hot reload does not work inside
+a preview; the page loads and a manual reload shows changes.

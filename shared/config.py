@@ -134,6 +134,24 @@ class Settings(BaseSettings):
     # it is a knob a repository must not be able to turn, since "run my tests
     # in MY image" is just "run my code on your host" with extra steps. A
     # per-team value belongs in the teams table with an allowlist, not here.
+    # The domain previews are served from. MUST NOT be the application's own
+    # domain, and empty DISABLES previews entirely.
+    #
+    # 🔴 Previews used to answer on Comrade's hostname under /previews/<id>/.
+    # A development server written by a model, running a team's unreviewed
+    # code, on the same browser ORIGIN as the app — so its JavaScript could
+    # read the member's Supabase session out of localStorage. Header stripping
+    # at the proxy is irrelevant to that; the boundary a browser enforces is
+    # the origin.
+    #
+    # Each process now answers on `<label>.<this domain>`, which is a different
+    # site, so no Comrade cookie or token can travel there. Empty means "not
+    # configured", and previews then fail closed with a message that says so
+    # rather than silently falling back to the unsafe arrangement.
+    comrade_preview_domain: str = ""
+    # How long a launch grant may be redeemed for. Single-use as well as short:
+    # it appears in a URL, and URLs survive in history and screenshots.
+    comrade_preview_grant_seconds: int = 60
     comrade_sandbox_image: str = "comrade-sandbox:latest"
     # Docker is only the local development backend. Production switches to a
     # server-owned ASCII Box key; this value never reaches browser code or a Box.

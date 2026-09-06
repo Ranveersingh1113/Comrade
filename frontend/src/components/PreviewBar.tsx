@@ -71,12 +71,19 @@ export function PreviewBar({ teamId, threadId }: { teamId: string; threadId: str
           headers: { Authorization: `Bearer ${data.session?.access_token ?? ''}` },
         },
       );
+      if (resp.status === 503) {
+        setError('Previews are not configured on this deployment.');
+        return;
+      }
       if (!resp.ok) {
         setError('That preview is not available.');
         return;
       }
+      // ABSOLUTE, and on a different origin: the preview lives on its own
+      // hostname so it cannot read this page's storage. Do not prefix it
+      // with the API base — that would put it back on our origin.
       const grant = (await resp.json()) as { url: string };
-      window.open(`${base}${grant.url}`, '_blank', 'noopener,noreferrer');
+      window.open(grant.url, '_blank', 'noopener,noreferrer');
     } catch {
       setError('Could not reach the preview.');
     } finally {

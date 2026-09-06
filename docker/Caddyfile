@@ -1,6 +1,13 @@
-# TLS and one origin for the whole product.
+# TLS and the origins for the product.
 #
-# ONE hostname, not two, and that is the point: the browser talks to the SPA
+# TWO domains, and the second one is a security boundary rather than tidiness.
+# COMRADE_HOST serves the app; COMRADE_PREVIEW_DOMAIN serves a team's own
+# development servers, one hostname per process. They must be different sites:
+# a preview on the app's origin can read a member's Supabase session out of
+# localStorage, and no amount of header stripping changes that, because the
+# boundary a browser enforces is the origin.
+#
+# The app half below is unchanged, and its reasoning still holds: the browser talks to the SPA
 # and to the API on the same origin, so there is no CORS preflight on every
 # agent turn and no second certificate to keep alive. The API is mounted under
 # /api and `handle_path` strips the prefix, so server/app.py keeps its own
@@ -27,5 +34,37 @@
 
 	handle {
 		reverse_proxy frontend:80
+	}
+}
+
+# ---------------------------------------------------------------------------
+# Previews: one hostname per process, on a separate domain.
+# ---------------------------------------------------------------------------
+#
+# A wildcard certificate, NOT on-demand issuance. On-demand would ask Let's
+# Encrypt for a certificate for whatever hostname a caller invented, which is
+# an unauthenticated request amplifier pointed at a rate-limited service. A
+# wildcard is issued once, over DNS, and covers every process.
+#
+# That means a DNS provider module and a credential — see docs/deployment.md.
+# Without both, leave COMRADE_PREVIEW_DOMAIN unset: previews then fail closed
+# with a message saying so, which is correct, rather than falling back to the
+# unsafe same-origin arrangement.
+*.{$COMRADE_PREVIEW_DOMAIN} {
+	tls {
+		dns {$COMRADE_DNS_PROVIDER} {$COMRADE_DNS_TOKEN}
+	}
+
+	# EVERYTHING on this domain goes to the API's preview handler, including
+	# /__comrade/launch. The API decides from the Host header which process
+	# this is and whether the caller may reach it; Caddy routes and does not
+	# authorize.
+	reverse_proxy api:8000 {
+		flush_interval -1
+		header_up X-Comrade-Preview-Host {host}
+		transport http {
+			read_timeout 600s
+			write_timeout 600s
+		}
 	}
 }

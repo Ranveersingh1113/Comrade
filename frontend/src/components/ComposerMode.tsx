@@ -30,7 +30,7 @@ export function ComposerMode({
     onChange(next);
   };
   return (
-    <span aria-label={`Composer mode: ${mode}`} style={{ display: 'inline-flex', gap: 3 }}>
+    <span className="composer-mode" aria-label={`Composer mode: ${mode}`} role="group">
       <button type="button" aria-label="Team mode" aria-pressed={mode === 'team'} onClick={() => choose('team')}>Team</button>
       <button type="button" aria-label="Agent mode" aria-pressed={mode === 'agent'} onClick={() => choose('agent')}>Agent</button>
     </span>

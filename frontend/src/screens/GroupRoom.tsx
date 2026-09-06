@@ -158,7 +158,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
           // here is why — and emphatically not an error banner: nothing they
           // did went wrong.
           else if (f.type === 'empty') setAgentNote(f.detail ?? null);
-          // 🔴 And the same thing again, one layer down. Since the durable
+          // And the same thing again, one layer down. Since the durable
           // queue the agent no longer runs inside this request: the browser
           // replays the run row, so the reason a turn produced nothing now
           // arrives on the TERMINAL frame instead of as 'empty'. Dropping it
@@ -245,7 +245,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   );
 
   return (
-    <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+    <main className="group-room" style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
       <header
         style={{
           flex: 'none',
@@ -366,7 +366,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 }}
               >
                 <span className="orb" style={{ width: 36, height: 36, fontSize: 13, animation: 'breathe 2s ease-in-out infinite' }}>
-                  ◈
+                  <span aria-hidden>+</span>
                 </span>
                 {pending ? (
                   <div
@@ -421,7 +421,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 }}
               >
                 <span className="orb" style={{ width: 36, height: 36, fontSize: 13, opacity: 0.55 }}>
-                  ◈
+                  <span aria-hidden>+</span>
                 </span>
                 <div
                   style={{
@@ -603,7 +603,7 @@ function MessageRow({
                 cursor: 'pointer',
               }}
             >
-              ✕ remove
+               remove
             </button>
           )}
           {/* Any member may mark any human message as worth keeping
@@ -625,7 +625,7 @@ function MessageRow({
                 cursor: 'pointer',
               }}
             >
-              ✦ remember this
+               remember this
             </button>
           )}
           {/* Proactive AI observations get a one-tap standing objection (any
@@ -646,7 +646,7 @@ function MessageRow({
                 cursor: 'pointer',
               }}
             >
-              ✕ REMOVE · DON'T DO THIS AGAIN
+               REMOVE · DON'T DO THIS AGAIN
             </button>
           )}
         </div>
@@ -819,7 +819,7 @@ function ClassicPanel({
           )}
           {docs.map((d) => (
             <div key={d.id} style={{ display: 'flex', gap: 9 }}>
-              <span>▤</span>
+              <span className="mono">DOC</span>
               <span>
                 {d.filename ?? d.kind}
                 <span
@@ -1018,7 +1018,7 @@ function BoardStrip({
           Docs
         </div>
         {docs.slice(0, 2).map((d) => (
-          <div key={d.id}>▤ {d.filename ?? d.kind}</div>
+          <div key={d.id}><span className="mono">DOC</span> {d.filename ?? d.kind}</div>
         ))}
         {docs.length === 0 && <span style={{ color: 'var(--faint)' }}>none yet</span>}
       </div>

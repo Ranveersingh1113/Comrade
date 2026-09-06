@@ -103,13 +103,13 @@ export function Setup() {
   };
 
   return (
-    <main style={{ flex: 1, overflowY: 'auto' }}>
-      <div style={{ maxWidth: 580, margin: '0 auto', padding: '52px 32px 60px' }}>
+    <main className="page-scroll setup-page">
+      <div className="content-column" style={{ maxWidth: 580, margin: '0 auto', padding: '52px 32px 60px' }}>
         <span
           className="orb breathing"
           style={{ width: 64, height: 64, fontSize: 24, marginBottom: 20 }}
         >
-          ◈
+          <span aria-hidden>+</span>
         </span>
         <div className="display" style={{ fontSize: 40, lineHeight: 1.05, marginTop: 20 }}>
           Give Comrade

@@ -1,33 +1,38 @@
-/* Comrade design tokens — carried from Prototype v3. Do not genericize. */
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap');
+
+/* Comrade design tokens — a warm signal room: dense, legible, quietly alive. */
 :root {
-  --canvas: #f6f2ee;
-  --card: #fbf9f4;
-  --card-alt: #f4f1e8;
-  --ink: #262435;
-  --text: #232130;
-  --text-body: #3a3744;
-  --text-soft: #5c5964;
-  --muted: #8e8a96;
-  --faint: #a9a5b0;
-  --ink-muted: #8c879b;
-  --ink-faint: #635e73;
-  --ink-roster: #bab5c6;
-  --terracotta: #d2593b;
-  --terracotta-soft: #e4795b;
-  --peach: #f0a28a;
-  --peach-pale: #f0b9a4;
-  --plum: #6e5f87;
-  --lavender: #c4b4da;
-  --sage: #5f8a6e;
-  --paper: #f1efea;
-  --border: rgba(35, 33, 48, 0.16);
-  --border-soft: rgba(35, 33, 48, 0.12);
-  --border-strong: rgba(35, 33, 48, 0.3);
-  --shadow-card: 4px 4px 0 rgba(35, 33, 48, 0.08);
-  --shadow-card-strong: 4px 4px 0 rgba(35, 33, 48, 0.12);
-  --shadow-input: 3px 3px 0 rgba(35, 33, 48, 0.1);
+  --canvas: #f3f0e8;
+  --card: #fbfaf5;
+  --card-alt: #ebe8dd;
+  --ink: #202d35;
+  --text: #243039;
+  --text-body: #40505a;
+  --text-soft: #68757b;
+  --muted: #7f8b8c;
+  --faint: #a5adaa;
+  --ink-muted: #91a19f;
+  --ink-faint: #60716f;
+  --ink-roster: #bcc8c2;
+  --terracotta: #d45a42;
+  --terracotta-soft: #e4775c;
+  --peach: #efaa8e;
+  --peach-pale: #f4c6ae;
+  --plum: #6f6a8e;
+  --lavender: #c2bfdc;
+  --sage: #5b907e;
+  --paper: #f5f3ec;
+  --border: rgba(32, 45, 53, 0.16);
+  --border-soft: rgba(32, 45, 53, 0.1);
+  --border-strong: rgba(32, 45, 53, 0.28);
+  --shadow-card: 3px 3px 0 rgba(32, 45, 53, 0.08);
+  --shadow-card-strong: 4px 4px 0 rgba(32, 45, 53, 0.13);
+  --shadow-input: 2px 2px 0 rgba(32, 45, 53, 0.1);
+  --line: rgba(32, 45, 53, 0.16);
+  --surface: #fbfaf5;
   --serif: 'Instrument Serif', serif;
-  --mono: ui-monospace, Menlo, Consolas, monospace;
+  --sans: 'DM Sans', sans-serif;
+  --mono: 'DM Mono', ui-monospace, monospace;
 }
 
 * {
@@ -37,9 +42,10 @@
 body {
   margin: 0;
   background: var(--canvas);
-  font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  font-family: var(--sans);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+  min-width: 320px;
 }
 
 a {
@@ -56,7 +62,14 @@ a:hover {
 
 button {
   font-family: inherit;
+  transition: transform .16s ease, background-color .16s ease, border-color .16s ease, color .16s ease, opacity .16s ease;
 }
+button:not(:disabled):hover { transform: translateY(-1px); }
+button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+  outline: 3px solid rgba(212, 90, 66, .42);
+  outline-offset: 2px;
+}
+button:disabled { cursor: not-allowed; opacity: .56; }
 
 @keyframes blink {
   0%,
@@ -142,6 +155,59 @@ button {
   box-shadow: var(--shadow-card);
 }
 
+input, textarea, select {
+  color: var(--text);
+  accent-color: var(--terracotta);
+}
+
+.page-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--card-alt), rgba(255,255,255,.58), var(--card-alt));
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 3px;
+}
+
+.status-note {
+  border-left: 3px solid var(--terracotta);
+  background: rgba(212, 90, 66, .08);
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gate-loading { display: grid; gap: 10px; }
+.gate-loading .skeleton { display: block; height: 70px; }
+.workspace-page, .page-scroll { background: var(--canvas); }
+.workspace-heading { padding-bottom: 18px; border-bottom: 1px solid var(--border-soft); }
+.thread-list a { display: block; }
+.thread-list .card { min-height: 58px; display: flex; align-items: center; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
+.thread-list a:hover .card { border-color: rgba(212,90,66,.5); box-shadow: 5px 5px 0 rgba(32,45,53,.1); transform: translate(-1px,-1px); }
+.content-column { width: 100%; }
+.composer-mode { display: inline-flex; gap: 2px; padding: 3px; background: var(--card-alt); border: 1px solid var(--border-soft); border-radius: 4px; }
+.composer-mode button { border: 0; background: transparent; color: var(--muted); padding: 6px 9px; border-radius: 2px; font-size: 10px; cursor: pointer; }
+.composer-mode button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.diff-view pre { scrollbar-color: var(--terracotta) var(--ink); }
+.callback-screen { border-top: 4px solid var(--terracotta); }
+.error-screen { background: var(--canvas); }
+.group-room .composer { background: rgba(251,250,245,.9); backdrop-filter: blur(8px); }
+.group-room [data-agent-note] { background: rgba(111,106,142,.05); }
+.tasks-page .card, .wiki-page .card, .documents-page .card, .team-page .card, .setup-page .card { transition: border-color .16s ease, box-shadow .16s ease; }
+.tasks-page .card:hover, .wiki-page .card:hover, .documents-page .card:hover, .team-page .card:hover, .setup-page .card:hover { border-color: rgba(32,45,53,.3); }
+.agent-activity-item { background: rgba(251,250,245,.72); }
+.agent-activity-item > button:hover { background: var(--card-alt) !important; }
+.consent-card { animation: fadeUp .32s ease both; }
+.consent-card button { min-height: 32px; }
+.github-loading { display: grid; gap: 8px; padding-left: 35px; }
+.github-loading .skeleton { height: 18px; display: block; }
+.repo-row { border-top: 1px solid var(--border-soft); padding: 7px 0 3px; }
+.github-connect button { border: 1px solid var(--border-strong); border-radius: 3px; background: var(--card); color: var(--text-body); cursor: pointer; }
+.github-connect button:hover { border-color: var(--terracotta); color: var(--terracotta); }
+
 .screen-header {
   padding: 20px 32px 14px;
   border-bottom: 1px solid var(--border-soft);
@@ -181,9 +247,10 @@ button {
   cursor: pointer;
   box-shadow: 2px 2px 0 rgba(210, 89, 59, 0.35);
 }
+.btn-primary:hover { background: var(--terracotta-soft); }
 .btn-secondary {
   border: 1px solid var(--border-strong);
-  background: #fff;
+  background: var(--card);
   color: var(--text-body);
   font-size: 12px;
   font-weight: 500;
@@ -191,6 +258,7 @@ button {
   padding: 9px 15px;
   cursor: pointer;
 }
+.btn-secondary:hover { border-color: var(--terracotta); color: var(--terracotta); }
 .btn-ghost {
   border: none;
   background: transparent;
@@ -254,4 +322,41 @@ button {
 
 .fade-up {
   animation: fadeUp 0.35s ease both;
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+@media (max-width: 767px) {
+  .login-grid { grid-template-columns: 1fr !important; gap: 34px !important; padding: 30px 18px !important; }
+  .login-grid > :first-child { order: 2; }
+  .login-grid > :last-child { order: 1; }
+  .screen-header { padding: 18px 17px 13px; }
+  .screen-header .display { font-size: 27px; }
+  .workspace-page { padding: 18px 16px !important; }
+  .content-column { padding-left: 16px !important; padding-right: 16px !important; }
+  .workspace-heading { align-items: flex-start !important; flex-direction: column; }
+  .workspace-heading button { margin-left: 0 !important; width: 100%; }
+  .callback-screen { margin: 18px !important; padding: 26px 20px !important; }
+  .setup-page .content-column, .team-page .content-column { padding-top: 30px !important; }
+  .group-room header { align-items: flex-start !important; flex-wrap: wrap; }
+  .group-room header > div:last-child { width: 100%; margin-left: 0 !important; overflow-x: auto; }
+  .group-room header > div:last-child button { flex: 1; min-width: 88px; }
+  .agent-activity-item { margin-left: 16px !important; margin-right: 16px !important; }
+  .consent-card { margin-left: 0 !important; margin-right: 0 !important; }
+  .github-connect { padding-left: 0 !important; }
+  .card { box-shadow: 2px 2px 0 rgba(32,45,53,.07); }
+  .composer { flex-wrap: wrap; }
+  .composer input { min-width: 150px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .001ms !important;
+  }
 }

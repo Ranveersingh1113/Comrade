@@ -24,7 +24,11 @@ export function Avatar({
         fontWeight: 600,
         alignItems: 'center',
         justifyContent: 'center',
+        border: '1px solid rgba(32,45,53,.14)',
+        letterSpacing: '.02em',
       }}
+      aria-label={name}
+      title={name}
     >
       {initialsOf(name)}
     </span>
@@ -37,7 +41,7 @@ export function AiOrb({ size = 36, breathing = false }: { size?: number; breathi
       className={`orb${breathing ? ' breathing' : ''}`}
       style={{ width: size, height: size, fontSize: Math.round(size * 0.36) }}
     >
-      ◈
+      <span aria-hidden style={{ fontWeight: 700 }}>+</span>
     </span>
   );
 }

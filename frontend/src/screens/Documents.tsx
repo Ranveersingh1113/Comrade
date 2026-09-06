@@ -121,12 +121,13 @@ export function Documents() {
   };
 
   return (
-    <main style={{ flex: 1, overflowY: 'auto' }}>
+    <main className="page-scroll documents-page">
       <header className="screen-header">
         <div className="display">Documents</div>
         <div className="sub">Everything shared here is compiled into the team wiki</div>
       </header>
       <div
+        className="content-column"
         style={{
           maxWidth: 780,
           margin: '0 auto',
@@ -222,7 +223,7 @@ export function Documents() {
                       fontSize: 14,
                     }}
                   >
-                    ▤
+                    <span className="mono" style={{ fontSize: 10 }}>DOC</span>
                   </span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600 }}>{d.filename ?? d.kind}</div>
@@ -270,7 +271,7 @@ export function Documents() {
             textDecoration: 'none',
           }}
         >
-          <span style={{ fontSize: 16, color: 'var(--peach-pale)' }}>✦</span>
+          <span className="mono" style={{ fontSize: 10, color: 'var(--peach-pale)' }}>WIKI</span>
           <span style={{ flex: 1 }}>
             <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: 'var(--paper)' }}>
               Project memory lives in the team wiki

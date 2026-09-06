@@ -31,7 +31,7 @@ function ActivityItem({ step }: { step: AgentStep }) {
   const payload = step.type === 'tool_call' ? step.args : step.response;
   const diff = patch(step);
   return (
-    <section style={{ margin: '8px 28px', border: '1px solid var(--border-soft)', borderRadius: 8, overflow: 'hidden' }}>
+    <section className="agent-activity-item" style={{ margin: '8px 28px', border: '1px solid var(--border-soft)', borderRadius: 8, overflow: 'hidden' }}>
       <button
         type="button"
         aria-expanded={open}
@@ -39,7 +39,7 @@ function ActivityItem({ step }: { step: AgentStep }) {
         onClick={() => setOpen((value) => !value)}
         style={{ width: '100%', display: 'flex', gap: 9, border: 0, background: 'var(--paper)', padding: '9px 11px', color: 'var(--text-body)', cursor: 'pointer', textAlign: 'left' }}
       >
-        <span aria-hidden>{open ? '⌄' : '›'}</span>
+         <span aria-hidden className="mono">{open ? '−' : '+'}</span>
         <span>{label}</span>
         <span className="mono" style={{ marginLeft: 'auto', color: 'var(--faint)', fontSize: 10 }}>{step.type === 'tool_call' ? 'running' : 'result'}</span>
       </button>

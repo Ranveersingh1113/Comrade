@@ -92,6 +92,7 @@ export function ConsentCard({
     <div
       data-testid="consent-card"
       data-consent-id={item.id}
+      className="consent-card"
       style={{ position: 'relative', marginBottom: 18 }}
     >
       <div

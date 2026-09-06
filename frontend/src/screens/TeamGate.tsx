@@ -123,17 +123,25 @@ export function TeamGate() {
         background: 'var(--canvas)',
       }}
     >
-      <div style={{ width: 460, padding: '64px 24px' }}>
-        <div className="display" style={{ fontSize: 36 }}>
-          Your teams
-        </div>
-        <div style={{ fontSize: 12.5, color: 'var(--muted)', marginTop: 8 }}>
-          One room per team. Comrade is a silent member of each.
+      <div className="gate-wrap" style={{ width: 'min(100%, 760px)', padding: '56px 24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 24, alignItems: 'end', flexWrap: 'wrap' }}>
+          <div>
+            <div className="micro-label">Comrade / places to work</div>
+            <div className="display" style={{ fontSize: 46, marginTop: 10 }}>
+              Your teams
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 8 }}>
+              One room per team. Comrade is a careful member of each.
+            </div>
+          </div>
+          <div className="mono" style={{ fontSize: 10, color: 'var(--muted)', letterSpacing: '.12em' }}>SELECT A ROOM</div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 26 }}>
           {options === null && !loadError && (
-            <div style={{ color: 'var(--faint)', fontSize: 13 }}>Loading…</div>
+            <div className="gate-loading" aria-label="Loading teams">
+              <span className="skeleton" /><span className="skeleton" />
+            </div>
           )}
           {loadError && (
             <div className="card" role="alert" style={{ padding: '16px 18px' }}>
@@ -146,8 +154,9 @@ export function TeamGate() {
             </div>
           )}
           {options?.length === 0 && (
-            <div className="card" style={{ padding: '15px 18px', fontSize: 13, color: 'var(--text-soft)' }}>
-              No teams yet — create one below, or ask a teammate's leader to invite you.
+            <div className="card" style={{ padding: '22px 20px', fontSize: 13, color: 'var(--text-soft)', lineHeight: 1.6 }}>
+              <strong style={{ color: 'var(--text)' }}>No room yet.</strong><br />
+              Create one below, or ask a teammate&apos;s leader to invite you.
             </div>
           )}
           {options?.map(({ team, membership }) => (

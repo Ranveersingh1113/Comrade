@@ -29,14 +29,16 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
     return (
       <div
         style={{
-          height: '100vh',
+          minHeight: '100dvh',
+          background: 'var(--canvas)',
+          flexDirection: 'column',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
         <span className="orb breathing" style={{ width: 44, height: 44, fontSize: 17 }}>
-          ◈
+          <span aria-hidden>+</span>
         </span>
       </div>
     );
@@ -160,7 +162,7 @@ function TeamShellInner() {
                 cursor: 'pointer',
               }}
             >
-              <span aria-hidden>☰</span> Menu
+                <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>≡</span> Menu
             </button>
           )}
           <ErrorBoundary key={location.pathname}>

@@ -68,23 +68,35 @@ export function Login() {
   return (
     <div
       style={{
-        height: '100vh',
+        minHeight: '100dvh',
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        alignItems: 'stretch',
         background: 'var(--canvas)',
+        position: 'relative',
+        overflow: 'hidden',
       }}
     >
-      <div style={{ width: 380, padding: '0 24px' }}>
-        <span className="orb breathing" style={{ width: 52, height: 52, fontSize: 20, marginBottom: 22 }}>
-          ◈
-        </span>
-        <div className="display" style={{ fontSize: 40, lineHeight: 1.05, marginTop: 20 }}>
-          Comrade
+      <div className="login-grid" style={{ width: 'min(100%, 1160px)', margin: 'auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(320px, 420px)', gap: 64, alignItems: 'center', padding: '56px 32px' }}>
+        <div style={{ maxWidth: 570 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: 'var(--ink)' }}>
+            <span className="orb breathing" style={{ width: 48, height: 48, fontSize: 20 }} aria-hidden>+</span>
+            <span className="mono" style={{ fontSize: 12, letterSpacing: '.2em', textTransform: 'uppercase' }}>COMRADE / TEAM ROOM</span>
+          </div>
+          <div className="display" style={{ fontSize: 'clamp(54px, 8vw, 96px)', lineHeight: .91, marginTop: 34, color: 'var(--ink)' }}>
+            Work that<br /><em>remembers.</em>
+          </div>
+          <div style={{ fontSize: 15, color: 'var(--text-soft)', marginTop: 24, lineHeight: 1.7, maxWidth: 430 }}>
+            A shared room for decisions, context, and the work between them. Comrade listens carefully, keeps the thread intact, and asks before it acts.
+          </div>
+          <div className="mono" style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 34, fontSize: 10, letterSpacing: '.12em', color: 'var(--muted)' }}>
+            <span>TEAM MEMORY</span><span>VISIBLE AGENCY</span><span>CONSENT FIRST</span>
+          </div>
         </div>
-        <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 10, lineHeight: 1.6 }}>
-          The AI teammate for teams without a manager. Sign in with Google or use a magic link.
-        </div>
+        <div className="card" style={{ padding: '28px 26px', boxShadow: '7px 7px 0 rgba(32,45,53,.11)' }}>
+          <div className="micro-label">Enter your team room</div>
+          <div style={{ fontSize: 13, color: 'var(--text-soft)', marginTop: 8, lineHeight: 1.5 }}>
+            Sign in with the account your teammates know.
+          </div>
         {sent ? (
           <div
             className="card"
@@ -208,6 +220,7 @@ export function Login() {
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );

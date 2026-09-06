@@ -57,7 +57,8 @@ export function GitHubCallback() {
   }, [params, navigate]);
 
   return (
-    <main style={{ padding: '64px 32px', maxWidth: 520, margin: '0 auto' }}>
+    <main className="callback-screen card" style={{ padding: '34px 32px', maxWidth: 520, margin: '64px auto' }}>
+      <div className="micro-label">External connection</div>
       <h1 className="display" style={{ fontSize: 26, marginBottom: 10 }}>
         {error ? 'That install did not finish' : 'Connecting GitHub…'}
       </h1>
@@ -70,7 +71,7 @@ export function GitHubCallback() {
         </>
       ) : (
         <p style={{ fontSize: 13.5, color: 'var(--muted)' }}>
-          Checking with GitHub that this installation is yours.
+          Checking with GitHub that this installation belongs to your team.
         </p>
       )}
     </main>

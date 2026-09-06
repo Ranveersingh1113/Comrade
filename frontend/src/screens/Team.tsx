@@ -96,8 +96,8 @@ export function Team() {
   };
 
   return (
-    <main style={{ flex: 1, overflowY: 'auto' }}>
-      <div style={{ maxWidth: 580, margin: '0 auto', padding: '52px 32px 60px' }}>
+    <main className="page-scroll team-page">
+      <div className="content-column" style={{ maxWidth: 580, margin: '0 auto', padding: '52px 32px 60px' }}>
         <div className="display" style={{ fontSize: 40, lineHeight: 1.05 }}>
           Membership
         </div>

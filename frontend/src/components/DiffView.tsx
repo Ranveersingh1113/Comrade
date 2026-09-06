@@ -44,7 +44,7 @@ export function DiffView({ patch }: Props) {
   const removed = all.filter((l) => l.startsWith('-') && !l.startsWith('---')).length;
 
   return (
-    <div style={{ margin: '9px 0 0' }}>
+    <div className="diff-view" style={{ margin: '9px 0 0' }}>
       <div
         className="mono"
         style={{ fontSize: 10.5, color: 'var(--ink-faint)', marginBottom: 5 }}

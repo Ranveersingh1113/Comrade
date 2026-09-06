@@ -9,9 +9,9 @@ import { Avatar } from './Avatar';
 import { useThreads } from '../hooks/useThreads';
 
 const NAV_ITEMS = [
-  { to: 'tasks', icon: '☑', label: 'Tasks' },
-  { to: 'wiki', icon: '✦', label: 'Team wiki' },
-  { to: 'docs', icon: '▤', label: 'Documents' },
+  { to: 'tasks', icon: '01', label: 'Tasks' },
+  { to: 'wiki', icon: '02', label: 'Team wiki' },
+  { to: 'docs', icon: '03', label: 'Documents' },
 ] as const;
 
 const navBase: React.CSSProperties = {
@@ -101,7 +101,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               height: 28,
               flex: 'none',
               borderRadius: 9,
-              background: '#FBF9F4',
+               background: 'var(--paper)',
               boxShadow: '0 0 0 1px rgba(241,239,234,0.14)',
               display: 'flex',
               alignItems: 'center',
@@ -110,7 +110,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               fontSize: 15,
             }}
           >
-            ◈
+            <span aria-hidden>+</span>
           </span>
           <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '0.02em' }}>comrade</span>
         </div>
@@ -135,7 +135,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           }}
           title="Switch team"
         >
-          switch team ↺
+           switch team
         </button>
       </div>
 
@@ -160,7 +160,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           className="orb breathing"
           style={{ width: 34, height: 34, fontSize: 14 }}
         >
-          ◈
+          <span aria-hidden>+</span>
         </span>
         <span>
           <span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>Comrade</span>
@@ -223,7 +223,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
               overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
             })}
           >
-            <span style={{ color: 'var(--ink-faint)' }}>{thread.visibility === 'restricted' ? '◌' : '◦'}</span>
+           <span aria-hidden style={{ color: 'var(--ink-faint)', fontFamily: 'var(--mono)', fontSize: 11 }}>{thread.visibility === 'restricted' ? 'R' : 'T'}</span>
             {thread.title}
           </NavLink>
         ))}
@@ -307,13 +307,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         >
           {lastCompile && (
             <div>
-              <span style={{ color: 'var(--terracotta-soft)' }}>▲</span> memory compiled · +
+              <span style={{ color: 'var(--terracotta-soft)' }}>+</span> memory compiled · +
               {lastCompile.entries_added} facts
             </div>
           )}
           {nextMilestone?.due_at && (
             <div>
-              <span style={{ color: 'var(--ink-faint)' }}>◆</span>{' '}
+               <span style={{ color: 'var(--ink-faint)' }}>•</span>{' '}
               {nextMilestone.title.toLowerCase()} in {daysUntil(nextMilestone.due_at)} days
             </div>
           )}
@@ -328,7 +328,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
           })}
         >
-          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>⚙</span> Project setup
+           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>04</span> Project setup
         </NavLink>
         {/* Sits with Sign out rather than in the main nav: leaving a team is
             the same class of action, and neither belongs beside Tasks. */}
@@ -341,13 +341,13 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
           })}
         >
-          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>◇</span> Membership
+           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>05</span> Membership
         </NavLink>
         <button
           onClick={() => signOut()}
           style={{ ...navBase, background: 'transparent', color: '#A6A1B3', marginTop: 2 }}
         >
-          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>↦</span> Sign out
+           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>↗</span> Sign out
         </button>
       </div>
     </nav>

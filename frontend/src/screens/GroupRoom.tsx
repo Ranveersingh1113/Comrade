@@ -21,7 +21,7 @@ import type { AgentStep } from '../lib/agentApi';
 
 type RoomLayout = 'classic' | 'split' | 'board';
 
-export function GroupRoom({ thread }: { thread: Thread }) {
+export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread; allowTeamMessages?: boolean }) {
   const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
   const { messages, compilationsByMessage, error, refresh } = useMessages(thread.id);
@@ -40,17 +40,20 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   const [agentNote, setAgentNote] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [composerMode, setComposerMode] = useState<ComposerModeValue>(() => {
-    if (!thread) return 'team';
+    if (!allowTeamMessages) return 'agent';
     return (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
-      ?? (thread.kind === 'work' ? 'agent' : 'team');
+      ?? 'team';
   });
   useEffect(() => {
-    if (!thread) return;
+    if (!allowTeamMessages) {
+      setComposerMode('agent');
+      return;
+    }
     setComposerMode(
       (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
-        ?? (thread.kind === 'work' ? 'agent' : 'team'),
+        ?? 'team',
     );
-  }, [myUserId, thread]);
+  }, [myUserId, thread, allowTeamMessages]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -127,7 +130,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
     setSendError(null);
     setNote(null);
     setAgentNote(null);
-    const mentionsAi = composerMode === 'agent' || /@comrade/i.test(text);
+    const mentionsAi = !allowTeamMessages || composerMode === 'agent' || /@comrade/i.test(text);
     if (mentionsAi) {
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
@@ -445,14 +448,14 @@ export function GroupRoom({ thread }: { thread: Thread }) {
               </div>
             )}
             <div className="composer">
-              {thread && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode={thread.kind === 'work' ? 'agent' : 'team'} onChange={setComposerMode} />}
+              {allowTeamMessages && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode="team" onChange={setComposerMode} />}
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void send();
                 }}
-                placeholder={composerMode === 'agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'}
+                placeholder={!allowTeamMessages || composerMode === 'agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'}
               />
               <button className="btn-ink" onClick={() => void send()}>
                 SEND
@@ -494,11 +497,12 @@ function MessageRow({
     compilation?.diff_message_id ? new Set([compilation.diff_message_id]) : new Set(),
   );
   const isAI = cls.kind === 'ai';
+  const ownHumanMessage = mine && !isAI;
   const [hover, setHover] = useState(false);
 
   if (cls.kind === 'deleted') {
     return (
-      <div className="fade-up" style={{ display: 'flex', gap: 14, padding: '10px 28px' }}>
+      <div className="fade-up" style={{ display: 'flex', gap: 14, padding: '10px 28px', justifyContent: ownHumanMessage ? 'flex-start' : 'flex-end' }}>
         <span
           style={{
             display: 'flex',
@@ -536,8 +540,8 @@ function MessageRow({
         display: 'flex',
         gap: 14,
         padding: '10px 28px',
-        borderLeft: `3px solid ${isAI ? 'var(--terracotta-soft)' : 'transparent'}`,
-        background: isAI ? 'rgba(228,121,91,0.05)' : 'transparent',
+        justifyContent: ownHumanMessage ? 'flex-start' : 'flex-end',
+        flexDirection: ownHumanMessage ? 'row' : 'row-reverse',
       }}
     >
       {isAI ? (
@@ -545,8 +549,9 @@ function MessageRow({
       ) : (
         <Avatar userId={m.sender_id ?? 'unknown'} name={senderName} size={36} />
       )}
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
+      <div style={{ minWidth: 0, maxWidth: 'min(76%, 700px)' }}>
+        <div style={{ background: isAI ? 'rgba(228,121,91,0.09)' : ownHumanMessage ? 'rgba(111,106,142,0.10)' : 'var(--card)', border: `1px solid ${isAI ? 'rgba(212,90,66,.22)' : 'var(--border-soft)'}`, borderRadius: 12, padding: '9px 12px', boxShadow: '1px 1px 0 rgba(32,45,53,.06)' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13.5, fontWeight: 700, letterSpacing: '-0.01em' }}>
             {senderName}
           </span>
@@ -657,6 +662,7 @@ function MessageRow({
           }}
         >
           {m.body}
+        </div>
         </div>
         {compilation && <MemoryDiffCard compilation={compilation} />}
       </div>

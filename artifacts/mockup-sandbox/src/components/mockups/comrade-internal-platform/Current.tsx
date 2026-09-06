@@ -1,8 +1,6 @@
 import { useState } from 'react';
 import './_group.css';
 
-type Mode = 'Team' | 'Agent';
-
 const people = [
   ['Maya Chen', 'MC', 'you'],
   ['Rowan Lee', 'RL', 'lead'],
@@ -24,10 +22,17 @@ function Avatar({ initials, ai = false }: { initials: string; ai?: boolean }) {
 }
 
 function Message({
-  name, initials, time, children, ai = false, assisted = false,
-}: { name: string; initials: string; time: string; children: React.ReactNode; ai?: boolean; assisted?: boolean }) {
+  name, initials, time, children, ai = false, assisted = false, mine = false,
+}: { name: string; initials: string; time: string; children: React.ReactNode; ai?: boolean; assisted?: boolean; mine?: boolean }) {
   return (
-    <article className={`ci-message ${ai ? 'ci-message-ai' : ''}`}>
+    <article
+      className={`ci-message ${ai ? 'ci-message-ai' : ''}`}
+      style={{
+        justifyContent: mine ? 'flex-start' : 'flex-end',
+        flexDirection: mine ? 'row' : 'row-reverse',
+        textAlign: mine ? 'left' : 'right',
+      }}
+    >
       <Avatar initials={initials} ai={ai} />
       <div className="ci-message-copy">
         <div className="ci-message-meta">
@@ -42,7 +47,7 @@ function Message({
 }
 
 export function Current() {
-  const [mode, setMode] = useState<Mode>('Agent');
+  const [comradeActive, setComradeActive] = useState(true);
   const [approved, setApproved] = useState(false);
   const [details, setDetails] = useState(false);
   const [layout, setLayout] = useState('classic');
@@ -103,7 +108,7 @@ export function Current() {
               <Message name="Rowan Lee" initials="RL" time="09:14">
                 I’ve put the final onboarding checkpoints in the brief. Can we make sure the invite flow and the empty state land together?
               </Message>
-              <Message name="Maya Chen" initials="MC" time="09:18" assisted>
+              <Message name="Maya Chen" initials="MC" time="09:18" assisted mine>
                 I can take the invite states. The analytics event is still the open question — are we tracking completion after the first project or after the first task?
               </Message>
               <Message name="Comrade" initials="" ai time="09:19">
@@ -120,22 +125,29 @@ export function Current() {
               </Message>
 
               <section className="ci-consent">
-                <div className="ci-consent-top"><span>Nº 7C2A · task_create</span><b>REVERSIBLE</b><em>{approved ? 'EXECUTED' : 'AWAITING YOUR KEY'}</em></div>
+                <div className="ci-consent-top"><span>Comrade wants to create a task</span><b>REVERSIBLE</b><em>{approved ? 'EXECUTED' : 'AWAITING YOUR APPROVAL'}</em></div>
                 <div className="ci-consent-body">
-                  <blockquote>“Create a final QA pass for invite and empty states.” — 09:26</blockquote>
-                  <div className="ci-code"><p><b>tool</b> &nbsp;&nbsp;&nbsp; task_create</p><p><b>title</b> &nbsp;&nbsp; QA onboarding invite &amp; empty states</p><p><b>assignee</b> Maya Chen</p><p><b>hash</b> &nbsp;&nbsp;&nbsp; sha256:4fe8c21a <span>(re-verified at execute)</span></p></div>
-                  <button className="ci-raw" onClick={() => setDetails(!details)}>▸ RAW ARGS — EXACT JSON</button>
+                  <blockquote>“Create a final QA pass for invite and empty states.”</blockquote>
+                  <div className="ci-code"><p><b>action</b> &nbsp;&nbsp; Create a team task</p><p><b>title</b> &nbsp;&nbsp; QA onboarding invite &amp; empty states</p><p><b>assignee</b> Maya Chen</p></div>
                   {!approved ? <div className="ci-consent-actions"><button onClick={() => setApproved(true)} className="ci-primary">ALLOW ONCE</button><button>ALLOW FOR THIS THREAD</button><button>Edit</button><button className="ghost">Reject</button><small>EXPIRES IN 14:32</small></div> : <div className="ci-executed">✓ Executed</div>}
                 </div>
                 {approved && <div className="ci-stamp">DONE</div>}
               </section>
             </div>
             <div className="ci-composer">
-              <div className="ci-mode"><button onClick={() => setMode('Team')} className={mode === 'Team' ? 'on' : ''}>Team</button><button onClick={() => setMode('Agent')} className={mode === 'Agent' ? 'on' : ''}>Agent</button></div>
-              <input value={draft} onChange={e => setDraft(e.target.value)} placeholder={mode === 'Agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'} onKeyDown={e => { if (e.key === 'Enter' && draft) { setSent(true); setDraft(''); } }} />
+              <button
+                type="button"
+                aria-pressed={comradeActive}
+                aria-label={comradeActive ? 'Comrade is active. Switch to the team.' : 'Comrade is inactive. Switch to Comrade.'}
+                onClick={() => setComradeActive(active => !active)}
+                style={{ width: 30, height: 30, border: 0, padding: 0, borderRadius: '50%', background: comradeActive ? 'rgba(212,90,66,.16)' : 'transparent', opacity: comradeActive ? 1 : .55, cursor: 'pointer', boxShadow: comradeActive ? '0 0 0 3px rgba(212,90,66,.18)' : 'none' }}
+              >
+                <img src="/__mockup/images/comrade-internal-platform-brand-orb.png" alt="" aria-hidden style={{ width: 30, height: 30, display: 'block', objectFit: 'cover', borderRadius: '50%' }} />
+              </button>
+              <input value={draft} onChange={e => setDraft(e.target.value)} placeholder={comradeActive ? 'Ask Comrade…' : 'Message the team…'} onKeyDown={e => { if (e.key === 'Enter' && draft) { setSent(true); setDraft(''); } }} />
               <button className="ci-send" onClick={() => { if (draft) { setSent(true); setDraft(''); } }}>SEND</button>
             </div>
-            {sent && <div className="ci-local-note">Message ready in this visual preview.</div>}
+            {sent && <div className="ci-local-note">{comradeActive ? 'Comrade will respond in this visual preview.' : 'Message ready for the team in this visual preview.'}</div>}
           </div>
           <aside className="ci-panel">
             <section><label>Next deadline</label><div className="ci-deadline"><strong>4</strong><p>days until<br /><b>Launch readiness</b><br /><span>FRI, 18 OCT</span></p></div></section>

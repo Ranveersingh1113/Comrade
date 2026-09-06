@@ -188,9 +188,10 @@ input, textarea, select {
 .thread-list .card { min-height: 58px; display: flex; align-items: center; transition: transform .16s ease, border-color .16s ease, box-shadow .16s ease; }
 .thread-list a:hover .card { border-color: rgba(212,90,66,.5); box-shadow: 5px 5px 0 rgba(32,45,53,.1); transform: translate(-1px,-1px); }
 .content-column { width: 100%; }
-.composer-mode { display: inline-flex; gap: 2px; padding: 3px; background: var(--card-alt); border: 1px solid var(--border-soft); border-radius: 4px; }
-.composer-mode button { border: 0; background: transparent; color: var(--muted); padding: 6px 9px; border-radius: 2px; font-size: 10px; cursor: pointer; }
-.composer-mode button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.composer-mode { display: inline-flex; }
+.composer-mode button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border-soft); background: var(--card-alt); color: var(--muted); padding: 4px 7px 4px 4px; border-radius: 999px; font-size: 10px; font-weight: 600; cursor: pointer; }
+.composer-mode button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.composer-mode button[aria-pressed="false"] .orb-logo { opacity: .45; filter: grayscale(1); }
 .diff-view pre { scrollbar-color: var(--terracotta) var(--ink); }
 .callback-screen { border-top: 4px solid var(--terracotta); }
 .error-screen { background: var(--canvas); }

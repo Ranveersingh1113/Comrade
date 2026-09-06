@@ -25,7 +25,10 @@ export function Threads() {
   };
 
   const active = threads.find((thread) => thread.id === threadId);
-  if (threadId && active) return <GroupRoom key={active.id} thread={active} />;
+  const isCanonicalGroupRoom = active?.title === 'General'
+    && active.visibility === 'team'
+    && active.kind === 'discussion';
+  if (threadId && active) return <GroupRoom key={active.id} thread={active} allowTeamMessages={isCanonicalGroupRoom} />;
 
   return <main className="workspace-page threads-page" style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
     <header className="workspace-heading" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

@@ -12,11 +12,16 @@ from pathlib import Path
 import logging
 import uuid
 import asyncio
+import contextlib
+import time
+
+import websockets
 
 import httpx
 
 from fastapi import (
-    Depends, FastAPI, File, HTTPException, Request, UploadFile, status,
+    Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket,
+    status,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
@@ -951,31 +956,29 @@ async def _serve_preview(request: Request, host: str, process_id: str) -> Respon
         return Response("that preview is not available.",
                         status_code=status.HTTP_403_FORBIDDEN)
 
-    if request.headers.get("upgrade", "").lower() == "websocket":
-        return Response(
-            "live reload is not proxied through previews yet; reload the page"
-            " to see changes.",
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        )
-
     body = await request.body()
     if len(body) > PREVIEW_MAX_BYTES:
         return Response("request too large",
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
+    # The RAW query string, forwarded byte for byte. Re-encoding it from parsed
+    # pairs is what loses a literal `+`, a repeated key, or a percent-encoded
+    # `&` inside a value — and a development server that reads its own query
+    # differently from the app is a bug nobody can reproduce.
     url = previews.upstream_url(grant, path=request.url.path, host=host)
     if request.url.query:
         url = f"{url}?{request.url.query}"
+
+    client = httpx.AsyncClient(timeout=PREVIEW_TIMEOUT, follow_redirects=False)
     try:
-        async with httpx.AsyncClient(
-            timeout=PREVIEW_TIMEOUT, follow_redirects=False,
-        ) as client:
-            upstream = await client.request(
-                request.method, url,
-                headers=previews.forwardable_headers(dict(request.headers)),
-                content=body,
-            )
+        upstream_request = client.build_request(
+            request.method, url,
+            headers=previews.forwardable_headers(dict(request.headers)),
+            content=body,
+        )
+        upstream = await client.send(upstream_request, stream=True)
     except httpx.HTTPError as exc:
+        await client.aclose()
         logger.info("preview upstream failed for %s: %s", process_id, exc)
         return Response(
             "the development server did not respond. It may still be starting,"
@@ -983,8 +986,40 @@ async def _serve_preview(request: Request, host: str, process_id: str) -> Respon
             status_code=status.HTTP_502_BAD_GATEWAY,
         )
 
-    return Response(
-        content=upstream.content[:PREVIEW_MAX_BYTES],
+    try:
+        previews.enforce_response_limit(dict(upstream.headers), PREVIEW_MAX_BYTES)
+    except previews.PreviewTooLarge as exc:
+        await upstream.aclose()
+        await client.aclose()
+        return Response(str(exc), status_code=status.HTTP_502_BAD_GATEWAY)
+
+    async def _body():
+        """Stream RAW bytes, counting as we go.
+
+        aiter_raw, not aiter_bytes: the body is forwarded undecoded and its
+        content-encoding header travels with it, which is the only arrangement
+        that cannot contradict itself. A chunked response with no declared
+        length is cut off at the cap rather than buffered — the connection ends
+        without a clean close, which a browser reports as a failed load instead
+        of rendering half a file as though it were whole.
+        """
+        total = 0
+        try:
+            async for chunk in upstream.aiter_raw():
+                total += len(chunk)
+                if total > PREVIEW_MAX_BYTES:
+                    logger.info(
+                        "preview response for %s passed %d bytes; cutting off",
+                        process_id, PREVIEW_MAX_BYTES,
+                    )
+                    return
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _body(),
         status_code=upstream.status_code,
         headers=previews.response_headers(dict(upstream.headers)),
     )
@@ -1005,3 +1040,106 @@ async def preview_origin(request: Request, call_next):
     if process_id is None:
         return await call_next(request)
     return await _serve_preview(request, host, process_id)
+
+
+#: How long one proxied WebSocket may stay open. A development server's
+#: hot-reload socket is meant to live as long as the tab, but an unbounded
+#: connection is an unbounded worker task — and a preview whose participant was
+#: removed must not keep streaming through a socket opened before they were.
+#: The reauthorization below is what actually ends it; this is the ceiling.
+PREVIEW_WS_SECONDS = 60 * 30
+
+#: How often an open socket re-asks whether its holder still may be here.
+PREVIEW_WS_RECHECK_SECONDS = 60
+
+
+@app.websocket("/{path:path}")
+async def preview_websocket(websocket: WebSocket, path: str) -> None:
+    """Proxy a WebSocket into a thread's development server.
+
+    This is what makes hot reload work inside a preview. It used to be a 501,
+    which loaded the page and then quietly never updated it.
+
+    The socket is authorized the same way every HTTP request is — the
+    host-scoped cookie, rechecked against the database — and then RE-checked
+    periodically while it is open, because a connection established an hour ago
+    says nothing about whether its holder is still in the thread.
+    """
+    host = (websocket.headers.get("x-comrade-preview-host")
+            or websocket.headers.get("host", ""))
+    process_id = previews.process_for_host(host)
+    if process_id is None:
+        await websocket.close(code=1008)
+        return
+    try:
+        grant = await run_in_threadpool(
+            previews.authorize_session,
+            websocket.cookies.get("comrade_preview", ""), host=host,
+        )
+    except previews.PreviewDenied:
+        await websocket.close(code=1008)
+        return
+
+    query = websocket.url.query
+    target = (f"ws://{grant['container_name']}:{grant['port']}/"
+              f"{path.lstrip('/')}" + (f"?{query}" if query else ""))
+    await websocket.accept()
+
+    try:
+        async with websockets.connect(
+            target, open_timeout=10, close_timeout=5, max_size=None,
+        ) as upstream:
+            await _pump_websocket(websocket, upstream, host, grant)
+    except (OSError, websockets.exceptions.WebSocketException) as exc:
+        logger.info("preview websocket to %s failed: %s", process_id, exc)
+        with contextlib.suppress(RuntimeError):
+            await websocket.close(code=1011)
+
+
+async def _pump_websocket(client_ws, upstream, host: str, grant: dict) -> None:
+    """Copy frames both ways until one side stops, the lifetime ends, or the
+    holder loses access."""
+    deadline = time.monotonic() + PREVIEW_WS_SECONDS
+
+    async def _client_to_upstream() -> None:
+        while True:
+            message = await client_ws.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            if (data := message.get("bytes")) is not None:
+                await upstream.send(data)
+            elif (text := message.get("text")) is not None:
+                await upstream.send(text)
+
+    async def _upstream_to_client() -> None:
+        async for frame in upstream:
+            if isinstance(frame, bytes):
+                await client_ws.send_bytes(frame)
+            else:
+                await client_ws.send_text(frame)
+
+    async def _keep_authorized() -> None:
+        """Re-ask the database while the socket is open. A participant removed
+        from the thread must lose a live connection, not merely be unable to
+        open the next one."""
+        while time.monotonic() < deadline:
+            await asyncio.sleep(PREVIEW_WS_RECHECK_SECONDS)
+            try:
+                await run_in_threadpool(
+                    previews.authorize_session,
+                    client_ws.cookies.get("comrade_preview", ""), host=host,
+                )
+            except previews.PreviewDenied:
+                return
+        return
+
+    tasks = [asyncio.create_task(coro()) for coro in
+             (_client_to_upstream, _upstream_to_client, _keep_authorized)]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        with contextlib.suppress(RuntimeError):
+            await client_ws.close()

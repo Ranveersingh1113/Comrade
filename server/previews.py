@@ -317,9 +317,15 @@ def authorize_session(value: str, *, host: str) -> dict:
 
 def response_headers(headers: dict[str, str]) -> dict[str, str]:
     """What may come back from a team's own server, plus what we insist on."""
+    # `content-encoding` and `content-length` survive: the body is forwarded
+    # RAW and undecoded, so both still describe it. Dropping either while
+    # passing the bytes through is what produces a response that contradicts
+    # its own headers.
+    keep_anyway = {"content-encoding", "content-length"}
     cleaned = {
         k: v for k, v in headers.items()
-        if k.lower() not in _RESPONSE_DROPPED and k.lower() not in _STRIPPED
+        if k.lower() not in _RESPONSE_DROPPED
+        and (k.lower() in keep_anyway or k.lower() not in _STRIPPED)
     }
     # no-store because a preview is unreviewed output that must not be cached
     # by an intermediary; no-referrer so a link clicked inside it does not leak
@@ -328,3 +334,41 @@ def response_headers(headers: dict[str, str]) -> dict[str, str]:
     cleaned["referrer-policy"] = "no-referrer"
     cleaned["x-content-type-options"] = "nosniff"
     return cleaned
+
+
+# ---------------------------------------------------------------------------
+# What a preview response may be (T04)
+# ---------------------------------------------------------------------------
+
+class PreviewTooLarge(Exception):
+    """The upstream response is past what a preview will carry."""
+
+
+def enforce_response_limit(headers: dict[str, str], limit: int) -> None:
+    """Refuse an oversized response BEFORE reading it.
+
+    🔴 This replaced `upstream.content[:limit]`, which buffered the whole thing
+    in memory and then sliced it. Slicing does not protect the memory — it is
+    already read — and what it returns is a truncated file presented as a
+    complete one: a half a JavaScript bundle, served with a 200. Silent
+    corruption is worse than a refusal, and a refusal is all a preview owes a
+    response it cannot carry.
+    """
+    declared = headers.get("content-length") or headers.get("Content-Length")
+    if declared and declared.isdigit() and int(declared) > limit:
+        raise PreviewTooLarge(
+            f"the development server returned {int(declared):,} bytes, past the"
+            f" {limit:,} a preview will carry."
+        )
+
+
+def passthrough_headers(headers: dict[str, str]) -> dict[str, str]:
+    """Response headers for a RAW body passthrough.
+
+    Content-encoding is kept and the body is forwarded undecoded, which is the
+    only arrangement that cannot disagree with itself. Decoding the body while
+    forwarding `content-encoding: gzip` hands the browser a header promising
+    compression over bytes that are not compressed, and it renders as garbage
+    rather than as an error.
+    """
+    return response_headers(headers)

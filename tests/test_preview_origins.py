@@ -250,3 +250,40 @@ def test_upstream_cookies_and_security_headers_are_dropped(seeded):
     assert cleaned["content-type"] == "text/html"
     assert cleaned["cache-control"] == "no-store"
     assert cleaned["referrer-policy"] == "no-referrer"
+
+
+# ---------------------------------------------------------------------------
+# What a preview response may be (T04)
+# ---------------------------------------------------------------------------
+
+def test_an_oversized_response_is_refused_not_truncated():
+    """🔴 This replaced `upstream.content[:limit]`, which buffered the whole
+    response and then sliced it. Slicing does not protect the memory — it is
+    already read — and what comes back is half a JavaScript bundle served with
+    a 200. Silent corruption is worse than a refusal."""
+    with pytest.raises(previews.PreviewTooLarge):
+        previews.enforce_response_limit({"content-length": str(999 * 1024 * 1024)},
+                                        25 * 1024 * 1024)
+
+
+def test_an_ordinary_response_passes_the_limit_check():
+    previews.enforce_response_limit({"content-length": "1024"}, 25 * 1024 * 1024)
+    previews.enforce_response_limit({}, 25 * 1024 * 1024)   # chunked: no length
+
+
+def test_content_encoding_survives_because_the_body_is_not_decoded():
+    """Decoding the body while forwarding `content-encoding: gzip` hands the
+    browser a header promising compression over bytes that are not compressed.
+    It renders as garbage rather than as an error, which is the worst kind."""
+    out = previews.response_headers({
+        "content-encoding": "gzip", "content-length": "42",
+        "content-type": "application/javascript",
+    })
+    assert out["content-encoding"] == "gzip"
+    assert out["content-length"] == "42"
+
+
+def test_the_security_headers_we_add_still_win():
+    out = previews.response_headers({"cache-control": "public, max-age=31536000"})
+    assert out["cache-control"] == "no-store"
+    assert out["x-content-type-options"] == "nosniff"

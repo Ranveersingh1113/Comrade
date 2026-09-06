@@ -61,6 +61,12 @@ export function PreviewBar({ teamId, threadId }: { teamId: string; threadId: str
   const open = async (proc: SandboxProcess) => {
     setOpening(proc.id);
     setError(null);
+    // 🔴 OPENED SYNCHRONOUSLY, inside the click. A window.open() that happens
+    // after an await is no longer attributable to a user gesture, and every
+    // browser blocks it — so the previous version silently did nothing on the
+    // first click and worked only if the member disabled their popup blocker.
+    // The tab is opened now and navigated once the grant exists.
+    const tab = window.open('', '_blank', 'noopener,noreferrer');
     try {
       const { data } = await supabase.auth.getSession();
       const base = (import.meta.env.VITE_AGENT_API_URL as string | undefined) ?? '';
@@ -71,20 +77,23 @@ export function PreviewBar({ teamId, threadId }: { teamId: string; threadId: str
           headers: { Authorization: `Bearer ${data.session?.access_token ?? ''}` },
         },
       );
-      if (resp.status === 503) {
-        setError('Previews are not configured on this deployment.');
-        return;
-      }
       if (!resp.ok) {
-        setError('That preview is not available.');
+        tab?.close();
+        setError(
+          resp.status === 503
+            ? 'Previews are not configured on this deployment.'
+            : 'That preview is not available.',
+        );
         return;
       }
       // ABSOLUTE, and on a different origin: the preview lives on its own
-      // hostname so it cannot read this page's storage. Do not prefix it
-      // with the API base — that would put it back on our origin.
+      // hostname so it cannot read this page's storage. Never prefix it with
+      // the API base — that would put it back on our origin.
       const grant = (await resp.json()) as { url: string };
-      window.open(grant.url, '_blank', 'noopener,noreferrer');
+      if (tab) tab.location.href = grant.url;
+      else window.open(grant.url, '_blank', 'noopener,noreferrer');
     } catch {
+      tab?.close();
       setError('Could not reach the preview.');
     } finally {
       setOpening(null);

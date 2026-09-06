@@ -52,16 +52,19 @@ class BoxClient:
         body = response.json()
         return body.get("box", body)
 
-    def run(self, box_id: str, argv: list[str], *, timeout: int) -> dict:
+    def run(
+        self, box_id: str, argv: list[str], *, timeout: int,
+        cwd: str = ".", detached: bool = False,
+    ) -> dict:
         """Execute one already-authorized argv; ambiguous submission is fatal."""
         try:
             response = self._client.post(
                 f"/boxes/{box_id}/commands",
                 json={
                     "command": shlex.join(argv),
-                    "cwd": ".",
+                    "cwd": cwd,
                     "timeoutSeconds": timeout,
-                    "detached": False,
+                    "detached": detached,
                 },
             )
         except httpx.TransportError as exc:

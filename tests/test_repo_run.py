@@ -284,6 +284,14 @@ def test_long_output_keeps_both_ends():
     assert len(clipped) < len(text)
 
 
+def test_a_box_config_never_falls_back_to_host_docker(checkout, monkeypatch):
+    from agent.sandbox import SandboxError
+
+    monkeypatch.setattr("shared.config.settings.comrade_sandbox_backend", "box")
+    with pytest.raises(SandboxError, match="Box execution is not enabled"):
+        run_contained(["python", "-V"], root=checkout)
+
+
 # ---------------------------------------------------------------------------
 # The allowlist: legibility, not confinement
 # ---------------------------------------------------------------------------

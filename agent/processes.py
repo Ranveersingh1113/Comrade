@@ -148,6 +148,11 @@ def start(
     containers; deciding which checkout a thread owns is the repo layer's job,
     and doing it here would make every supervision test need a git repository.
     """
+    if settings.comrade_sandbox_backend != "docker":
+        raise ProcessError(
+            "Box previews are not enabled yet; Comrade will not fall back to"
+            " the host Docker daemon."
+        )
     if port is not None and not (MIN_PORT <= port <= MAX_PORT):
         raise ProcessError(
             f"{port} cannot be previewed. Use a port between {MIN_PORT} and"

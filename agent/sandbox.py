@@ -215,6 +215,11 @@ def run_contained(
     Returns exit_code, stdout, stderr, timed_out. A non-zero exit is a normal
     result the agent should read, not an exception.
     """
+    if settings.comrade_sandbox_backend != "docker":
+        raise SandboxError(
+            "Box execution is not enabled yet; Comrade will not fall back to"
+            " the host Docker daemon."
+        )
     if not root.exists():
         raise SandboxError(
             "this team's repository is not checked out, so there is nothing to"

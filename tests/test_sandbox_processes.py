@@ -97,6 +97,22 @@ def test_a_started_process_is_running_and_carries_its_container(
     assert (row[2], row[3]) == (3000, "npm run dev")
 
 
+def test_a_box_config_never_falls_back_to_the_host_docker_daemon(
+    seeded, admin, no_docker, monkeypatch, tmp_path
+):
+    """Cloud configuration must not quietly run customer code on our host."""
+    monkeypatch.setattr(settings, "comrade_sandbox_backend", "box")
+    thread_id = _thread(admin)
+
+    with pytest.raises(processes.ProcessError, match="Box previews are not enabled"):
+        processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    assert no_docker == []
+    assert admin.execute(
+        "select count(*) from public.sandbox_processes where thread_id=%s", (thread_id,)
+    ).fetchone()[0] == 0
+
+
 def test_stopping_records_the_stop_rather_than_deleting_the_row(
     seeded, admin, no_docker, tmp_path
 ):

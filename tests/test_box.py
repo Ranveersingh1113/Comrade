@@ -65,6 +65,26 @@ def test_command_uses_fixed_argv_and_never_retries_gateway_failure():
     }
 
 
+def test_command_can_run_in_a_project_and_detach():
+    from agent.box import BoxClient
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"processId": "proc-1"})
+
+    client = BoxClient("box-test", transport=httpx.MockTransport(handler))
+    assert client.run(
+        "bx_23456789", ["npm", "run", "dev"], timeout=120,
+        cwd="comrade-project", detached=True,
+    ) == {"processId": "proc-1"}
+    assert json.loads(seen[0].content) == {
+        "command": "npm run dev", "cwd": "comrade-project",
+        "timeoutSeconds": 120, "detached": True,
+    }
+
+
 def test_get_and_delete_use_only_the_box_id():
     from agent.box import BoxClient
 

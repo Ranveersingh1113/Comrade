@@ -373,3 +373,20 @@ def test_a_silent_turn_that_ran_a_tool_does_not_claim_nothing_changed(
         f" what it did. detail was: {detail!r}"
     )
     assert "attempted" in detail and "already ran" not in detail, detail
+
+
+def test_the_explanation_survives_the_queue(seeded, silent_model, admin):
+    """🔴 The frame above reaches whoever drains the generator, and since the
+    durable queue landed that is the WORKER, not the browser.
+
+    The member's stream replays the run row (server/app.py:_run_frames), so an
+    explanation that exists only in the yielded frame reaches nobody: the run
+    ends 'failed' carrying a null detail, and the screen shows exactly the
+    blank nothing this file exists to have fixed. It has to be written down.
+    """
+    frames = _frames()
+    stored = admin.execute(
+        "select last_error from public.agent_runs where id=%s",
+        (frames[0]["run_id"],),
+    ).fetchone()[0]
+    assert stored == frames[-1]["detail"]

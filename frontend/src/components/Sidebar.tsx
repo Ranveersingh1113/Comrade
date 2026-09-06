@@ -6,9 +6,9 @@ import { daysUntil } from '../lib/format';
 import { useAuth } from '../state/AuthContext';
 import { useTeam } from '../state/TeamContext';
 import { Avatar } from './Avatar';
+import { useThreads } from '../hooks/useThreads';
 
 const NAV_ITEMS = [
-  { to: 'threads', icon: '#', label: 'Threads' },
   { to: 'tasks', icon: '☑', label: 'Tasks' },
   { to: 'wiki', icon: '✦', label: 'Team wiki' },
   { to: 'docs', icon: '▤', label: 'Documents' },
@@ -33,6 +33,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   const { signOut } = useAuth();
   const navigate = useNavigate();
   const teamId = team?.id ?? '';
+  const { threads, error: threadError, createPublicThread } = useThreads();
+  const [creatingThread, setCreatingThread] = useState(false);
 
   const [lastCompile, setLastCompile] = useState<MemoryCompilation | null>(null);
   const [nextMilestone, setNextMilestone] = useState<Milestone | null>(null);
@@ -63,6 +65,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
   useEffect(() => {
     loadSignals();
   }, [loadSignals]);
+
+  const createThread = async () => {
+    if (creatingThread) return;
+    setCreatingThread(true);
+    try {
+      const thread = await createPublicThread();
+      navigate(`/t/${teamId}/threads/${thread.id}`);
+    } finally {
+      setCreatingThread(false);
+    }
+  };
 
   return (
     <nav
@@ -181,6 +194,40 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             {item.label}
           </NavLink>
         ))}
+      </div>
+
+      <div style={{ margin: '22px 10px 8px', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ flex: 1, fontSize: 9.5, fontWeight: 600, letterSpacing: '0.18em', color: 'var(--ink-faint)', textTransform: 'uppercase' }}>
+          Threads
+        </span>
+        <button
+          type="button"
+          aria-label="New thread"
+          disabled={creatingThread}
+          onClick={() => void createThread()}
+          style={{ border: 0, borderRadius: 5, background: 'rgba(241,239,234,0.12)', color: 'var(--paper)', cursor: 'pointer', padding: '2px 7px', fontSize: 15 }}
+        >
+          +
+        </button>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        {threads.map((thread) => (
+          <NavLink
+            key={thread.id}
+            to={`threads/${thread.id}`}
+            title={thread.visibility === 'restricted' ? 'Selected members' : 'Team-visible'}
+            style={({ isActive }) => ({
+              ...navBase,
+              color: isActive ? 'var(--paper)' : '#A6A1B3',
+              background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+              overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+            })}
+          >
+            <span style={{ color: 'var(--ink-faint)' }}>{thread.visibility === 'restricted' ? '◌' : '◦'}</span>
+            {thread.title}
+          </NavLink>
+        ))}
+        {threadError && <span style={{ padding: '0 10px', color: 'var(--terracotta-soft)', fontSize: 11 }}>Could not load threads</span>}
       </div>
 
       <div

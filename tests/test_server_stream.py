@@ -23,6 +23,8 @@ async def _fake_frames(team_id, run_id):
 @pytest.fixture
 def as_a1(monkeypatch):
     monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
+    monkeypatch.setattr("server.app.reserve_turn", lambda *_: 0)
+    monkeypatch.setattr("server.app.record_reservation", lambda *_: None)
     monkeypatch.setattr("server.app._run_frames", _fake_frames)
     app.dependency_overrides[current_user_id] = lambda: A1
     yield TestClient(app)
@@ -79,6 +81,20 @@ def test_final_frame_never_reaches_the_wire(seeded, as_a1):
     assert not any(f["type"] == "final" for f in _frames(resp))
 
 
+def test_thread_activity_returns_durable_steps_to_a_thread_member(as_a1, monkeypatch):
+    thread_id = "11111111-1111-1111-1111-111111111111"
+    monkeypatch.setattr("server.app.require_membership", lambda *_: None)
+    monkeypatch.setattr("server.app._resolve_thread", lambda *_: thread_id)
+    monkeypatch.setattr("server.app.get_thread_runs", lambda *_: [{
+        "id": "run-1", "steps": [{"type": "tool_call", "tool": "memory_read_page", "args": {"title": "Release"}}],
+    }], raising=False)
+
+    resp = as_a1.get(f"/threads/{thread_id}/agent-runs?team_id={TEAM_A}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()[0]["id"] == "run-1"
+    assert resp.json()[0]["steps"][0]["args"] == {"title": "Release"}
+
+
 def test_non_member_gets_403_not_a_stream(seeded, monkeypatch):
     """The guard must fail as a real status, never as a 200 whose body says no."""
     monkeypatch.setattr("server.app._run_frames", _fake_frames)
@@ -94,18 +110,10 @@ def test_non_member_gets_403_not_a_stream(seeded, monkeypatch):
 
 def test_over_budget_gets_429_not_a_stream(seeded, as_a1, monkeypatch):
     monkeypatch.setattr(settings, "agent_turns_per_hour", 1)
-    import psycopg
+    from shared.usage import reserve_turn
 
-    conn = psycopg.connect(settings.comrade_db_url_admin)
-    conn.autocommit = True
-    try:
-        conn.execute(
-            "insert into public.agent_runs (team_id, trigger_type, status)"
-            " values (%s,'user','done')",
-            (TEAM_A,),
-        )
-    finally:
-        conn.close()
+    reserve_turn(TEAM_A)
+    monkeypatch.setattr("server.app.reserve_turn", reserve_turn)
     resp = as_a1.post("/agent/turn/stream", json={"team_id": TEAM_A, "thread_id": _general_thread(), "text": "hi"})
     assert resp.status_code == 429
 

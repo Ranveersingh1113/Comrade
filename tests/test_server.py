@@ -18,10 +18,11 @@ GROUP_THREAD = "44444444-4444-4444-4444-444444444444"
 @pytest.fixture
 def client(monkeypatch):
     # Both guards are stubbed: these tests exercise handler behaviour with no
-    # DB. Membership is covered in test_server_auth, the budget in
-    # test_server_budget.
+    # DB. Membership is covered in test_server_auth, atomic quota accounting
+    # in test_usage_reservations.
     monkeypatch.setattr("server.app.require_membership", lambda *_: None)
-    monkeypatch.setattr("server.app._check_turn_budget", lambda *_: None)
+    monkeypatch.setattr("server.app.reserve_turn", lambda *_: 0)
+    monkeypatch.setattr("server.app.record_reservation", lambda *_: None)
     monkeypatch.setattr("server.app._resolve_thread", lambda _u, _t, thread: str(thread))
     monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
     app.dependency_overrides[current_user_id] = lambda: USER

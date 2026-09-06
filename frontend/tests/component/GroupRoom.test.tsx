@@ -34,6 +34,7 @@ afterEach(() => server.resetHandlers());
 beforeEach(() => {
   resetSupa();
   resetTeam();
+  server.use(http.get(`${BASE}/threads/thread-1/agent-runs`, () => HttpResponse.json([])));
 });
 afterAll(() => server.close());
 
@@ -133,6 +134,21 @@ describe('a turn that cannot run', () => {
     // Never the raw identifier — that was PrivateThread's old behaviour and
     // there is no reason to reproduce it here.
     expect(screen.queryByText(/messages_search/)).not.toBeInTheDocument();
+    release();
+  });
+
+  test('an agent action expands to its saved arguments and diff', async () => {
+    const { body, release } = heldStream([
+      { type: 'run', run_id: 'r1' },
+      {
+        type: 'tool_call', seq: 0, tool: 'repo_open_pr',
+        args: { patch: 'diff --git a/readme.md b/readme.md\n+--- a/readme.md\n++++ b/readme.md\n+@@\n+-old\n++new' },
+      },
+    ]);
+    await askComrade(body);
+    const expand = await screen.findByRole('button', { name: /details for using repo_open_pr/i });
+    await userEvent.click(expand);
+    expect(screen.getAllByText('readme.md', { exact: false }).length).toBeGreaterThan(0);
     release();
   });
 });
@@ -264,4 +280,43 @@ test('an AI reply exposes its sender for browser journeys', async () => {
 
   const row = (await screen.findByText('Two tasks are open.')).closest('[data-sender]');
   expect(row).toHaveAttribute('data-sender', 'ai');
+});
+
+describe('a turn that produced nothing', () => {
+  test('the terminal run frame explains the silence', async () => {
+    // 🔴 The durable queue moved the agent out of the request, so the browser
+    // now replays the RUN ROW (server/app.py:_run_frames) rather than draining
+    // the runtime generator. The 'empty' frame the room still listens for is
+    // no longer sent to it; what arrives is a terminal 'done' carrying the
+    // reason. The room dropped that detail on the floor, which put the blank
+    // screen back — the member watched the indicator stop and got nothing.
+    await askComrade(
+      stream([
+        { type: 'run', run_id: 'r-1', status: 'queued' },
+        {
+          type: 'done', run_id: 'r-1', status: 'failed',
+          detail: 'Comrade had nothing to say that time — the model came back'
+            + ' empty. Nothing was changed. Try asking again.',
+        },
+      ]),
+    );
+    expect(await screen.findByText(/came back empty/)).toBeInTheDocument();
+  });
+
+  test('a turn that answered says nothing extra', async () => {
+    // The same frame ends every successful turn, so the note has to be gated
+    // on there BEING a reason. Gating on the terminal frame alone would hang a
+    // note under every reply Comrade ever gives.
+    await askComrade(
+      stream([
+        { type: 'run', run_id: 'r-2', status: 'queued' },
+        { type: 'text', text: 'Two tasks are open.' },
+        { type: 'done', run_id: 'r-2', status: 'done', detail: null },
+      ]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'SEND' })).toBeEnabled(),
+    );
+    expect(screen.queryByText(/came back empty/)).not.toBeInTheDocument();
+  });
 });

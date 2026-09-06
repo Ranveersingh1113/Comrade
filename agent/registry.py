@@ -142,6 +142,12 @@ REGISTRY: dict[str, ToolSpec] = {
     "repo_run": ToolSpec(
         "sandbox", writes=False, needs_human=False, args=RUN_POLICY
     ),
+    # The thread's own plan. writes=True and needs_human=False, and unlike
+    # team_propose_task that is not because the approval happens elsewhere —
+    # there is no approval, because there is nothing to approve. The row is
+    # readable only by people who can already read the thread, and nothing
+    # outside it moves. RLS is the whole boundary here.
+    "plan_update": ToolSpec("db", writes=True, needs_human=False),
 }
 
 

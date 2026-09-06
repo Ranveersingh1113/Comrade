@@ -42,7 +42,7 @@ def resolve_team_for_installation(installation_id: int) -> str | None:
     Admin for the same reason resolve_team_for_repo is: there is no team yet
     to scope the lookup to.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         row = conn.execute(
             "select team_id from public.github_installations"
             " where installation_id = %s",
@@ -61,7 +61,7 @@ def forget_installation(installation_id: int) -> None:
     """
     from shared.github_app import forget
 
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.execute(
             "delete from public.github_installations where installation_id = %s",
             (installation_id,),
@@ -80,7 +80,7 @@ def resolve_team_for_repo(full_name: str) -> str | None:
     teams' repos cannot be scoped to one team's RLS context, because there is
     no team yet to scope it to. Returns None when no team has registered it.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         row = conn.execute(
             "select team_id from public.github_repos where repo_full_name=%s",
             (full_name,),

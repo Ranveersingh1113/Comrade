@@ -1,0 +1,55 @@
+# The API and both workers. ONE image, three commands.
+#
+# They share every dependency and all of shared/, so three Dockerfiles would be
+# three copies of the same layers drifting apart — and the failure that causes
+# is the one this project keeps producing: two places that must agree, failing
+# somewhere other than where it is caused. The command is what differs, and the
+# command belongs in the deployment, not the image.
+#
+# NOT the sandbox image. docker/sandbox.Dockerfile is what a TEAM'S code runs
+# in; this is what Comrade runs in. Keeping them separate is the point — this
+# one holds credentials and that one must never.
+FROM python:3.12-slim
+
+# git is a runtime dependency, not a build one: repo_sync clones and
+# ensure_thread_checkout makes worktrees by shelling out to it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# uv, pinned. The lockfile is the reproducibility claim and a floating
+# installer is a way to lose it quietly.
+COPY --from=ghcr.io/astral-sh/uv:0.5.14 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Dependencies first, as their own layer: application code changes on every
+# deploy and the dependency set does not, so this is the difference between a
+# ten-second build and a four-minute one.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project --no-dev
+
+COPY agent/ agent/
+COPY evaluation/ evaluation/
+COPY pipeline/ pipeline/
+COPY server/ server/
+COPY shared/ shared/
+COPY supabase/migrations/ supabase/migrations/
+RUN uv sync --frozen --no-dev
+
+# The same uid the sandbox runs as (agent/sandbox.SANDBOX_UID). Files a
+# container writes into a thread's worktree are then owned by the user that
+# owns the worktree, which is what stops the worker being unable to clean up
+# after the code it ran.
+RUN useradd --create-home --uid 10001 comrade \
+ && mkdir -p /workspaces && chown comrade:comrade /workspaces
+USER comrade
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    COMRADE_WORKSPACES_ROOT=/workspaces
+
+# Overridden per service in compose. The API is the default because it is the
+# one an operator runs by hand to check the image.
+EXPOSE 8000
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -49,7 +49,7 @@ from shared.db import Role, connect, team_session
 from shared.github_app import GitHubAppError, installation_token
 from shared.workspace import (
     ensure_workspace, force_rmtree, remove_workspace, repo_checkout,
-    workspaces_root,
+    thread_checkout, workspaces_root,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ def _pat_is_still_single_tenant() -> bool:
     repository in a developer's own database started failing a test about a
     credential it does not use.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         teams = conn.execute(
             "select count(distinct team_id) from public.github_repos"
             " where installation_id is null"
@@ -200,6 +200,55 @@ def _run_git(args: list[str], cwd: Path | None, token: str) -> None:
         # print the credential.
         raise RepoSyncError(err.replace(token, "<redacted>")[:800])
     return proc.stdout
+
+
+def _git_local(args: list[str], cwd: Path) -> str:
+    """A git command against a local tree. No credential, by construction.
+
+    Separate from `_run_git` so the type system of the file says what the
+    security note says: making a thread's working tree touches no remote, so
+    nothing here should be able to mint or leak a token.
+    """
+    proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
+        ["git", *GIT_FLAGS, *args],
+        cwd=str(cwd), capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS,
+    )
+    if proc.returncode != 0:
+        raise RepoSyncError((proc.stderr or proc.stdout or "").strip()[:800])
+    return proc.stdout
+
+
+def ensure_thread_checkout(
+    team_id: str, thread_id: str, repo_full_name: str,
+) -> Path:
+    """This thread's own working tree, created on first use.
+
+    A `git worktree` of the team's checkout: separate files, one shared object
+    database, no second clone and no network. The team checkout stays the
+    mirror that fetches and pushes; nobody edits it any more.
+
+    Idempotent — a second turn in the same thread continues in the same tree,
+    which is what makes work survive a restart and what stops `sync_repo`'s
+    `reset --hard` from deleting a member's unproposed change.
+    """
+    tree = thread_checkout(team_id, thread_id, repo_full_name)
+    if (tree / ".git").exists():
+        return tree
+    base = repo_checkout(team_id, repo_full_name)
+    if not (base / ".git").exists():
+        # Deliberately NOT a clone. This is reached from read tools inside a
+        # turn, and syncing here would put a credentialled network fetch on the
+        # path of `repo_read`. Hand back the path that does not exist; every
+        # caller already has a "this repository is not checked out" message,
+        # and cloning is the sync JOB's work.
+        return tree
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    # A worktree whose directory was deleted stays REGISTERED, and git then
+    # refuses to add it back under the same path. Pruning first makes a
+    # cleaned-up disk and git's own bookkeeping agree.
+    _git_local(["worktree", "prune"], base)
+    _git_local(["worktree", "add", "--detach", str(tree), "HEAD"], base)
+    return tree
 
 
 def default_branch(team_id: str, repo_full_name: str) -> str:
@@ -424,7 +473,7 @@ def sweep_stale_checkouts() -> list[str]:
     a reconciler converges whether the row arrived through the UI, through
     psql, or while the worker was down.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         rows = conn.execute(
             "select r.team_id, r.repo_full_name from public.github_repos r"
             " where (r.last_cloned_at is null"
@@ -480,7 +529,7 @@ def sweep_orphan_workspaces() -> list[str]:
     root = workspaces_root()
     if not root.exists():
         return []
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         live = _live_team_ids(conn)
         connected = _live_checkouts(conn)
 

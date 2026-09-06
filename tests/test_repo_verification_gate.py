@@ -28,14 +28,18 @@ declare its own work verified, which is the whole thing this prevents.
 """
 from types import SimpleNamespace
 
+import subprocess
+
 import pytest
 
 from agent.repo_tools import repo_edit, repo_propose_pr, repo_run
-from shared.workspace import repo_checkout
+from shared.workspace import repo_checkout, thread_checkout
 
 TEAM_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 REQUESTER = "a1a1a1a1-0000-0000-0000-000000000001"
 REPO = "acme/app"
+# The agent works in a THREAD's tree, not the team's (Task 15).
+THREAD_A = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 REFUSAL = "Run a relevant test, build, lint, or executable check"
 
@@ -45,11 +49,20 @@ def checkout(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
     )
-    root = repo_checkout(TEAM_A, REPO)
+    root = thread_checkout(TEAM_A, THREAD_A, REPO)
     (root / "src").mkdir(parents=True)
     (root / "src" / "auth.py").write_text("def authenticate(user):\n    return True\n")
-    (root / ".git").mkdir()
-    (root / ".git" / "config").write_text("[remote]\n")
+    # A REAL repository. The fake `.git` directory this used to write is the
+    # malformed state capture_patch now refuses — git rejects it and walks UP
+    # looking for a real one, which is how `git add -A` reached the
+    # developer's own home directory. A test that fakes it tests nothing.
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@test.dev", "-c", "user.name=Test",
+         "commit", "-q", "-m", "initial"],
+        cwd=root, check=True, capture_output=True,
+    )
     return root
 
 
@@ -60,6 +73,7 @@ def ctx():
     return SimpleNamespace(state={
         "team_id": TEAM_A,
         "requester_id": REQUESTER,
+        "thread_id": THREAD_A,
         "repo_full_name": REPO,
         "repo_edit_generation": 0,
         "repo_verified_generation": None,
@@ -78,13 +92,16 @@ def no_git(monkeypatch):
 
         fatal: Unable to create 'C:/Users/ricky/.git/index.lock': File exists.
 
-    capture_patch guards with `(checkout / ".git").exists()`, which a
-    malformed .git satisfies and git does not. Filed separately; this gate is
-    not the place to fix it, and it is certainly not the place to reproduce it.
+    capture_patch guarded with `(checkout / ".git").exists()`, which a
+    malformed .git satisfies and git does not. FIXED in Task 15 — it now asks
+    git for `--show-toplevel` under GIT_CEILING_DIRECTORIES — and the fixture
+    above builds a real repository rather than a fake one. The stand-in stays
+    because this gate is about bookkeeping across three tools, and shelling out
+    to git to prove an integer changed makes it slow for nothing.
     """
     from pipeline.repo_pr import PullRequestError
 
-    def _fake_capture(team_id, repo_full_name):
+    def _fake_capture(team_id, repo_full_name, thread_id):
         raise PullRequestError("nothing has changed, so there is nothing to open.")
 
     monkeypatch.setattr("pipeline.repo_pr.capture_patch", _fake_capture)

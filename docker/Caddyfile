@@ -1,0 +1,31 @@
+# TLS and one origin for the whole product.
+#
+# ONE hostname, not two, and that is the point: the browser talks to the SPA
+# and to the API on the same origin, so there is no CORS preflight on every
+# agent turn and no second certificate to keep alive. The API is mounted under
+# /api and `handle_path` strips the prefix, so server/app.py keeps its own
+# routes — it never learns it is behind anything.
+#
+# COMRADE_HOST is the public name. With no domain, an nip.io name works and
+# Let's Encrypt will issue for it:  1-2-3-4.nip.io  for the IP 1.2.3.4.
+{$COMRADE_HOST} {
+	encode zstd gzip
+
+	handle_path /api/* {
+		reverse_proxy api:8000 {
+			# An agent turn streams NDJSON for as long as the model takes.
+			# Caddy's default flush behaviour buffers, which turns a live
+			# stream into one silent pause and then everything at once —
+			# indistinguishable, from the member's side, from a hang.
+			flush_interval -1
+			transport http {
+				read_timeout 600s
+				write_timeout 600s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
+}

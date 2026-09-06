@@ -1,1 +1,0 @@
-**From phase 2 — test with students**\nGroup room visual layout was not designed (chat, task board, contribution bars, AI presence). Consider showing rough sketches to students in testing and letting them react to arrangement options.

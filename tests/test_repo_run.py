@@ -12,6 +12,8 @@ their effort on what the container denies, not on what the allowlist spells.
 """
 import subprocess
 
+from pathlib import Path
+
 import pytest
 
 from agent.capability import CapabilityError, check_command
@@ -19,6 +21,9 @@ from agent.repo_tools import RUN_COMMANDS, repo_run
 from agent.sandbox import OUTPUT_CHARS, _clip, run_contained
 from pipeline.parsers import SPACE_MARK
 from tests._seed import A1, TEAM_A
+
+# The agent works in a THREAD's tree, not the team's (Task 15).
+THREAD_A = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 
 def _docker_up() -> bool:
@@ -57,9 +62,9 @@ def checkout(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
     )
-    from shared.workspace import repo_checkout
+    from shared.workspace import thread_checkout
 
-    root = repo_checkout(TEAM_A, "acme/app")
+    root = thread_checkout(TEAM_A, THREAD_A, "acme/app")
     root.mkdir(parents=True)
     (root / "app.py").write_text("print('hello')\n")
     (root / ".env").write_text("TEAM_SECRET=1\n")
@@ -71,7 +76,8 @@ def checkout(tmp_path, monkeypatch):
 class Ctx:
     def __init__(self):
         self.state = {
-            "team_id": TEAM_A, "requester_id": A1, "repo_full_name": "acme/app",
+            "team_id": TEAM_A, "requester_id": A1, "thread_id": THREAD_A,
+            "repo_full_name": "acme/app",
         }
 
 
@@ -328,3 +334,28 @@ def test_a_missing_checkout_is_named_not_crashed(tmp_path, monkeypatch):
     )
     result = repo_run("pytest -q", Ctx())
     assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# Who the container runs as
+# ---------------------------------------------------------------------------
+
+def test_the_run_names_the_uid_rather_than_trusting_the_image():
+    """🔴 The `ponytail:` ceiling this closes said it out loud: "add --user
+    before this runs anywhere but a laptop." We are now deploying it.
+
+    Inheriting the image's USER is fine until someone builds against a
+    different base, or a team's Dockerfile-derived image is used, at which
+    point the run is root on a bind mount of their checkout. On Docker Desktop
+    that is invisible; on a Linux host it leaves root-owned files in a tree the
+    worker then cannot clean up, and a root process inside a container sharing
+    a kernel is a bigger blast radius than a numbered user.
+
+    Asserted on the ARGV, because the whole point is that the flag does not
+    depend on which image is configured.
+    """
+    from agent.sandbox import SANDBOX_UID, _docker_run_argv
+
+    argv = _docker_run_argv(["pytest", "-q"], root=Path("/tmp/x"), deps=None)
+    assert "--user" in argv
+    assert argv[argv.index("--user") + 1] == f"{SANDBOX_UID}:{SANDBOX_UID}"

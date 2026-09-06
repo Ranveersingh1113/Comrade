@@ -133,7 +133,8 @@ def test_es256_token_is_accepted(es256_client, monkeypatch):
     # a stub for a function nobody calls — which is how this file came to
     # import a ThreadScope that had been deleted.
     monkeypatch.setattr("server.app.require_membership", lambda *_: None)
-    monkeypatch.setattr("server.app._check_turn_budget", lambda *_: None)
+    monkeypatch.setattr("server.app.reserve_turn", lambda *_: 0)
+    monkeypatch.setattr("server.app.record_reservation", lambda *_: None)
     monkeypatch.setattr("server.app._resolve_thread", lambda *_: THREAD)
     monkeypatch.setattr(
         "server.app.enqueue_turn",

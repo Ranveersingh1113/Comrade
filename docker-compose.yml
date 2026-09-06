@@ -17,10 +17,12 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     env_file: [.env]
-    # The API is the ONLY thing that can reach a preview. Sandbox containers
-    # join `comrade-preview` and publish no host port, so the proxy dials them
-    # by name over this network — and nothing outside it can reach them at all.
-    networks: [default, preview]
+    # The API is the ONLY thing that can reach a preview. Each preview gets its
+    # OWN internal network and the worker attaches this container to that one
+    # network; nothing is shared between previews, so one team's development
+    # server cannot reach another's — or reach this API, which a single shared
+    # network previously allowed.
+    networks: [default]
     ports: ["8000:8000"]
     restart: unless-stopped
     healthcheck:
@@ -83,10 +85,7 @@ services:
 
 networks:
   default:
-  # Declared here rather than left to the worker to create, so the API can join
-  # it at boot instead of failing until the first process is started.
-  # `internal` is the load-bearing flag: no gateway, so a team's development
-  # server has no route to the internet even though it is on a bridge.
-  preview:
-    name: comrade-preview
-    internal: true
+# No shared preview network. Each preview process gets its own `--internal`
+# network created at start and removed at stop (agent/processes.py), with the
+# API attached to that one network only. COMRADE_PREVIEW_PROXY_CONTAINER names
+# this API container so the worker knows what to attach.

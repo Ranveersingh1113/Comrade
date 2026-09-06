@@ -148,6 +148,26 @@ class Settings(BaseSettings):
     # site, so no Comrade cookie or token can travel there. Empty means "not
     # configured", and previews then fail closed with a message that says so
     # rather than silently falling back to the unsafe arrangement.
+    # The container the preview proxy runs in — the API. Each preview gets its
+    # OWN network, and this container is attached to each one so it can reach
+    # them; nothing else is. Empty fails closed: without it there is no way to
+    # give the proxy access without putting every preview on one shared
+    # network, which is what this replaces.
+    # Dependency setup is the ONE phase that needs the network, and it runs a
+    # repository's own build hooks as root. It now runs on an internal network
+    # with no route out, where the only path to a registry is this proxy.
+    #
+    # That is what makes the policy enforced rather than declared: with no
+    # route, a direct IP, a DNS lookup, an IPv6 address, a redirect and a
+    # metadata endpoint all fail for the same reason — there is nowhere to go
+    # except through the proxy, which decides what it will fetch.
+    #
+    # BOTH EMPTY DISABLES DEPENDENCY SETUP. Failing closed is the point: the
+    # previous behaviour was unrestricted egress, so "not configured" must mean
+    # "no setup" and never "setup with the whole internet".
+    comrade_setup_proxy_container: str = ""
+    comrade_setup_proxy_url: str = ""
+    comrade_preview_proxy_container: str = ""
     comrade_preview_domain: str = ""
     # How long a launch grant may be redeemed for. Single-use as well as short:
     # it appears in a URL, and URLs survive in history and screenshots.

@@ -125,6 +125,57 @@ def _kill(name: str) -> None:
         logger.warning("could not kill sandbox container %s", name)
 
 
+def _internal_network(name: str, attach: str) -> str:
+    """An internal Docker network with one container attached, verified.
+
+    `--internal` gives it no gateway, so nothing on it can reach the internet,
+    a host service, another team's sandbox, or a cloud metadata endpoint. The
+    read-back matters: "a network with this name exists" is not "this network
+    has no route out", and only the second one contains anything.
+    """
+    try:
+        _docker_cmd(["docker", "network", "create", "--internal", name])
+    except SandboxError as exc:
+        if "already exists" not in str(exc):
+            raise
+    internal = _docker_cmd(
+        ["docker", "network", "inspect", "-f", "{{.Internal}}", name]
+    ).strip().lower()
+    if internal not in ("true", ""):
+        raise SandboxError(
+            f"{name} exists but is not internal; refusing to run with a route out."
+        )
+    if attach:
+        try:
+            _docker_cmd(["docker", "network", "connect", name, attach])
+        except SandboxError as exc:
+            if "already exists" not in str(exc):
+                raise
+    return name
+
+
+def _drop_network(name: str, attached: str) -> None:
+    for command in (["docker", "network", "disconnect", "-f", name, attached],
+                    ["docker", "network", "rm", name]):
+        if not command[-1]:
+            continue
+        try:
+            _docker_cmd(command)
+        except SandboxError as exc:
+            logger.warning("could not %s %s: %s", command[2], name, exc)
+
+
+def _docker_cmd(argv: list[str]) -> str:
+    """A docker control-plane command. A seam, so network policy can be
+    asserted without a daemon."""
+    proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
+        argv, capture_output=True, text=True, timeout=60, errors="replace",
+    )
+    if proc.returncode != 0:
+        raise SandboxError((proc.stderr or proc.stdout or "").strip()[:400])
+    return proc.stdout
+
+
 def _git_mask(root: Path) -> list[str]:
     """Flags that put the checkout's `.git` out of reach inside the container.
 
@@ -315,13 +366,14 @@ def run_contained(
 #: `*`.
 #:
 #: tests/test_repo_deps.py pins the current behaviour, so whoever enforces this
-#: has to change that test on purpose rather than discovering the difference.
-PLANNED_SETUP_EGRESS_ALLOWLIST = (
-    "pypi.org", "files.pythonhosted.org",          # pip
-    "registry.npmjs.org",                           # npm, when it is supported
-    "proxy.golang.org", "sum.golang.org",           # go modules
-    "crates.io", "static.crates.io",                # cargo
-)
+
+# The planned egress allowlist that used to sit here is GONE. It named a policy
+# nothing read — a constant shaped like a control, enforcing nothing, which is
+# the same false-signal bug as a health check that never queried its database.
+# It is removed now rather than earlier because the plan is explicit: delete it
+# only once its replacement is active. The replacement is the internal network
+# and registry proxy in run_setup below.
+
 
 
 #: An install is slow in a way a command is not — a cold pip resolve over the
@@ -363,10 +415,33 @@ def run_setup(argv: list[str], *, root: Path, deps: str, timeout: int = SETUP_TI
     if not root.exists():
         raise SandboxError("this team's repository is not checked out.")
 
+    # FAIL CLOSED. The previous behaviour was unrestricted egress, so "not
+    # configured" has to mean "no dependency setup" and must never quietly mean
+    # "setup with the whole internet".
+    proxy_url = (settings.comrade_setup_proxy_url or "").strip()
+    proxy_container = (settings.comrade_setup_proxy_container or "").strip()
+    if not proxy_url or not proxy_container:
+        raise SandboxError(
+            "dependency setup is disabled: COMRADE_SETUP_PROXY_URL and"
+            " COMRADE_SETUP_PROXY_CONTAINER are not both set. This phase runs a"
+            " repository's build hooks with network access, and it will not run"
+            " without an enforced registry egress policy."
+        )
+
     name = f"comrade-setup-{uuid.uuid4().hex}"
+    network = _internal_network(f"comrade-setupnet-{uuid.uuid4().hex}", proxy_container)
     docker = [
         "docker", "run", "--rm", "--name", name,
-        "--network", "bridge",
+        # 🔴 NOT `bridge`. This phase runs a repository's own build hooks as
+        # root, and it used to have the whole internet: `pip install` runs
+        # setup.py, `npm install` runs postinstall scripts, and exfiltration is
+        # the failure that leaves no trace in a diff.
+        #
+        # An internal network has no gateway, so a direct IP, a DNS lookup, an
+        # IPv6 address, a redirect and 169.254.169.254 all fail for the same
+        # reason: there is nowhere to go. The registry proxy attached to this
+        # network is the only way out, and it decides what it will fetch.
+        "--network", network,
         "--read-only", "--tmpfs", "/tmp",
         # Only when there is something to mask. Docker has to CREATE the
         # mountpoint for a tmpfs, and it cannot create one inside a bind
@@ -388,20 +463,34 @@ def run_setup(argv: list[str], *, root: Path, deps: str, timeout: int = SETUP_TI
         # pip wants a cache and the rootfs is read-only; /tmp is the tmpfs.
         "-e", "PIP_CACHE_DIR=/tmp/pip",
         "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1",
+        # The proxy is the route, not a suggestion: the network has no other.
+        # A package manager that ignores these simply fails to connect, which
+        # is the correct outcome rather than a silent direct fetch.
+        "-e", f"HTTP_PROXY={settings.comrade_setup_proxy_url}",
+        "-e", f"HTTPS_PROXY={settings.comrade_setup_proxy_url}",
+        "-e", f"http_proxy={settings.comrade_setup_proxy_url}",
+        "-e", f"https_proxy={settings.comrade_setup_proxy_url}",
+        "-e", "NO_PROXY=localhost,127.0.0.1",
         settings.comrade_sandbox_image,
         *argv,
     ]
+    # The network is per-run, so it is per-run garbage. Left behind they
+    # accumulate until Docker runs out of address space, which surfaces as
+    # unrelated containers failing to start.
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
-            docker, capture_output=True, text=True, timeout=timeout,
-            errors="replace",
-        )
-    except subprocess.TimeoutExpired:
-        _kill(name)
-        return {"exit_code": None, "stdout": "", "stderr": "",
-                "timed_out": True}
-    except FileNotFoundError as exc:
-        raise SandboxError("Docker is not available.") from exc
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
+                docker, capture_output=True, text=True, timeout=timeout,
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            _kill(name)
+            return {"exit_code": None, "stdout": "", "stderr": "",
+                    "timed_out": True}
+        except FileNotFoundError as exc:
+            raise SandboxError("Docker is not available.") from exc
+    finally:
+        _drop_network(network, proxy_container)
 
     if "docker:" in proc.stderr:
         raise SandboxError(f"the container could not start: {proc.stderr.strip()[:300]}")

@@ -42,18 +42,26 @@ MIN_PORT, MAX_PORT = 1024, 65535
 DOCKER_TIMEOUT = 120
 LOG_CHARS = 8_000
 
-#: The network preview containers join, and the ONLY way anything reaches them.
+#: One network PER PROCESS, and the only thing attached to it besides the
+#: container is the proxy.
 #:
-#: 🔴 This replaces `--network bridge` plus `-p 127.0.0.1::<port>`, and both
-#: were wrong. Publishing a host port puts an unauthenticated development
-#: server on a port of the host — and in the deployed topology it does not even
-#: work, because the API runs in its own container, so the host's loopback is
-#: not the API's. The proxy could not reach what it was meant to proxy.
+#: 🔴 This replaced two wrong designs in a row. First `--network bridge` plus
+#: `-p 127.0.0.1::<port>`, which published an unauthenticated development
+#: server on a host port and could not work anyway, since the API is in its own
+#: container so the host loopback is not the API's. Then a single shared
+#: `comrade-preview` network — which fixed the port but put EVERY team's
+#: development server on one segment, able to reach each other and able to
+#: reach the API container that was also on it. A preview could call Comrade's
+#: own API from inside the sandbox.
 #:
-#: An `--internal` user-defined network solves both. Nothing outside it can
-#: reach a preview, the containers have no default external route, and the API
-#: joins the same network and dials containers by name through Docker's DNS.
-PREVIEW_NETWORK = "comrade-preview"
+#: A per-process `--internal` network has neither problem: no route out, no
+#: siblings, and the proxy is attached to each network individually.
+_NETWORK_PREFIX = "comrade-prev-"
+
+
+def network_for(process_id: str) -> str:
+    """This process's own network. Derived, so it cannot collide."""
+    return f"{_NETWORK_PREFIX}{uuid.UUID(str(process_id)).hex}"
 
 
 class ProcessError(Exception):
@@ -85,28 +93,64 @@ def _kill(container_id: str) -> None:
             logger.warning("could not %s %s: %s", command[1], container_id[:12], exc)
 
 
-def _ensure_network() -> None:
-    """Create the preview network if it is absent. Idempotent.
+def _ensure_network(process_id: str) -> str:
+    """Create this process's own network, attach the proxy, and CHECK it.
 
-    `--internal` is the load-bearing flag: it gives the network no gateway to
-    the outside, so a preview container cannot reach the internet even though
-    it is on a bridge. Dependencies were installed in a separate phase that had
-    the network; running does not need one.
+    `--internal` is the load-bearing flag: no gateway, so the container has no
+    route to the internet, to host services, or to a metadata endpoint. The
+    inspect afterwards is not ceremony — "a network with this name exists" is
+    not "this network has no route out", and only the second one contains
+    anything.
     """
+    proxy = (settings.comrade_preview_proxy_container or "").strip()
+    if not proxy:
+        raise ProcessError(
+            "previews are not configured: COMRADE_PREVIEW_PROXY_CONTAINER is"
+            " unset, so there is no way to give the proxy access to a private"
+            " preview network."
+        )
+    network = network_for(process_id)
     try:
-        _docker(["docker", "network", "inspect", PREVIEW_NETWORK])
-        return
-    except ProcessError:
-        pass
-    try:
-        _docker(["docker", "network", "create", "--internal", PREVIEW_NETWORK])
+        _docker(["docker", "network", "create", "--internal", network])
     except ProcessError as exc:
-        # Another worker may have created it between the inspect and here.
         if "already exists" not in str(exc):
             raise
 
+    # Read back what was actually created. Fail closed if it is not internal:
+    # a pre-existing network with the right name and the wrong policy would
+    # otherwise silently give a preview the internet.
+    detail = _docker([
+        "docker", "network", "inspect", "-f", "{{.Internal}}", network,
+    ])
+    if detail.strip().lower() not in ("true", ""):
+        raise ProcessError(
+            f"{network} exists but is not internal; refusing to start a preview"
+            " on a network with a route out."
+        )
+    _docker(["docker", "network", "connect", network, proxy])
+    return network
 
-def _run_argv(name: str, root: Path, command: str, port: int | None) -> list[str]:
+
+def _remove_network(process_id: str) -> None:
+    """Give the network back. One per process is one resource per process, and
+    left behind they accumulate until Docker runs out of address space — which
+    surfaces as unrelated containers failing to start."""
+    network = network_for(process_id)
+    proxy = (settings.comrade_preview_proxy_container or "").strip()
+    if proxy:
+        try:
+            _docker(["docker", "network", "disconnect", "-f", network, proxy])
+        except ProcessError as exc:
+            logger.warning("could not detach proxy from %s: %s", network, exc)
+    try:
+        _docker(["docker", "network", "rm", network])
+    except ProcessError as exc:
+        logger.warning("could not remove %s: %s", network, exc)
+
+
+def _run_argv(
+    name: str, root: Path, command: str, port: int | None, network: str,
+) -> list[str]:
     """The container line for a detached process.
 
     `-d` and no `--rm`, and both are deliberate. Detached because a server that
@@ -125,7 +169,7 @@ def _run_argv(name: str, root: Path, command: str, port: int | None) -> list[str
         # The internal preview network, and NO published port. The proxy is on
         # the same network and dials this container by name; nothing else can
         # reach it, and the container has no route out. See PREVIEW_NETWORK.
-        "--network", PREVIEW_NETWORK,
+        "--network", network,
         "--read-only", "--tmpfs", "/tmp",
         *_git_mask(root),
         *_SECURITY_FLAGS,
@@ -173,8 +217,8 @@ def start(
 
     name = f"comrade-proc-{uuid.uuid4().hex}"
     try:
-        _ensure_network()
-        container_id = _docker(_run_argv(name, root, command, port))
+        network = _ensure_network(process_id)
+        container_id = _docker(_run_argv(name, root, command, port, network))
     except ProcessError as exc:
         _finish(team_id, process_id, "failed", detail=str(exc))
         raise
@@ -222,6 +266,7 @@ def stop(team_id: str, process_id: str) -> dict:
         return {"id": process_id, "state": state}
     if container_id:
         _kill(container_id)
+    _remove_network(process_id)
     _finish(team_id, process_id, "stopped")
     return {"id": process_id, "state": "stopped"}
 
@@ -281,6 +326,7 @@ def reap() -> int:
         for process_id, container_id in rows:
             if container_id:
                 _kill(container_id)
+            _remove_network(str(process_id))
             try:
                 conn.execute(
                     "update public.sandbox_processes"

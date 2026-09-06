@@ -42,13 +42,16 @@ def no_docker(monkeypatch):
     """
     calls: list[list[str]] = []
 
+    # Previews need a proxy container to attach to each private network; every
+    # test here is about what happens once that is configured, and the
+    # unconfigured case has its own test below.
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+
     def _fake(argv):
         calls.append(argv)
-        # A host that does not have the preview network yet, which is the
-        # state every host is in the first time. `inspect` failing is how
-        # _ensure_network decides to create it.
         if argv[1:3] == ["network", "inspect"]:
-            raise processes.ProcessError("No such network")
+            # The read-back that proves the network really is internal.
+            return "true"
         return "c" * 64          # a container id, as `docker run -d` prints
 
     monkeypatch.setattr(processes, "_docker", _fake)
@@ -67,9 +70,11 @@ def test_the_row_exists_before_the_container_does(seeded, admin, monkeypatch, tm
     thread_id = _thread(admin)
     seen: list[str | None] = []
 
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+
     def _fake(argv):
         if argv[1] == "network":
-            return ""            # setting the network up is not the run
+            return "true"        # setting the network up is not the run
         seen.append(admin.execute(
             "select state from public.sandbox_processes where thread_id=%s",
             (thread_id,),
@@ -178,7 +183,7 @@ def test_nothing_is_ever_published_to_the_host(seeded, admin, no_docker, tmp_pat
 
     assert "-p" not in argv, argv
     assert not [a for a in argv if a.startswith("127.0.0.1:")]
-    assert argv[argv.index("--network") + 1] == processes.PREVIEW_NETWORK
+    assert argv[argv.index("--network") + 1].startswith("comrade-prev-")
 
 
 def test_the_preview_network_has_no_route_out(seeded, admin, no_docker, tmp_path):
@@ -290,3 +295,77 @@ def test_a_live_process_is_left_alone(seeded, admin, no_docker, monkeypatch, tmp
     thread_id = _thread(admin)
     processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
     assert processes.reap() == 0
+
+
+# ---------------------------------------------------------------------------
+# One network per process
+# ---------------------------------------------------------------------------
+
+def test_each_process_gets_its_own_network(seeded, admin, no_docker, tmp_path, monkeypatch):
+    """🔴 A single shared `comrade-preview` network put every team's
+    development server on one segment — able to reach each other, and able to
+    reach the API container that was also on it. A preview could call Comrade's
+    own API from inside the sandbox.
+
+    One network per process, and only the proxy is attached to each."""
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+    thread_id = _thread(admin)
+    one = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    two = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3001)
+
+    nets = {a[a.index("--network") + 1] for a in no_docker if "run" in a[:2]}
+    assert len(nets) == 2, nets
+    assert processes.network_for(one["id"]) != processes.network_for(two["id"])
+
+
+def test_the_proxy_is_attached_to_each_network_and_nothing_else_is(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    connects = [a for a in no_docker if a[1:3] == ["network", "connect"]]
+    assert len(connects) == 1, no_docker
+    assert connects[0][-2:] == [processes.network_for(proc["id"]), "comrade-api"]
+
+
+def test_the_network_is_verified_internal_not_merely_named(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    """"The network exists" is not "the network has no route out". A name can
+    be created by anything; the flag is what contains the container."""
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+    thread_id = _thread(admin)
+    processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    created = [a for a in no_docker if a[1:3] == ["network", "create"]]
+    assert created and "--internal" in created[0]
+    assert [a for a in no_docker if a[1:3] == ["network", "inspect"]], (
+        "the created network must be read back, not assumed"
+    )
+
+
+def test_a_preview_without_a_configured_proxy_container_fails_closed(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    """Rather than falling back to a shared network so the proxy can reach it,
+    which is the arrangement being removed."""
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "")
+    thread_id = _thread(admin)
+    with pytest.raises(processes.ProcessError):
+        processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+
+def test_stopping_reclaims_the_network(seeded, admin, no_docker, tmp_path, monkeypatch):
+    """A network per process is a resource per process. Left behind they
+    accumulate until Docker runs out of address space, which surfaces as
+    unrelated containers failing to start."""
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    no_docker.clear()
+    processes.stop(TEAM_A, proc["id"])
+
+    removed = [a for a in no_docker if a[1:3] == ["network", "rm"]]
+    assert removed and removed[0][-1] == processes.network_for(proc["id"])

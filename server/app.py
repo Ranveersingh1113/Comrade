@@ -43,6 +43,7 @@ from shared.consent import (
     reject_consent, revoke_permission_grant,
 )
 from shared.db import Role, connect, team_session, user_session
+from shared.agent_runs import get_thread_runs
 from shared.usage import (
     BudgetExceeded, record_reservation, release_turn, reserve_turn,
 )
@@ -327,6 +328,14 @@ async def agent_run_stream(run_id: str, team_id: str, user_id: CurrentUserId):
     require_membership(user_id, team_id)
     await run_in_threadpool(_visible_run, team_id, user_id, run_id)
     return StreamingResponse(_run_frames(team_id, run_id), media_type="application/x-ndjson")
+
+
+@app.get("/threads/{thread_id}/agent-runs")
+def thread_agent_runs(thread_id: str, team_id: str, user_id: CurrentUserId) -> list[dict]:
+    """Return activity only after RLS-equivalent thread access is checked."""
+    require_membership(user_id, team_id)
+    resolved = _resolve_thread(user_id, team_id, thread_id)
+    return get_thread_runs(team_id, resolved)
 
 
 # ---------- consent ----------

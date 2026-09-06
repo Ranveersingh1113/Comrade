@@ -326,8 +326,12 @@ def _sync_failures(team_id: str) -> dict[str, str]:
         rows = conn.execute(
             "select distinct on (payload->>'repo_full_name')"
             "       payload->>'repo_full_name', last_error"
-            "  from public.jobs"
-            " where team_id = %s and job_type = 'sync_repo' and status = 'failed'"
+            "  from public.jobs j"
+            "  left join public.github_repos r"
+            "    on r.team_id = j.team_id"
+            "   and r.repo_full_name = j.payload->>'repo_full_name'"
+            " where j.team_id = %s and job_type = 'sync_repo' and status = 'failed'"
+            "   and (r.last_cloned_at is null or j.finished_at > r.last_cloned_at)"
             " order by payload->>'repo_full_name', finished_at desc",
             (team_id,),
         ).fetchall()

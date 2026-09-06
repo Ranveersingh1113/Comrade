@@ -156,6 +156,17 @@ export interface StreamFrame {
   detail?: string;
   user_message_id?: string;
   reply_message_id?: string | null;
+  seq?: number;
+  args?: Record<string, unknown>;
+  response?: unknown;
+}
+
+export type AgentStep = Pick<StreamFrame, 'seq' | 'type' | 'tool' | 'args' | 'response'>;
+
+export interface AgentRun {
+  id: string;
+  status?: string;
+  steps: AgentStep[];
 }
 
 /**
@@ -289,6 +300,11 @@ async function getJson<T>(path: string): Promise<T> {
     throw new AgentApiError(res.status, detail);
   }
   return (await res.json()) as T;
+}
+
+/** Durable activity is server-read: direct browser access to agent_steps is forbidden. */
+export function getThreadRuns(teamId: string, threadId: string) {
+  return getJson<AgentRun[]>(`/threads/${encodeURIComponent(threadId)}/agent-runs?team_id=${encodeURIComponent(teamId)}`);
 }
 
 export interface InstallLink {

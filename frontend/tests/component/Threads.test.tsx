@@ -29,25 +29,16 @@ beforeEach(() => {
 });
 afterEach(() => { localStorage.clear(); server.resetHandlers(); });
 
-test('creates a selected-members thread with the selected participant', async () => {
-  // A regression to `visibility: team` or omitting participant rows exposes a
-  // restricted conversation to everyone; both writes are observable browser
-  // contracts and RLS remains the enforcing boundary.
+test('creates and opens a public thread with one click', async () => {
   const user = userEvent.setup();
   renderInApp(<Threads />);
   await user.click(await screen.findByRole('button', { name: 'New thread' }));
-  await user.type(screen.getByLabelText('Thread title'), 'Release prep');
-  await user.click(screen.getByLabelText('Restricted to selected members'));
-  await user.click(screen.getByLabelText('Marcus Lee'));
-  await user.click(screen.getByRole('button', { name: 'Create thread' }));
 
   await waitFor(() => expect(supaState.inserts[0]).toMatchObject({ table: 'threads' }));
   expect(supaState.inserts[0]?.values).toMatchObject({
-    team_id: 'team-1', title: 'Release prep', visibility: 'restricted', kind: 'discussion', created_by: 'u1',
+    team_id: 'team-1', title: 'New thread', visibility: 'team', kind: 'discussion', created_by: 'u1',
   });
-  expect(supaState.inserts[1]).toMatchObject({ table: 'thread_participants' });
-  expect(supaState.inserts[1]?.values).toMatchObject({ team_id: 'team-1', user_id: 'u1' });
-  expect(supaState.inserts[2]?.values).toMatchObject({ team_id: 'team-1', user_id: 'u2' });
+  expect(screen.queryByLabelText('Thread title')).toBeNull();
 });
 
 test('agent mode sends the canonical thread id', async () => {

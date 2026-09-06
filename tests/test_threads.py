@@ -85,6 +85,19 @@ def test_member_can_create_restricted_thread_and_add_themselves(seeded):
         ).fetchone() == (uuid.UUID(thread_id),)
 
 
+def test_first_agent_message_titles_a_new_public_thread(seeded, admin):
+    thread_id = _thread(admin, TEAM_A, title="New thread")
+    with as_user(A1, commit=True) as conn:
+        conn.execute(
+            "select * from public.enqueue_agent_turn(%s,%s,%s)",
+            (TEAM_A, thread_id, "  Review   the release checklist.  "),
+        ).fetchone()
+    title = admin.execute(
+        "select title from public.threads where id=%s", (thread_id,)
+    ).fetchone()[0]
+    assert title == "Review the release checklist."
+
+
 def test_removing_participant_revokes_thread_message_access(seeded, admin):
     thread_id = _thread(admin, TEAM_A, visibility="restricted")
     for user_id in (A1, A2):

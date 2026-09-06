@@ -209,3 +209,14 @@ def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
         "status": row[6],
         "finished_at": row[7].isoformat() if row[7] else None,
     }
+
+
+def get_thread_runs(team_id: str, thread_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Durable activity for one thread, newest first by run, ordered within it."""
+    with team_session(Role.AGENT, team_id) as conn:
+        ids = conn.execute(
+            "select id from public.agent_runs where team_id=%s and thread_id=%s"
+            " order by created_at desc limit %s",
+            (team_id, thread_id, limit),
+        ).fetchall()
+    return [run for (run_id,) in ids if (run := get_run(team_id, str(run_id))) is not None]

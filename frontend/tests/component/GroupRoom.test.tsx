@@ -34,6 +34,7 @@ afterEach(() => server.resetHandlers());
 beforeEach(() => {
   resetSupa();
   resetTeam();
+  server.use(http.get(`${BASE}/threads/thread-1/agent-runs`, () => HttpResponse.json([])));
 });
 afterAll(() => server.close());
 
@@ -133,6 +134,21 @@ describe('a turn that cannot run', () => {
     // Never the raw identifier — that was PrivateThread's old behaviour and
     // there is no reason to reproduce it here.
     expect(screen.queryByText(/messages_search/)).not.toBeInTheDocument();
+    release();
+  });
+
+  test('an agent action expands to its saved arguments and diff', async () => {
+    const { body, release } = heldStream([
+      { type: 'run', run_id: 'r1' },
+      {
+        type: 'tool_call', seq: 0, tool: 'repo_open_pr',
+        args: { patch: 'diff --git a/readme.md b/readme.md\n+--- a/readme.md\n++++ b/readme.md\n+@@\n+-old\n++new' },
+      },
+    ]);
+    await askComrade(body);
+    const expand = await screen.findByRole('button', { name: /details for using repo_open_pr/i });
+    await userEvent.click(expand);
+    expect(screen.getAllByText('readme.md', { exact: false }).length).toBeGreaterThan(0);
     release();
   });
 });

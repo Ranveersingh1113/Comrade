@@ -47,8 +47,8 @@ export function taskCell(status: TaskStatus) {
   return {
     proposed: { bg: 'transparent', border: 'rgba(35,33,48,0.35)', style: 'dashed' },
     confirmed: { bg: 'transparent', border: 'rgba(35,33,48,0.5)', style: 'solid' },
-    in_progress: { bg: '#F0A28A', border: '#E4795B', style: 'solid' },
-    done: { bg: '#D2593B', border: '#D2593B', style: 'solid' },
+    in_progress: { bg: '#efad9a', border: '#c76863', style: 'solid' },
+    done: { bg: '#c76863', border: '#c76863', style: 'solid' },
   }[status];
 }
 
@@ -56,8 +56,8 @@ export function taskPill(status: TaskStatus) {
   return {
     proposed: { label: 'PROPOSED', color: '#A9A5B0', border: 'rgba(169,165,176,0.5)' },
     confirmed: { label: 'CONFIRMED', color: '#6E5F87', border: 'rgba(110,95,135,0.5)' },
-    in_progress: { label: 'IN PROGRESS', color: '#568BB5', border: 'rgba(86,139,181,0.5)' },
-    done: { label: 'DONE', color: '#346F9F', border: 'rgba(52,111,159,0.5)' },
+    in_progress: { label: 'IN PROGRESS', color: '#9c5b68', border: 'rgba(156,91,104,0.5)' },
+    done: { label: 'DONE', color: '#765579', border: 'rgba(118,85,121,0.5)' },
   }[status];
 }
 

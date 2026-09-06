@@ -84,8 +84,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         width: 250,
         maxWidth: '85vw',
         flex: 'none',
-        background: 'var(--ink)',
-        color: 'var(--paper)',
+         background: 'var(--surface)',
+         color: 'var(--ink)',
         display: 'flex',
         flexDirection: 'column',
         padding: '22px 14px 16px',
@@ -132,11 +132,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           margin: '16px 6px 6px',
           padding: 12,
           border: '1px solid rgba(241,239,234,0.12)',
-          background: isActive ? 'rgba(52,111,159,0.14)' : 'rgba(52,111,159,0.07)',
+           background: isActive ? 'rgba(118,85,121,0.14)' : 'rgba(118,85,121,0.06)',
           borderRadius: 12,
           cursor: 'pointer',
           textAlign: 'left',
-          color: 'var(--paper)',
+           color: 'var(--ink)',
           textDecoration: 'none',
         })}
       >
@@ -147,7 +147,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             style={{
               display: 'block',
               fontSize: 10.5,
-              color: '#568BB5',
+               color: 'var(--terracotta)',
               marginTop: 2,
               animation: 'tickerPulse 3.4s ease-in-out infinite',
             }}
@@ -165,8 +165,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             style={({ isActive }) => ({
               ...navBase,
               fontWeight: isActive ? 600 : 400,
-              color: isActive ? 'var(--paper)' : '#A6A1B3',
-              background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+               color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+               background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
             })}
           >
             <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>{item.icon}</span>
@@ -184,7 +184,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           aria-label="New thread"
           disabled={creatingThread}
           onClick={() => void createThread()}
-          style={{ border: 0, borderRadius: 5, background: 'rgba(241,239,234,0.12)', color: 'var(--paper)', cursor: 'pointer', padding: '2px 7px', fontSize: 15 }}
+           style={{ border: 0, borderRadius: 5, background: 'rgba(118,85,121,0.12)', color: 'var(--ink)', cursor: 'pointer', padding: '2px 7px', fontSize: 15 }}
         >
           +
         </button>
@@ -197,8 +197,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             title={thread.visibility === 'restricted' ? 'Selected members' : 'Team-visible'}
             style={({ isActive }) => ({
               ...navBase,
-              color: isActive ? 'var(--paper)' : '#A6A1B3',
-              background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+               color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+               background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
               overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
             })}
           >
@@ -281,7 +281,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             gap: 6,
             fontSize: 11,
             lineHeight: 1.45,
-            color: '#908B9E',
+             color: 'var(--text-soft)',
           }}
         >
           {lastCompile && (
@@ -303,8 +303,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             ...navBase,
             marginTop: 10,
             fontWeight: isActive ? 600 : 400,
-            color: isActive ? 'var(--paper)' : '#A6A1B3',
-            background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+             color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+             background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
           })}
         >
            <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>04</span> Project setup
@@ -316,15 +316,15 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           style={({ isActive }) => ({
             ...navBase,
             fontWeight: isActive ? 600 : 400,
-            color: isActive ? 'var(--paper)' : '#A6A1B3',
-            background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+             color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+             background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
           })}
         >
            <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>05</span> Membership
         </NavLink>
         <button
           onClick={() => signOut()}
-          style={{ ...navBase, background: 'transparent', color: '#A6A1B3', marginTop: 2 }}
+           style={{ ...navBase, background: 'transparent', color: 'var(--text-soft)', marginTop: 2 }}
         >
            <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>↗</span> Sign out
         </button>

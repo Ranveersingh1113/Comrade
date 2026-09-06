@@ -250,8 +250,8 @@ export function Tasks() {
                                   onClick={() => void advance(t)}
                                   style={{
                                     marginLeft: 'auto',
-                                    border: '1px solid rgba(52,111,159,0.5)',
-                                    background: '#fff',
+                                     border: '1px solid rgba(199,104,99,0.5)',
+                                     background: 'var(--card)',
                                     color: 'var(--terracotta)',
                                     fontSize: 10.5,
                                     fontWeight: 600,

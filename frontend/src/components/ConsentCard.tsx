@@ -91,7 +91,7 @@ export function ConsentCard({
     ? { text: canResolve ? 'AWAITING YOUR APPROVAL' : 'AWAITING REQUESTER APPROVAL', color: 'var(--peach-pale)' }
     : executed ? { text: 'COMPLETED', color: 'var(--peach)' }
       : item.status === 'approved' || item.status === 'edited' ? { text: 'IN PROGRESS', color: 'var(--lavender)' }
-        : { text: 'CLOSED', color: '#908B9E' };
+       : { text: 'CLOSED', color: 'var(--muted)' };
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);

@@ -41,6 +41,7 @@ from pathlib import Path
 
 from pipeline.parsers import spotlight
 from shared.config import settings
+from shared.workspace import workspaces_root
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,15 @@ MOUNT = "/workspace"
 #: Where a checkout's installed dependencies are mounted. A Docker volume, not
 #: a directory in the working tree — see shared.workspace.deps_volume.
 DEPS_MOUNT = "/deps"
+
+#: The uid the team's code runs as. Matches `useradd --uid 10001 runner` in
+#: docker/sandbox.Dockerfile, and is passed EXPLICITLY on every run rather than
+#: inherited from the image: a different base image, or a team-supplied one,
+#: would otherwise put a root process on a bind mount of their checkout. On
+#: Docker Desktop that is invisible, which is exactly why it survived to here.
+#: On a Linux host — every host this is about to be deployed to — it leaves
+#: root-owned files the worker cannot clean up.
+SANDBOX_UID = 10001
 VENV = f"{DEPS_MOUNT}/venv"
 
 #: The properties that make this a container rather than a subprocess, in ONE
@@ -115,6 +125,77 @@ def _kill(name: str) -> None:
         logger.warning("could not kill sandbox container %s", name)
 
 
+def _git_mask(root: Path) -> list[str]:
+    """Flags that put the checkout's `.git` out of reach inside the container.
+
+    🔴 Two shapes, and only one of them used to exist. In a normal clone `.git`
+    is a DIRECTORY and an empty tmpfs over it is the whole answer. In a git
+    WORKTREE — which is what every thread now works in (Task 15) — `.git` is a
+    FILE holding `gitdir: <path on our disk>`, and Docker cannot mount a tmpfs
+    over a file. The container refused to start at all:
+
+        error mounting "tmpfs" to rootfs at "/workspace/.git"
+
+    So a file is masked by an empty file. The guarantee is the same one the
+    tmpfs gave: repo_read refuses `.git`, and a shell in the same tree must not
+    quietly reopen what that closed. It also keeps a host path out of the
+    container — the agent should never learn where on our disk a team's code
+    lives, which is why MOUNT exists at all.
+    """
+    target = root / ".git"
+    if target.is_dir():
+        # An empty tmpfs. Also means a `rm -rf` in a team's build script
+        # destroys a scratch mount rather than the checkout every later turn
+        # depends on.
+        return ["--tmpfs", f"{MOUNT}/.git"]
+    if target.is_file():
+        blank = workspaces_root() / ".git-mask"
+        if not blank.exists():
+            blank.touch()
+        return ["-v", f"{blank}:{MOUNT}/.git:ro"]
+    return []
+
+
+def _docker_run_argv(
+    argv: list[str], *, root: Path, deps: str | None,
+    network: bool = False, name: str = "comrade-run",
+) -> list[str]:
+    """The full `docker run` command line for one contained run.
+
+    Its own function so the containment can be asserted without a Docker
+    daemon: every guarantee this module claims is a flag in this list, and a
+    test that has to boot a container to check one is a test nobody runs.
+    """
+    return [
+        "docker", "run", "--rm", "--name", name,
+        "--network", "bridge" if network else "none",
+        "--read-only", "--tmpfs", "/tmp",
+        # An empty tmpfs OVER the checkout's .git, which does two jobs. It
+        # keeps the promise the file tools already make — repo_read refuses
+        # .git, and a shell in the same tree must not quietly re-open what
+        # that closed. And it puts the real .git out of reach of the team's
+        # own test suite, so a build script with a `rm -rf` in it destroys a
+        # tmpfs rather than the checkout every later turn depends on.
+        *_git_mask(root),
+        *_SECURITY_FLAGS,
+        # Named, not inherited. See SANDBOX_UID — the image sets the same
+        # user, and saying it here is what stops that being load-bearing.
+        "--user", f"{SANDBOX_UID}:{SANDBOX_UID}",
+        "-v", f"{root}:{MOUNT}",
+        "-w", MOUNT,
+        # READ-ONLY. The run phase uses what setup installed and never adds to
+        # it: a test suite that can write to site-packages can change what the
+        # next run imports, which turns one compromised dependency into a
+        # persistent one. Installing is a separate phase with the network, and
+        # it is the only thing that may write here.
+        *(["-v", f"{deps}:{DEPS_MOUNT}:ro",
+           "-e", f"PATH={VENV}/bin:/usr/local/bin:/usr/bin:/bin",
+           "-e", f"VIRTUAL_ENV={VENV}"] if deps else []),
+        settings.comrade_sandbox_image,
+        *argv,
+    ]
+
+
 def run_contained(
     argv: list[str],
     *,
@@ -150,36 +231,9 @@ def run_contained(
     # trigger on purpose by making its tests hang.
     name = f"comrade-run-{uuid.uuid4().hex}"
 
-    docker = [
-        "docker", "run", "--rm", "--name", name,
-        "--network", "bridge" if network else "none",
-        "--read-only", "--tmpfs", "/tmp",
-        # An empty tmpfs OVER the checkout's .git, which does two jobs. It
-        # keeps the promise the file tools already make — repo_read refuses
-        # .git, and a shell in the same tree must not quietly re-open what
-        # that closed. And it puts the real .git out of reach of the team's
-        # own test suite, so a build script with a `rm -rf` in it destroys a
-        # tmpfs rather than the checkout every later turn depends on.
-        "--tmpfs", f"{MOUNT}/.git",
-        *_SECURITY_FLAGS,
-        # ponytail: runs as the image's user, root in most images. Harmless on
-        # Docker Desktop, where the bind mount is uid-agnostic. On a Linux host
-        # this leaves root-owned files in the checkout, so add
-        # --user <uid>:<gid> there before this runs anywhere but a laptop.
-        "-v", f"{root}:{MOUNT}",
-        "-w", MOUNT,
-        # READ-ONLY. The run phase uses what setup installed and never adds to
-        # it: a test suite that can write to site-packages can change what the
-        # next run imports, which turns one compromised dependency into a
-        # persistent one. Installing is a separate phase with the network, and
-        # it is the only thing that may write here.
-        *(["-v", f"{deps}:{DEPS_MOUNT}:ro",
-           "-e", f"PATH={VENV}/bin:/usr/local/bin:/usr/bin:/bin",
-           "-e", f"VIRTUAL_ENV={VENV}"] if deps else []),
-        settings.comrade_sandbox_image,
-        *argv,
-    ]
-
+    docker = _docker_run_argv(
+        argv, root=root, deps=deps, network=network, name=name,
+    )
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
             docker, capture_output=True, text=True, timeout=timeout,
@@ -315,7 +369,7 @@ def run_setup(argv: list[str], *, root: Path, deps: str, timeout: int = SETUP_TI
         # container on any checkout without a .git, which is every test
         # fixture and any tree restored from an archive. The read-only mount
         # is what actually protects .git here; this hides it as well.
-        *(["--tmpfs", f"{MOUNT}/.git"] if (root / ".git").exists() else []),
+        *_git_mask(root),
         *_SECURITY_FLAGS,
         # root: a fresh volume belongs to root and the image's user is 10001.
         "--user", "0:0",

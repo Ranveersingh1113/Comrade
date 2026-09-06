@@ -1,0 +1,49 @@
+name: Deploy pilot
+
+on:
+  push:
+    branches: [claude/multiplayer-harness]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: arn:aws:iam::276833795981:role/ComradePilotGithubDeploy
+          aws-region: eu-north-1
+      - name: Deploy exact commit through SSM
+        env:
+          INSTANCE_ID: i-0e5e97d751ffbd262
+        run: |
+          command_id=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Deploy Comrade $GITHUB_SHA" \
+            --parameters "commands=[\"cd /opt/comrade && sh scripts/deploy_host.sh $GITHUB_SHA\"]" \
+            --query 'Command.CommandId' --output text)
+          # SSM's built-in waiter gives a Docker build only ~100 seconds.
+          # The host build routinely exceeds that, so wait for its real terminal state.
+          for _ in $(seq 1 180); do
+            status=$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || true)
+            case "$status" in
+              Success)
+                aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+                  --query '[Status,StandardOutputContent,StandardErrorContent]' --output json
+                exit 0
+                ;;
+              Failed|Cancelled|TimedOut|Cancelling)
+                aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" \
+                  --query '[Status,StandardOutputContent,StandardErrorContent]' --output json
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+          echo "SSM deployment timed out after 15 minutes" >&2
+          exit 1

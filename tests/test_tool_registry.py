@@ -71,3 +71,15 @@ def test_the_nudge_is_declared_as_an_outbound_write():
     spec = spec_for("member_send_nudge")
     assert spec.surface == "outbound"
     assert spec.writes is True
+
+
+def test_plan_update_is_a_thread_scoped_write_with_no_human_in_the_loop():
+    """A plan is working state: it changes a row nobody outside the thread can
+    read and produces no external effect. Requiring approval for it would put a
+    card in front of a member for the agent's own bookkeeping — the fatigue §5
+    exists to avoid — while buying no boundary RLS does not already hold.
+    """
+    from agent.agent import root_agent
+
+    assert spec_for("plan_update") == ToolSpec("db", writes=True, needs_human=False)
+    assert "plan_update" in {t.__name__ for t in root_agent.tools}

@@ -21,6 +21,7 @@ class Role(str, Enum):
     AGENT = "agent"          # reads + proposes + private nudges
     EXECUTOR = "executor"    # performs approved consent actions only
     PIPELINE = "pipeline"    # document parser + memory compiler
+    CONTROL = "control"      # cross-team queue and sweep metadata only
 
 
 _URLS: dict[Role, str] = {
@@ -28,6 +29,7 @@ _URLS: dict[Role, str] = {
     Role.AGENT: settings.comrade_agent_db_url,
     Role.EXECUTOR: settings.comrade_executor_db_url,
     Role.PIPELINE: settings.comrade_pipeline_db_url,
+    Role.CONTROL: settings.comrade_control_db_url,
 }
 
 # how each worker is recorded in change_log (via app.actor_kind GUC)
@@ -35,6 +37,7 @@ _ACTOR_KIND: dict[Role, str] = {
     Role.AGENT: "ai",
     Role.EXECUTOR: "ai",     # executes the AI's approved action
     Role.PIPELINE: "compiler",
+    Role.CONTROL: "system",
 }
 
 
@@ -112,7 +115,10 @@ atexit.register(close_pools)
 @contextmanager
 def connect(role: Role) -> Iterator[psycopg.Connection]:
     """Borrow a connection as the given role. Caller manages transactions."""
-    with _pool(_URLS[role]).connection() as conn:
+    url = _URLS[role]
+    if not url:
+        raise RuntimeError(f"COMRADE_{role.value.upper()}_DB_URL is not set")
+    with _pool(url).connection() as conn:
         yield conn
 
 

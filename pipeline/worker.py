@@ -12,6 +12,8 @@ Run it: `uv run python -m pipeline.worker` — drains the queue, then sweeps
 chat->memory (ambient capture), then sleeps and repeats.
 """
 import logging
+import signal
+import threading
 import time
 from typing import Callable
 
@@ -48,7 +50,7 @@ def register(job_type: str, handler: Handler) -> None:
 
 def _finish(job_id, status: str, error: str | None = None) -> None:
     terminal = status in ("done", "failed")
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status=%s, last_error=%s,"
@@ -60,7 +62,7 @@ def _finish(job_id, status: str, error: str | None = None) -> None:
 
 def _fail_expired_leases() -> None:
     """Terminally fail work abandoned after its final lease expires."""
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status='failed', finished_at=now(),"
@@ -76,7 +78,7 @@ def run_once(handlers: dict[str, Handler] | None = None) -> bool:
     """Claim and process one pending job. Returns False if the queue was empty."""
     handlers = _HANDLERS if handlers is None else handlers
     _fail_expired_leases()
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         job = conn.execute(_CLAIM_SQL).fetchone()
     if job is None:
@@ -144,6 +146,29 @@ def tick() -> int:
     return processed
 
 
+#: Set by SIGTERM. A container stop is not a crash, and the difference is worth
+#: keeping: an abandoned run recovers only when its lease expires, which is
+#: minutes of a member watching nothing happen. Draining costs one more item's
+#: worth of shutdown and skips that entirely.
+_stopping = threading.Event()
+
+
+def _drain_on_signal() -> None:
+    """Finish the item in hand, then stop. Second signal is not caught, so an
+    operator who means it can still kill the process outright."""
+    def _handle(signum, _frame):
+        logger.info("signal %s received: draining, will stop after this item", signum)
+        _stopping.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform without it. A worker that
+            # cannot install the handler still works; it just stops abruptly.
+            logger.warning("could not install a %s handler", sig)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # Handlers register at import time, so this list IS the wiring — a module
@@ -162,10 +187,12 @@ def main() -> None:
     import pipeline.repo_env  # noqa: F401
     import pipeline.repo_sync  # noqa: F401
 
+    _drain_on_signal()
     logger.info("worker up: polling every %.0fs", POLL_SECONDS)
-    while True:
+    while not _stopping.is_set():
         if tick() == 0:
-            time.sleep(POLL_SECONDS)
+            _stopping.wait(POLL_SECONDS)
+    logger.info("worker drained")
 
 
 if __name__ == "__main__":

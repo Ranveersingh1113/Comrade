@@ -78,13 +78,16 @@ def test_worker_persists_reply_after_runtime_finishes_claim(seeded, monkeypatch)
 def test_module_entry_point_uses_the_canonical_worker_module():
     """A fresh ``-m`` interpreter must run the same module mocks import."""
     src = (
-        "import runpy, time\n"
+        "import runpy\n"
         "import agent.worker as canonical\n"
         "fired=[]\n"
         "canonical.run_once=lambda *_: (fired.append(True), False)[1]\n"
-        "time.sleep=lambda *_: (_ for _ in ()).throw(SystemExit(0))\n"
-        "try: runpy.run_module('agent.worker', run_name='__main__')\n"
-        "except SystemExit: pass\n"
+        "class Stop:\n"
+        " def __init__(self): self.calls=0\n"
+        " def is_set(self): self.calls+=1; return self.calls > 1\n"
+        " def wait(self, *_): return True\n"
+        "canonical._stopping=Stop()\n"
+        "runpy.run_module('agent.worker', run_name='__main__')\n"
         "print('FIRED' if fired else 'SPLIT')\n"
     )
     proc = subprocess.run(

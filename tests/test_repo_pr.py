@@ -33,6 +33,8 @@ from shared.workspace import repo_checkout
 from tests._seed import TEAM_A
 
 REPO = "acme/app"
+# A proposal is captured from the asking THREAD's tree (Task 15).
+THREAD_A = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 
 @pytest.fixture
@@ -79,9 +81,13 @@ def checkout(tmp_path, monkeypatch, origin):
     )
     monkeypatch.setattr("shared.config.settings.github_pat", "unused-locally")
     monkeypatch.setattr("pipeline.repo_sync._url_for", lambda _n: str(origin))
-    from pipeline.repo_sync import sync_repo
+    from pipeline.repo_sync import ensure_thread_checkout, sync_repo
 
-    return sync_repo(TEAM_A, REPO)
+    sync_repo(TEAM_A, REPO)
+    # The tree the agent edits and a proposal is captured from. The team's own
+    # checkout stays the mirror an approved patch is pushed from, which is why
+    # open_pull_request still resolves that one for itself.
+    return ensure_thread_checkout(TEAM_A, THREAD_A, REPO)
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +96,7 @@ def checkout(tmp_path, monkeypatch, origin):
 
 def test_it_captures_what_the_agent_changed(checkout):
     (checkout / "app.py").write_text("print('goodbye')\n")
-    patch = capture_patch(TEAM_A, REPO)
+    patch = capture_patch(TEAM_A, REPO, THREAD_A)
     assert "goodbye" in patch and "hello" in patch
 
 
@@ -99,12 +105,12 @@ def test_it_captures_a_new_file(checkout):
     `git diff` — and "the agent created a file and the PR did not contain it"
     is the kind of silent omission that makes a review meaningless."""
     (checkout / "brand_new.py").write_text("x = 1\n")
-    assert "brand_new.py" in capture_patch(TEAM_A, REPO)
+    assert "brand_new.py" in capture_patch(TEAM_A, REPO, THREAD_A)
 
 
 def test_proposing_nothing_is_refused(checkout):
     with pytest.raises(PullRequestError, match="nothing has changed"):
-        capture_patch(TEAM_A, REPO)
+        capture_patch(TEAM_A, REPO, THREAD_A)
 
 
 def test_an_enormous_change_is_refused(checkout):
@@ -112,15 +118,15 @@ def test_an_enormous_change_is_refused(checkout):
     would also be an unpleasant jsonb column is the least of the reasons."""
     (checkout / "huge.py").write_text("x = 1\n" * (PATCH_MAX_CHARS // 4))
     with pytest.raises(PullRequestError, match="smaller change"):
-        capture_patch(TEAM_A, REPO)
+        capture_patch(TEAM_A, REPO, THREAD_A)
 
 
 def test_an_unchecked_out_repo_says_so(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "shared.config.settings.comrade_workspaces_root", str(tmp_path / "ws")
     )
-    with pytest.raises(PullRequestError, match="not checked out"):
-        capture_patch(TEAM_A, REPO)
+    with pytest.raises(PullRequestError, match="no working copy"):
+        capture_patch(TEAM_A, REPO, THREAD_A)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +149,7 @@ def no_github(monkeypatch):
 
 def test_it_pushes_a_branch_and_opens_a_pr(checkout, origin, no_github):
     (checkout / "app.py").write_text("print('goodbye')\n")
-    patch = capture_patch(TEAM_A, REPO)
+    patch = capture_patch(TEAM_A, REPO, THREAD_A)
 
     result = open_pull_request(
         TEAM_A, REPO, "Say goodbye", "because hello was wrong", patch, "abc123def456"
@@ -158,7 +164,7 @@ def test_it_never_pushes_to_the_default_branch(checkout, origin, no_github):
     """The constraint Copilot's coding agent enforces, and the reason review
     stays mandatory: the agent has no route to main at all."""
     (checkout / "app.py").write_text("print('goodbye')\n")
-    patch = capture_patch(TEAM_A, REPO)
+    patch = capture_patch(TEAM_A, REPO, THREAD_A)
     open_pull_request(TEAM_A, REPO, "t", "b", patch, "abc123def456")
 
     main = _git(origin, "show", "main:app.py")
@@ -185,7 +191,7 @@ def test_executing_twice_converges_on_one_branch(checkout, origin, no_github):
     hash, same branch, same result.
     """
     (checkout / "app.py").write_text("print('goodbye')\n")
-    patch = capture_patch(TEAM_A, REPO)
+    patch = capture_patch(TEAM_A, REPO, THREAD_A)
 
     first = open_pull_request(TEAM_A, REPO, "t", "b", patch, "abc123def456")
     second = open_pull_request(TEAM_A, REPO, "t", "b", patch, "abc123def456")
@@ -205,7 +211,7 @@ def test_the_apply_starts_from_the_base_not_the_current_tree(
     along inside an approved pull request.
     """
     (checkout / "app.py").write_text("print('goodbye')\n")
-    patch = capture_patch(TEAM_A, REPO)
+    patch = capture_patch(TEAM_A, REPO, THREAD_A)
 
     # An unrelated, unreviewed edit made after the proposal.
     (checkout / "sneaky.py").write_text("exfiltrate()\n")
@@ -220,7 +226,7 @@ def test_a_patch_that_no_longer_applies_says_why(checkout, origin, no_github):
     """Somebody changed the same lines first. The member gets an explanation
     they can act on rather than a git error."""
     (checkout / "app.py").write_text("print('goodbye')\n")
-    patch = capture_patch(TEAM_A, REPO)
+    patch = capture_patch(TEAM_A, REPO, THREAD_A)
 
     # The base moves underneath the approved change.
     seed = origin.parent / "seed"

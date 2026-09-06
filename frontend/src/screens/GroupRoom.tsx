@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
-  streamTurn, agentErrorText, rememberMessage, suppressObservation,
+  streamTurn, agentErrorText, getThreadRuns, rememberMessage, suppressObservation,
 } from '../lib/agentApi';
 import { activityLabel } from '../lib/toolActivity';
 import { useIsNarrow } from '../hooks/useIsNarrow';
@@ -16,6 +16,8 @@ import { Avatar, AiOrb } from '../components/Avatar';
 import { MemoryDiffCard } from '../components/MemoryDiffCard';
 import { ComposerMode, type ComposerModeValue } from '../components/ComposerMode';
 import { ConsentCard } from '../components/ConsentCard';
+import { AgentActivity } from '../components/AgentActivity';
+import type { AgentStep } from '../lib/agentApi';
 
 type RoomLayout = 'classic' | 'split' | 'board';
 
@@ -34,6 +36,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   const [pending, setPending] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
   const [step, setStep] = useState('');
+  const [activity, setActivity] = useState<AgentStep[]>([]);
   const [agentNote, setAgentNote] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [composerMode, setComposerMode] = useState<ComposerModeValue>(() => {
@@ -51,8 +54,23 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
+  const activityRequest = useRef(0);
 
   const teamId = team?.id ?? '';
+
+  useEffect(() => {
+    if (!teamId) return;
+    const request = ++activityRequest.current;
+    setActivity([]);
+    void getThreadRuns(teamId, thread.id).then((runs) => {
+      if (request !== activityRequest.current) return;
+      setActivity(runs.flatMap((run) => run.steps).filter(
+        (item) => item.type === 'tool_call' || item.type === 'tool_result',
+      ));
+    }).catch(() => {
+      // A historical activity read must not break a new live conversation.
+    });
+  }, [teamId, thread.id]);
 
   const refreshConsents = useCallback(async () => {
     if (!teamId) return;
@@ -116,12 +134,19 @@ export function GroupRoom({ thread }: { thread: Thread }) {
       setAiTyping(true);
       setPending('');
       setStep('');
+      activityRequest.current += 1;
+      setActivity([]);
       try {
         await streamTurn(teamId, text, thread.id, (f) => {
           if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
           // The runtime already says what it is doing; the room was throwing
           // it away and showing three dots instead.
-          else if (f.type === 'tool_call') setStep(activityLabel(f.tool ?? ''));
+          else if (f.type === 'tool_call' || f.type === 'tool_result') {
+            if (f.type === 'tool_call') setStep(activityLabel(f.tool ?? ''));
+            setActivity((steps) => [...steps, {
+              type: f.type, seq: f.seq, tool: f.tool, args: f.args, response: f.response,
+            }]);
+          }
           // Q6. The room's turn lock is held by someone else's question, so
           // this turn never runs — and until D6 that arrived as nothing at
           // all: the indicator vanished, no reply appeared, and the member
@@ -133,6 +158,15 @@ export function GroupRoom({ thread }: { thread: Thread }) {
           // here is why — and emphatically not an error banner: nothing they
           // did went wrong.
           else if (f.type === 'empty') setAgentNote(f.detail ?? null);
+          // 🔴 And the same thing again, one layer down. Since the durable
+          // queue the agent no longer runs inside this request: the browser
+          // replays the run row, so the reason a turn produced nothing now
+          // arrives on the TERMINAL frame instead of as 'empty'. Dropping it
+          // put the blank screen back — indicator stops, no reply, no reason.
+          //
+          // Gated on the detail, not the status: this frame ends every turn,
+          // including the ones that answered.
+          else if (f.type === 'done' && f.detail) setAgentNote(f.detail);
           else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
         });
       } catch (e) {
@@ -284,7 +318,18 @@ export function GroupRoom({ thread }: { thread: Thread }) {
         }}
       >
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-          <div ref={chatRef} style={{ flex: 1, overflowY: 'auto', padding: '20px 0 8px' }}>
+          {/* A readable column, not the whole monitor. On a 1920px screen
+              the transcript stretched edge to edge and every message read
+              as one long line; a consent card became a metre of dark
+              block. Centred with a cap, the thread reads like a
+              conversation at any window size. */}
+          <div
+            ref={chatRef}
+            style={{
+              flex: 1, overflowY: 'auto', padding: '20px 0 8px',
+              width: '100%', maxWidth: 1040, margin: '0 auto',
+            }}
+          >
             {(error || consentError) && (
               <div style={{ padding: '10px 28px', fontSize: 12, color: 'var(--terracotta)' }}>
                 {error ?? consentError}
@@ -310,6 +355,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 onRemember={() => void remember(entry.item)}
               />
             ))}
+            <AgentActivity steps={activity} />
             {aiTyping && (
               <div
                 style={{
@@ -349,7 +395,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                         }}
                       />
                     ))}
-                    {step && (
+                    {step && activity.length === 0 && (
                       <span className="mono" style={{ fontSize: 10, color: 'var(--faint)' }}>
                         {step}
                       </span>
@@ -366,6 +412,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 is the same one. */}
             {agentNote && (
               <div
+                data-agent-note
                 style={{
                   display: 'flex',
                   gap: 14,

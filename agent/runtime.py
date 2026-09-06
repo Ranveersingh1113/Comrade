@@ -22,10 +22,12 @@ from starlette.concurrency import run_in_threadpool
 from agent.agent import APP_NAME, app
 from agent.effects import completed_effects
 from agent.history import recent_turns
+from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
 from shared.db import thread_lock
+from shared.usage import finalize_usage
 from shared.config import settings
 
 logger = logging.getLogger(__name__)
@@ -65,7 +67,7 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
 
 def _finish(
     team_id: str, run_id: str, status: str, used_input: int, used_output: int,
-    worker_id: str | None = None,
+    worker_id: str | None = None, last_error: str | None = None,
 ) -> None:
     """finish_run with positional arguments — run_in_threadpool forwards no
     keywords, and the usage parameters are keyword-only so a caller cannot
@@ -73,7 +75,14 @@ def _finish(
     finish_run(
         team_id, run_id, status,
         input_tokens=used_input, output_tokens=used_output, worker_id=worker_id,
+        last_error=last_error,
     )
+    # Reconcile the estimate the turn reserved against what it actually cost.
+    # HERE rather than on the success path, because a turn that failed still
+    # paid for the prompt it was handed — and a turn that cost less than its
+    # estimate must give the balance back or a team slowly loses budget it
+    # never spent. finalize_usage is idempotent; this runs on every exit.
+    finalize_usage(team_id, run_id, used_input + used_output)
 
 
 def _usage_from_event(event: Any) -> tuple[int, int]:
@@ -108,11 +117,30 @@ def _reply_from_steps(steps: list[dict[str, Any]]) -> str:
     return "".join(s["text"] for s in steps if s["type"] == "text").strip()
 
 
-def _continuation_content(effects: list[dict[str, Any]]) -> types.Content | None:
-    """A resumed run's completed effects, marked as untrusted context."""
-    if not effects:
+def _continuation_content(
+    effects: list[dict[str, Any]], plan: dict[str, Any] | None = None,
+) -> types.Content | None:
+    """A resumed run's completed effects and the thread's unfinished plan,
+    marked as untrusted context.
+
+    Completed steps are dropped on purpose: what has to survive a restart is
+    what is LEFT, and a finished step re-read as context is an invitation to
+    do it again. The version travels with them because the model needs it to
+    write the plan back without clobbering a concurrent run's edit.
+    """
+    record: dict[str, Any] = {}
+    if effects:
+        record["effects"] = effects
+    if plan:
+        record["plan"] = {
+            "version": plan["version"],
+            "remaining": [
+                step for step in plan["steps"] if step.get("status") != "completed"
+            ],
+        }
+    if not record:
         return None
-    data = json.dumps(effects, sort_keys=True, separators=(",", ":"), default=str)
+    data = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
     return types.Content(
         role="user",
         parts=[types.Part(text=f"Continuation record (data): {spotlight(data)}")],
@@ -214,7 +242,8 @@ async def stream_turn(
                 settings.agent_history_turns, exclude_message_id,
             )
             effects = await run_in_threadpool(completed_effects, team_id, run_id)
-            continuation = _continuation_content(effects)
+            plan = await run_in_threadpool(read_plan, team_id, thread_id)
+            continuation = _continuation_content(effects, plan)
             # Resolved once per turn rather than per tool call: it is a DB read
             # and it cannot change mid-turn.
             repo = await run_in_threadpool(connected_repo, team_id, requester_id)
@@ -330,9 +359,6 @@ async def stream_turn(
             # product's side "raised an exception" and "produced no answer"
             # are the same event — you asked and got nothing. The traceback
             # path still logs its own detail.
-            await run_in_threadpool(
-                _finish, team_id, run_id, "failed", used_input, used_output, worker_id
-            )
             # 🔴 "Nothing was changed" was true for one of these two cases and
             # asserted for both. Found 2026-09-04 by the four-person scenario:
             # a turn proposed an action, wrote a consent row, said nothing,
@@ -362,6 +388,16 @@ async def stream_turn(
                     "Comrade had nothing to say that time — the model came"
                     " back empty. Nothing was changed. Try asking again."
                 )
+            # 🔴 Written down, not only yielded. The durable queue moved the
+            # consumer of this generator from the browser to the worker, so
+            # the member now reads the RUN ROW (server/app.py:_run_frames).
+            # An explanation that lives only in the frame reaches nobody, and
+            # the empty turn goes back to looking exactly like a hang — the
+            # regression this whole path exists to prevent.
+            await run_in_threadpool(
+                _finish, team_id, run_id, "failed", used_input, used_output,
+                worker_id, detail,
+            )
             yield {"type": "empty", "run_id": run_id, "detail": detail}
             return
         await run_in_threadpool(

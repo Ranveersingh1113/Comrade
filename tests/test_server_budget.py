@@ -16,14 +16,27 @@ def _admin():
 
 
 def _seed_runs(n: int, *, minutes_ago: int = 5) -> None:
+    """Spend `n` turns against the team's hourly bucket.
+
+    This used to insert agent_runs rows, because the cap was a `count(*)` over
+    that table. It is now a reservation on one usage_buckets row — the change
+    that makes the cap hold under concurrency (shared/usage.py) — so seeding
+    past spend means writing the bucket the reservation would have written.
+
+    `minutes_ago` still means what it did: the bucket is keyed by hour, so
+    spend from two hours ago lands on a different row and falls out of the
+    window for free rather than by a date comparison.
+    """
     conn = _admin()
     try:
-        for _ in range(n):
-            conn.execute(
-                "insert into public.agent_runs (team_id, trigger_type, status,"
-                " created_at) values (%s,'user','done', now() - make_interval(mins => %s))",
-                (TEAM_A, minutes_ago),
-            )
+        conn.execute(
+            "insert into public.usage_buckets (team_id, bucket, turns, tokens)"
+            " values (%s, date_trunc('hour', now() - make_interval(mins => %s)), %s, %s)"
+            " on conflict (team_id, bucket) do update"
+            "   set turns = usage_buckets.turns + excluded.turns,"
+            "       tokens = usage_buckets.tokens + excluded.tokens",
+            (TEAM_A, minutes_ago, n, n * settings.agent_tokens_estimate),
+        )
     finally:
         conn.close()
 

@@ -5,6 +5,7 @@ this process owns the lease while it calls the model.
 """
 import logging
 import os
+import signal
 import socket
 import threading
 import time
@@ -19,6 +20,29 @@ from shared.db import Role, team_session
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 1.0
 RENEW_SECONDS = 60.0
+
+#: Set by SIGTERM. A container stop is not a crash, and the difference is worth
+#: keeping: an abandoned run recovers only when its lease expires, which is
+#: minutes of a member watching nothing happen. Draining costs one more item's
+#: worth of shutdown and skips that entirely.
+_stopping = threading.Event()
+
+
+def _drain_on_signal() -> None:
+    """Finish the item in hand, then stop. Second signal is not caught, so an
+    operator who means it can still kill the process outright."""
+    def _handle(signum, _frame):
+        logger.info("signal %s received: draining, will stop after this item", signum)
+        _stopping.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handle)
+        except (ValueError, OSError):
+            # Not the main thread, or a platform without it. A worker that
+            # cannot install the handler still works; it just stops abruptly.
+            logger.warning("could not install a %s handler", sig)
+
 
 
 def _worker_id() -> str:
@@ -76,10 +100,12 @@ def run_once(worker_id: str | None = None) -> bool:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     worker_id = _worker_id()
+    _drain_on_signal()
     logger.info("agent worker up: %s", worker_id)
-    while True:
+    while not _stopping.is_set():
         if not run_once(worker_id):
-            time.sleep(POLL_SECONDS)
+            _stopping.wait(POLL_SECONDS)
+    logger.info("agent worker drained: %s", worker_id)
 
 
 if __name__ == "__main__":

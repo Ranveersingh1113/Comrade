@@ -21,6 +21,8 @@ from shared.workspace import deps_volume, repo_checkout
 from tests._seed import A1, TEAM_A
 
 REPO = "acme/env"
+# The agent runs in a THREAD's worktree of that clone (Task 15).
+THREAD_A = "cccccccc-cccc-cccc-cccc-cccccccccccc"
 
 
 def _docker_up() -> bool:
@@ -62,6 +64,18 @@ def connected(tmp_path, monkeypatch, admin):
     root.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
     (root / "requirements.txt").write_text("cowsay==6.1\n")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@test.dev", "-c", "user.name=Test",
+         "commit", "-q", "-m", "initial"],
+        cwd=root, check=True, capture_output=True,
+    )
+    # The TEAM's clone, deliberately. The environment is keyed to the team and
+    # built from what the remote says — a thread's local edit to a manifest is
+    # an unproposed change, and rebuilding the shared environment from it would
+    # let one member's uncommitted experiment decide what everyone else runs
+    # against. Tests that need the tree the agent's COMMANDS run in take the
+    # worktree explicitly.
     return root
 
 
@@ -263,16 +277,22 @@ def test_repo_run_reports_the_environment_on_every_result(
     from agent.repo_tools import repo_run
 
     class Ctx:
-        state = {"team_id": TEAM_A, "requester_id": A1, "repo_full_name": REPO}
+        state = {"team_id": TEAM_A, "requester_id": A1, "thread_id": THREAD_A,
+                 "repo_full_name": REPO}
 
-    (connected / "t.py").write_text("import cowsay\n")
+    # The tree the COMMAND runs in is the thread's worktree of that clone, not
+    # the clone itself (Task 15).
+    from pipeline.repo_sync import ensure_thread_checkout
+
+    tree = ensure_thread_checkout(TEAM_A, THREAD_A, REPO)
+    (tree / "t.py").write_text("import cowsay\n")
     result = repo_run("python t.py", Ctx())
     assert result["exit_code"] != 0          # no environment, so it cannot import
     assert result["environment"]["status"] == "disabled"
     assert "turn one on" in result["environment"]["detail"]
 
     # And on a SUCCESS too.
-    (connected / "t.py").write_text("print('fine')\n")
+    (tree / "t.py").write_text("print('fine')\n")
     ok = repo_run("python t.py", Ctx())
     assert ok["exit_code"] == 0
     assert ok["environment"]["status"] == "disabled"

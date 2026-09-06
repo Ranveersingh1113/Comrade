@@ -314,3 +314,26 @@ def test_a_failed_clone_is_reported_to_the_member(seeded, admin, github, monkeyp
         assert _sync_failures(TEAM_B) == {}
     finally:
         admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+
+
+def test_a_successful_clone_clears_an_older_failed_clone_from_setup(seeded, admin):
+    """A stale queue failure must not override the checkout that later worked."""
+    from psycopg.types.json import Json
+    from server.github_connect import _sync_failures
+
+    admin.execute(
+        "insert into public.github_repos (team_id, repo_full_name, last_cloned_at)"
+        " values (%s,%s,now())",
+        (TEAM_A, "acme/app"),
+    )
+    admin.execute(
+        "insert into public.jobs"
+        " (team_id, job_type, payload, status, last_error, finished_at)"
+        " values (%s,'sync_repo',%s,'failed',%s, now() - interval '1 minute')",
+        (TEAM_A, Json({"repo_full_name": "acme/app"}), "old workspace permission error"),
+    )
+    try:
+        assert _sync_failures(TEAM_A) == {}
+    finally:
+        admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+        admin.execute("delete from public.github_repos where team_id=%s", (TEAM_A,))

@@ -111,6 +111,34 @@ def repo_checkout(team_id: str, repo_full_name: str) -> Path:
     return workspace_for(team_id) / name.replace("/", "__")
 
 
+def thread_checkout(team_id: str, thread_id: str, repo_full_name: str) -> Path:
+    """Where ONE THREAD works on one repository. Does not create it.
+
+    A git worktree of `repo_checkout`, not a second clone: same object
+    database, its own files, and no credential needed to make one because
+    nothing is fetched. The team checkout stays the mirror — the thing that
+    fetches, that holds the remote, and that an approved patch is pushed from.
+
+    This is what makes two members concurrent anywhere except the queue.
+    Before it, `sync_repo`'s `reset --hard` at the start of a turn deleted
+    whatever the other member had not yet proposed, and a proposal captured
+    both people's edits because there was one tree to capture.
+
+    thread_id gets the same UUID rule team_id does, and for the same reason:
+    it becomes a directory name, and a UUID cannot climb out of one.
+    """
+    if not isinstance(thread_id, str) or not _UUID.match(thread_id):
+        raise WorkspaceError(
+            f"{thread_id!r} is not a thread id, so it cannot name a workspace."
+        )
+    # Under the team, so every existing containment check that roots on the
+    # team workspace keeps holding without being taught about threads.
+    return (
+        workspace_for(team_id) / "threads" / thread_id.lower()
+        / repo_checkout(team_id, repo_full_name).name
+    )
+
+
 def deps_volume(team_id: str, repo_full_name: str) -> str:
     """The Docker volume holding this checkout's installed dependencies.
 

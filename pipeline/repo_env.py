@@ -159,7 +159,7 @@ def handle_build_environment(team_id: str, payload: dict) -> None:
     if not name:
         raise PermanentJobError("build_environment job carries no repo_full_name")
 
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         row = _row(conn, team_id, name)
     if row is None or not row[0]:
         # Turned off between queuing and running. Not an error: the answer to
@@ -218,7 +218,7 @@ def sweep_environments() -> list[str]:
     env_enabled — which is the entire difference between this and the version
     that installed a manifest the moment a repository was connected.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         rows = conn.execute(
             "select team_id, repo_full_name, env_status, env_key"
             "  from public.github_repos"
@@ -317,7 +317,7 @@ def enforce_env_disk_cap() -> list[str]:
     if not sizes or total <= budget:
         return []
 
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         rows = conn.execute(
             "select team_id, repo_full_name, env_updated_at"
             "  from public.github_repos"

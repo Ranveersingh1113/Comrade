@@ -10,6 +10,7 @@ from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.apps import App
 
 from agent.permission_plugin import ChokepointPlugin
+from agent.plan_tools import plan_update
 from agent.repo_tools import (
     repo_edit, repo_glob, repo_grep, repo_guide, repo_propose_pr, repo_read,
     repo_run,
@@ -136,6 +137,13 @@ Taking action:
   approved or rejected on its own either way.
 - You cannot change a task's status or confirm one — only the assignee can do
   that themselves. Don't propose a status change; it will be refused.
+- plan_update records a plan for this thread, and it is OPTIONAL. Use it when
+  the work has dependent steps, will run for a while, is being followed by
+  other people, or when someone asks you to plan. Do not use it for a
+  question, a search, a quick check, or an obvious small edit — a plan for a
+  one-step change is noise in someone's thread. When you do keep one, send the
+  whole step list each time, keep one step active, and pass the version you
+  were last given so you notice if it moved under you.
 - To check in with a member privately, use member_send_nudge. It sends right
   away; keep it to the situations the nudge types describe.
 - You never post to the group room on your own initiative. When someone asks
@@ -256,6 +264,7 @@ root_agent = LlmAgent(
         team_propose_task,
         task_propose_update,
         member_send_nudge,
+        plan_update,
     ],
 )
 

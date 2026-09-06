@@ -36,7 +36,8 @@ _NEEDS = {
 #: The roles this codebase actually connects as. `public` and `authenticated`
 #: are covered too — au_* policies are the browser's API surface.
 _OUR_ROLES = {
-    "comrade_agent", "comrade_executor", "comrade_pipeline", "authenticated",
+    "comrade_agent", "comrade_executor", "comrade_pipeline", "comrade_control",
+    "authenticated",
 }
 
 
@@ -72,9 +73,11 @@ def test_every_policy_has_the_grant_it_needs(db):
                 continue
             needed = _NEEDS[cmd]
             has_any = any(
-                db.execute(
-                    "select has_table_privilege(%s, %s, %s)",
-                    (role, f"{schema}.{table}", priv),
+                    db.execute(
+                        "select has_table_privilege(%s, %s, %s)"
+                        " or has_any_column_privilege(%s, %s, %s)",
+                        (role, f"{schema}.{table}", priv,
+                         role, f"{schema}.{table}", priv),
                 ).fetchone()[0]
                 for priv in needed
             )

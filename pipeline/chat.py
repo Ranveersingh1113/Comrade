@@ -129,7 +129,7 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
     a repeat sweep return the same job rather than a duplicate. Returns the job
     ids touched this pass.
     """
-    with connect(Role.ADMIN) as conn:
+    with connect(Role.CONTROL) as conn:
         rows = conn.execute(
             # findings §3.2 calls the original "the worst query in the
             # codebase": a cross-team Seq Scan of `messages` with a CORRELATED

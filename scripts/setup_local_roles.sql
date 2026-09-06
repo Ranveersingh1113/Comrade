@@ -11,6 +11,7 @@
 alter role comrade_agent    with login password :'agent_pwd';
 alter role comrade_executor with login password :'executor_pwd';
 alter role comrade_pipeline with login password :'pipeline_pwd';
+alter role comrade_control  with login password :'control_pwd';
 
 -- PostgREST-style authenticator for user_session(): may become `authenticated`
 -- and nothing else. noinherit = its own privileges stay empty until SET ROLE.

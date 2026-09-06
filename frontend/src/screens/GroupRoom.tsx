@@ -545,6 +545,7 @@ function MessageRow({
         display: 'flex',
         gap: 14,
         padding: '10px 28px',
+        alignItems: 'flex-start',
         justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start',
         flexDirection: ownHumanMessage ? 'row-reverse' : 'row',
       }}
@@ -555,8 +556,25 @@ function MessageRow({
         <Avatar userId={m.sender_id ?? 'unknown'} name={senderName} size={36} />
       )}
       <div style={{ minWidth: 0, maxWidth: 'min(76%, 700px)' }}>
-        <div style={{ background: isAI ? 'rgba(228,121,91,0.09)' : ownHumanMessage ? 'rgba(111,106,142,0.10)' : 'var(--card)', border: `1px solid ${isAI ? 'rgba(212,90,66,.22)' : 'var(--border-soft)'}`, borderRadius: 12, padding: '9px 12px', boxShadow: '1px 1px 0 rgba(32,45,53,.06)' }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, flexWrap: 'wrap' }}>
+        <div
+          style={{
+            background: isAI ? 'rgba(228,121,91,0.09)' : ownHumanMessage ? 'rgba(111,106,142,0.10)' : 'var(--card)',
+            border: `1px solid ${isAI ? 'rgba(212,90,66,.22)' : 'var(--border-soft)'}`,
+            borderRadius: 12,
+            padding: '9px 12px',
+            boxShadow: '1px 1px 0 rgba(32,45,53,.06)',
+            textAlign: ownHumanMessage ? 'right' : 'left',
+          }}
+        >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start',
+            gap: 9,
+            flexWrap: 'wrap',
+          }}
+        >
           <span style={{ fontSize: 13.5, fontWeight: 700, letterSpacing: '-0.01em' }}>
             {senderName}
           </span>

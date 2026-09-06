@@ -26,11 +26,11 @@ function Message({
 }: { name: string; initials: string; time: string; children: React.ReactNode; ai?: boolean; assisted?: boolean; mine?: boolean }) {
   return (
     <article
-      className={`ci-message ${ai ? 'ci-message-ai' : ''}`}
+      className={`ci-message ${ai ? 'ci-message-ai' : ''} ${mine ? 'ci-message-mine' : ''}`}
       style={{
         justifyContent: mine ? 'flex-end' : 'flex-start',
         flexDirection: mine ? 'row-reverse' : 'row',
-        textAlign: 'left',
+        textAlign: mine ? 'right' : 'left',
       }}
     >
       <Avatar initials={initials} ai={ai} />

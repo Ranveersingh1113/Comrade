@@ -14,4 +14,4 @@ def test_deploy_script_pins_the_requested_commit_and_waits_for_ready() -> None:
 def test_workflow_runs_the_deploy_script_from_the_requested_commit() -> None:
     workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "deploy-pilot.yml").read_text()
 
-    assert 'git show \\"$GITHUB_SHA:scripts/deploy_host.sh\\" | sh -s \\"$GITHUB_SHA\\"' in workflow
+    assert 'git show $GITHUB_SHA:scripts/deploy_host.sh | sh -s $GITHUB_SHA' in workflow

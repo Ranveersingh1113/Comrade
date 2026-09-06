@@ -502,7 +502,11 @@ function MessageRow({
 
   if (cls.kind === 'deleted') {
     return (
-      <div className="fade-up" style={{ display: 'flex', gap: 14, padding: '10px 28px', justifyContent: ownHumanMessage ? 'flex-start' : 'flex-end' }}>
+      <div
+        className="fade-up"
+        data-message-side={ownHumanMessage ? 'right' : 'left'}
+        style={{ display: 'flex', gap: 14, padding: '10px 28px', justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start' }}
+      >
         <span
           style={{
             display: 'flex',
@@ -534,14 +538,15 @@ function MessageRow({
     <div
       className="fade-up"
       data-sender={m.sender_kind}
+      data-message-side={ownHumanMessage ? 'right' : 'left'}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
         display: 'flex',
         gap: 14,
         padding: '10px 28px',
-        justifyContent: ownHumanMessage ? 'flex-start' : 'flex-end',
-        flexDirection: ownHumanMessage ? 'row' : 'row-reverse',
+        justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start',
+        flexDirection: ownHumanMessage ? 'row-reverse' : 'row',
       }}
     >
       {isAI ? (

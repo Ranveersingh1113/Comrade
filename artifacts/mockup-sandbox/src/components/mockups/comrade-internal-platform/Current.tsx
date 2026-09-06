@@ -28,9 +28,9 @@ function Message({
     <article
       className={`ci-message ${ai ? 'ci-message-ai' : ''}`}
       style={{
-        justifyContent: mine ? 'flex-start' : 'flex-end',
-        flexDirection: mine ? 'row' : 'row-reverse',
-        textAlign: mine ? 'left' : 'right',
+        justifyContent: mine ? 'flex-end' : 'flex-start',
+        flexDirection: mine ? 'row-reverse' : 'row',
+        textAlign: 'left',
       }}
     >
       <Avatar initials={initials} ai={ai} />
@@ -60,7 +60,7 @@ export function Current() {
         <div className="ci-brand">
           <img
             className="ci-brand-mark"
-            src="/__mockup/images/comrade-landing-orb.png"
+             src="/__mockup/images/comrade-internal-platform-brand-orb.png"
             alt="Comrade"
             style={{ objectFit: 'cover' }}
           />

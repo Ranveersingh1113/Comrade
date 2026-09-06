@@ -200,6 +200,19 @@ describe('a plain user message', () => {
     expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
     expect(screen.queryByText(/MEMORY UPDATED/)).not.toBeInTheDocument();
   });
+
+  test('keeps the current user on the right and teammates plus Comrade on the left', async () => {
+    supaState.tables.messages = [
+      msg({ id: 'm-mine', sender_id: 'u1', body: 'my update' }),
+      msg({ id: 'm-teammate', sender_id: 'u2', body: 'team reply' }),
+      msg({ id: 'm-ai', sender_kind: 'ai', sender_id: null, body: 'Comrade reply' }),
+    ];
+    renderInApp(<GroupRoom thread={thread} />);
+
+    expect((await screen.findByText('my update')).closest('[data-message-side]')).toHaveAttribute('data-message-side', 'right');
+    expect(screen.getByText('team reply').closest('[data-message-side]')).toHaveAttribute('data-message-side', 'left');
+    expect(screen.getByText('Comrade reply').closest('[data-message-side]')).toHaveAttribute('data-message-side', 'left');
+  });
 });
 
 test('the General room toggle chooses team posts or Comrade turns', async () => {

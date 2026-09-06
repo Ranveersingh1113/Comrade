@@ -21,6 +21,27 @@ const AuthContext = createContext<AuthState>({
   signOut: async () => {},
 });
 
+/** What to call someone, from whatever the identity provider gave us.
+ *
+ * Each provider names this field differently, and the fallback is what a
+ * teammate SEES next to every message — so getting it wrong is not cosmetic.
+ * Google returns `full_name` and `name` and never `display_name`, so an
+ * account created through the Google button would have been called
+ * "priya.sharma" from the email prefix while the same person signing up with a
+ * password got "Priya Sharma".
+ *
+ * Exported because it is the whole decision, and a pure function is testable
+ * without standing up a session.
+ */
+export function displayNameFrom(user: Session['user']): string {
+  const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+  for (const key of ['display_name', 'full_name', 'name']) {
+    const value = meta[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return user.email?.split('@')[0] || 'Member';
+}
+
 /** Ensure a profiles row exists for the signed-in user (RLS: insert self only). */
 async function ensureProfile(session: Session): Promise<Profile | null> {
   const uid = session.user.id;
@@ -31,10 +52,7 @@ async function ensureProfile(session: Session): Promise<Profile | null> {
     .maybeSingle();
   if (existing) return existing as Profile;
 
-  const displayName =
-    (session.user.user_metadata?.display_name as string | undefined) ??
-    session.user.email?.split('@')[0] ??
-    'Member';
+  const displayName = displayNameFrom(session.user);
   const { data: created, error } = await supabase
     .from('profiles')
     .insert({ id: uid, display_name: displayName, email: session.user.email })

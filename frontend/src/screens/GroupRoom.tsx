@@ -558,8 +558,8 @@ function MessageRow({
       <div style={{ minWidth: 0, maxWidth: 'min(76%, 700px)' }}>
         <div
           style={{
-            background: isAI ? 'rgba(228,121,91,0.09)' : ownHumanMessage ? 'rgba(111,106,142,0.10)' : 'var(--card)',
-            border: `1px solid ${isAI ? 'rgba(212,90,66,.22)' : 'var(--border-soft)'}`,
+            background: isAI ? 'rgba(52,111,159,0.09)' : ownHumanMessage ? 'rgba(86,122,160,0.10)' : 'var(--card)',
+            border: `1px solid ${isAI ? 'rgba(52,111,159,.22)' : 'var(--border-soft)'}`,
             borderRadius: 12,
             padding: '9px 12px',
             boxShadow: '1px 1px 0 rgba(32,45,53,.06)',
@@ -585,7 +585,7 @@ function MessageRow({
                 fontWeight: 700,
                 letterSpacing: '0.14em',
                 color: 'var(--terracotta)',
-                border: '1px solid rgba(210,89,59,0.4)',
+                border: '1px solid rgba(52,111,159,0.4)',
                 borderRadius: 3,
                 padding: '2px 6px',
               }}
@@ -660,7 +660,7 @@ function MessageRow({
               className="mono"
               title="Tombstones this message and tells Comrade not to post this kind of observation again"
               style={{
-                border: '1px solid rgba(210,89,59,0.35)',
+                border: '1px solid rgba(52,111,159,0.35)',
                 background: 'transparent',
                 color: 'var(--terracotta)',
                 fontSize: 9,

@@ -250,7 +250,7 @@ export function Tasks() {
                                   onClick={() => void advance(t)}
                                   style={{
                                     marginLeft: 'auto',
-                                    border: '1px solid rgba(210,89,59,0.5)',
+                                    border: '1px solid rgba(52,111,159,0.5)',
                                     background: '#fff',
                                     color: 'var(--terracotta)',
                                     fontSize: 10.5,

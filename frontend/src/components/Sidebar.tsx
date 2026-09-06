@@ -132,7 +132,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           margin: '16px 6px 6px',
           padding: 12,
           border: '1px solid rgba(241,239,234,0.12)',
-          background: isActive ? 'rgba(228,121,91,0.14)' : 'rgba(228,121,91,0.07)',
+          background: isActive ? 'rgba(52,111,159,0.14)' : 'rgba(52,111,159,0.07)',
           borderRadius: 12,
           cursor: 'pointer',
           textAlign: 'left',
@@ -147,7 +147,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             style={{
               display: 'block',
               fontSize: 10.5,
-              color: '#D9A18E',
+              color: '#568BB5',
               marginTop: 2,
               animation: 'tickerPulse 3.4s ease-in-out infinite',
             }}

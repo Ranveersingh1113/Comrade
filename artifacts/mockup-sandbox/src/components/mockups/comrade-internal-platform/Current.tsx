@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import './_group.css';
+import './theme.css';
 
 const people = [
   ['Maya Chen', 'MC', 'you'],

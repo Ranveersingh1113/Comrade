@@ -56,8 +56,8 @@ export function taskPill(status: TaskStatus) {
   return {
     proposed: { label: 'PROPOSED', color: '#A9A5B0', border: 'rgba(169,165,176,0.5)' },
     confirmed: { label: 'CONFIRMED', color: '#6E5F87', border: 'rgba(110,95,135,0.5)' },
-    in_progress: { label: 'IN PROGRESS', color: '#E4795B', border: 'rgba(228,121,91,0.5)' },
-    done: { label: 'DONE', color: '#D2593B', border: 'rgba(210,89,59,0.5)' },
+    in_progress: { label: 'IN PROGRESS', color: '#568BB5', border: 'rgba(86,139,181,0.5)' },
+    done: { label: 'DONE', color: '#346F9F', border: 'rgba(52,111,159,0.5)' },
   }[status];
 }
 

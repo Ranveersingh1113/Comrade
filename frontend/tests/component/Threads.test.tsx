@@ -41,7 +41,7 @@ test('creates and opens a public thread with one click', async () => {
   expect(screen.queryByLabelText('Thread title')).toBeNull();
 });
 
-test('agent mode sends the canonical thread id', async () => {
+test('non-group threads are Comrade-only and send through the agent', async () => {
   let body: unknown;
   server.use(http.post('http://localhost:8000/agent/turn/stream', async ({ request }) => {
     body = await request.json();
@@ -50,7 +50,8 @@ test('agent mode sends the canonical thread id', async () => {
   supaState.tables.threads = [thread];
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>);
-  await user.click(await screen.findByRole('button', { name: 'Agent mode' }));
+  expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Comrade mode' })).not.toBeInTheDocument();
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'check the release');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
   await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'check the release', thread_id: 'thread-1' }));
@@ -77,16 +78,16 @@ test('shows a thread consent card inline with its messages', async () => {
     .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 });
 
-test('switching thread routes resets the visible composer mode for the new thread', async () => {
+test('non-group thread routes remain Comrade-only despite saved team preferences', async () => {
   supaState.tables.threads = [
     thread,
     { ...thread, id: 'thread-2', title: 'Planning', kind: 'discussion', work_state: null },
   ];
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<ThreadRoute />} /></Routes></MemoryRouter>);
-  expect((await screen.findByLabelText('Composer mode: agent'))).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: 'Open planning' }));
-  expect(await screen.findByLabelText('Composer mode: team')).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
 });
 
 test('missing legacy private thread gives the member a route back to threads', async () => {
@@ -107,11 +108,11 @@ test('changing member identity resets the mounted thread composer and its send p
   const user = userEvent.setup();
   const app = () => <MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>;
   const { rerender } = render(app());
-  expect(await screen.findByLabelText('Composer mode: team')).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
 
   teamState.myUserId = 'u2';
   rerender(app());
-  expect(await screen.findByLabelText('Composer mode: agent')).toBeInTheDocument();
+  expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'review this');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
   await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'review this', thread_id: 'thread-1' }));

@@ -32,6 +32,7 @@ const thread = {
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => server.resetHandlers());
 beforeEach(() => {
+  localStorage.clear();
   resetSupa();
   resetTeam();
   server.use(http.get(`${BASE}/threads/thread-1/agent-runs`, () => HttpResponse.json([])));
@@ -79,7 +80,7 @@ async function askComrade(body: ReadableStream) {
     ),
   );
   const user = userEvent.setup();
-  renderInApp(<GroupRoom thread={thread} />);
+  renderInApp(<GroupRoom thread={thread} allowTeamMessages />);
   await user.type(
     await screen.findByPlaceholderText(/Message the team/),
     '@comrade what is left?',
@@ -199,6 +200,43 @@ describe('a plain user message', () => {
     expect(screen.queryByText('AI · SEEN BY ALL')).not.toBeInTheDocument();
     expect(screen.queryByText(/MEMORY UPDATED/)).not.toBeInTheDocument();
   });
+
+  test('keeps the current user on the right and teammates plus Comrade on the left', async () => {
+    supaState.tables.messages = [
+      msg({ id: 'm-mine', sender_id: 'u1', body: 'my update' }),
+      msg({ id: 'm-teammate', sender_id: 'u2', body: 'team reply' }),
+      msg({ id: 'm-ai', sender_kind: 'ai', sender_id: null, body: 'Comrade reply' }),
+    ];
+    renderInApp(<GroupRoom thread={thread} />);
+
+    expect((await screen.findByText('my update')).closest('[data-message-side]')).toHaveAttribute('data-message-side', 'right');
+    expect(screen.getByText('team reply').closest('[data-message-side]')).toHaveAttribute('data-message-side', 'left');
+    expect(screen.getByText('Comrade reply').closest('[data-message-side]')).toHaveAttribute('data-message-side', 'left');
+  });
+});
+
+test('the General room toggle chooses team posts or Comrade turns', async () => {
+  let agentBody: unknown;
+  server.use(http.post(`${BASE}/agent/turn/stream`, async ({ request }) => {
+    agentBody = await request.json();
+    return new HttpResponse('{"type":"done"}\n');
+  }));
+  const user = userEvent.setup();
+  renderInApp(<GroupRoom thread={thread} allowTeamMessages />);
+  const toggle = await screen.findByRole('button', { name: 'Comrade mode' });
+  expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await user.type(screen.getByPlaceholderText(/Message the team/), 'team update');
+  await user.click(screen.getByRole('button', { name: 'SEND' }));
+  await waitFor(() => expect(supaState.inserts).toContainEqual(expect.objectContaining({
+    table: 'messages', values: expect.objectContaining({ body: 'team update' }),
+  })));
+  await user.click(toggle);
+  expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'help us plan');
+  await user.click(screen.getByRole('button', { name: 'SEND' }));
+  await waitFor(() => expect(agentBody).toEqual({
+    team_id: 'team-1', text: 'help us plan', thread_id: 'thread-1',
+  }));
 });
 
 

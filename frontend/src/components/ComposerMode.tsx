@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { OrbLogo } from './Avatar';
 
 export type ComposerModeValue = 'team' | 'agent';
 
@@ -30,9 +31,17 @@ export function ComposerMode({
     onChange(next);
   };
   return (
-    <span aria-label={`Composer mode: ${mode}`} style={{ display: 'inline-flex', gap: 3 }}>
-      <button type="button" aria-label="Team mode" aria-pressed={mode === 'team'} onClick={() => choose('team')}>Team</button>
-      <button type="button" aria-label="Agent mode" aria-pressed={mode === 'agent'} onClick={() => choose('agent')}>Agent</button>
+    <span className="composer-mode">
+      <button
+        type="button"
+        aria-label="Comrade mode"
+        aria-pressed={mode === 'agent'}
+        title={mode === 'agent' ? 'Comrade is on' : 'Comrade is off'}
+        onClick={() => choose(mode === 'agent' ? 'team' : 'agent')}
+      >
+        <OrbLogo size={22} />
+        <span className="composer-mode-label">Comrade</span>
+      </button>
     </span>
   );
 }

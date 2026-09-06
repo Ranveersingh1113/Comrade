@@ -25,15 +25,18 @@ export function Threads() {
   };
 
   const active = threads.find((thread) => thread.id === threadId);
-  if (threadId && active) return <GroupRoom key={active.id} thread={active} />;
+  const isCanonicalGroupRoom = active?.title === 'General'
+    && active.visibility === 'team'
+    && active.kind === 'discussion';
+  if (threadId && active) return <GroupRoom key={active.id} thread={active} allowTeamMessages={isCanonicalGroupRoom} />;
 
-  return <main style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
-    <header style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+  return <main className="workspace-page threads-page" style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
+    <header className="workspace-heading" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <div><div className="display" style={{ fontSize: 30 }}>Threads</div><div style={{ color: 'var(--muted)', fontSize: 12 }}>Team conversations and focused work</div></div>
       <button className="btn-primary" style={{ marginLeft: 'auto' }} disabled={creating} onClick={() => void create()}>New thread</button>
     </header>
     {error && <p style={{ color: 'var(--terracotta)' }}>{error}</p>}
-    <div style={{ marginTop: 22, display: 'grid', gap: 8 }}>
+    <div className="thread-list" style={{ marginTop: 22, display: 'grid', gap: 8 }}>
       {threads.map((thread) => <Link key={thread.id} to={`../threads/${thread.id}`} style={{ color: 'inherit', textDecoration: 'none' }}><article className="card" style={{ padding: 14 }}><b>{thread.title}</b><span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>{thread.visibility === 'restricted' ? 'Selected members' : 'Team'} · {thread.kind}</span></article></Link>)}
     </div>
   </main>;
@@ -67,9 +70,9 @@ export function LegacyThreadRedirect({ privateThread = false }: { privateThread?
       () => setMissing(true),
     );
   }, [teamId, myUserId, privateThread, navigate]);
-  if (missing) return <main style={{ flex: 1, padding: 28 }}>
+  if (missing) return <main className="workspace-page" style={{ flex: 1, padding: 28 }}>
     <p>{privateThread ? 'No private thread exists yet.' : 'The General thread is unavailable.'}</p>
     <Link to={`/t/${teamId}/threads`}>View threads</Link>
   </main>;
-  return <main style={{ flex: 1, padding: 28 }}>Opening thread…</main>;
+  return <main className="workspace-page" style={{ flex: 1, padding: 28 }}>Opening thread…</main>;
 }

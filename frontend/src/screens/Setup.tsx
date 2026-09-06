@@ -5,6 +5,7 @@ import { AgentApiError, ingestDocument } from '../lib/agentApi';
 import type { DocumentKind, DocumentRow, Profile } from '../lib/types';
 import { useTeam } from '../state/TeamContext';
 import { GitHubConnect } from '../components/GitHubConnect';
+import { OrbLogo } from '../components/Avatar';
 
 const STORAGE_BUCKET = 'documents';
 
@@ -103,14 +104,9 @@ export function Setup() {
   };
 
   return (
-    <main style={{ flex: 1, overflowY: 'auto' }}>
-      <div style={{ maxWidth: 580, margin: '0 auto', padding: '52px 32px 60px' }}>
-        <span
-          className="orb breathing"
-          style={{ width: 64, height: 64, fontSize: 24, marginBottom: 20 }}
-        >
-          ◈
-        </span>
+    <main className="page-scroll setup-page">
+      <div className="content-column" style={{ maxWidth: 580, margin: '0 auto', padding: '52px 32px 60px' }}>
+        <OrbLogo size={64} breathing style={{ marginBottom: 20 }} />
         <div className="display" style={{ fontSize: 40, lineHeight: 1.05, marginTop: 20 }}>
           Give Comrade
           <br />

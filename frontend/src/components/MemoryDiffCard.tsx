@@ -221,7 +221,7 @@ export function MemoryDiffCard({ compilation }: { compilation: MemoryCompilation
                       cursor: 'pointer',
                     }}
                   >
-                    ⟲ revert
+                     queue revert
                   </button>
                 )}
               </div>

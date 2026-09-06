@@ -5,13 +5,13 @@ import type { MemoryCompilation, Milestone } from '../lib/types';
 import { daysUntil } from '../lib/format';
 import { useAuth } from '../state/AuthContext';
 import { useTeam } from '../state/TeamContext';
-import { Avatar } from './Avatar';
+import { AiOrb, Avatar, OrbLogo } from './Avatar';
 import { useThreads } from '../hooks/useThreads';
 
 const NAV_ITEMS = [
-  { to: 'tasks', icon: '☑', label: 'Tasks' },
-  { to: 'wiki', icon: '✦', label: 'Team wiki' },
-  { to: 'docs', icon: '▤', label: 'Documents' },
+  { to: 'tasks', icon: '01', label: 'Tasks' },
+  { to: 'wiki', icon: '02', label: 'Team wiki' },
+  { to: 'docs', icon: '03', label: 'Documents' },
 ] as const;
 
 const navBase: React.CSSProperties = {
@@ -84,8 +84,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
         width: 250,
         maxWidth: '85vw',
         flex: 'none',
-        background: 'var(--ink)',
-        color: 'var(--paper)',
+         background: 'var(--surface)',
+         color: 'var(--ink)',
         display: 'flex',
         flexDirection: 'column',
         padding: '22px 14px 16px',
@@ -95,23 +95,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
     >
       <div style={{ padding: '0 10px 6px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 16 }}>
-          <span
-            style={{
-              width: 28,
-              height: 28,
-              flex: 'none',
-              borderRadius: 9,
-              background: '#FBF9F4',
-              boxShadow: '0 0 0 1px rgba(241,239,234,0.14)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--ink)',
-              fontSize: 15,
-            }}
-          >
-            ◈
-          </span>
+          <OrbLogo size={28} />
           <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '0.02em' }}>comrade</span>
         </div>
         <div className="display" style={{ fontSize: 26, letterSpacing: '0.01em' }}>
@@ -135,7 +119,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           }}
           title="Switch team"
         >
-          switch team ↺
+           switch team
         </button>
       </div>
 
@@ -148,27 +132,22 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           margin: '16px 6px 6px',
           padding: 12,
           border: '1px solid rgba(241,239,234,0.12)',
-          background: isActive ? 'rgba(228,121,91,0.14)' : 'rgba(228,121,91,0.07)',
+           background: isActive ? 'rgba(118,85,121,0.14)' : 'rgba(118,85,121,0.06)',
           borderRadius: 12,
           cursor: 'pointer',
           textAlign: 'left',
-          color: 'var(--paper)',
+           color: 'var(--ink)',
           textDecoration: 'none',
         })}
       >
-        <span
-          className="orb breathing"
-          style={{ width: 34, height: 34, fontSize: 14 }}
-        >
-          ◈
-        </span>
+        <AiOrb size={34} breathing />
         <span>
           <span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>Comrade</span>
           <span
             style={{
               display: 'block',
               fontSize: 10.5,
-              color: '#D9A18E',
+               color: 'var(--terracotta)',
               marginTop: 2,
               animation: 'tickerPulse 3.4s ease-in-out infinite',
             }}
@@ -186,8 +165,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             style={({ isActive }) => ({
               ...navBase,
               fontWeight: isActive ? 600 : 400,
-              color: isActive ? 'var(--paper)' : '#A6A1B3',
-              background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+               color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+               background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
             })}
           >
             <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>{item.icon}</span>
@@ -205,7 +184,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           aria-label="New thread"
           disabled={creatingThread}
           onClick={() => void createThread()}
-          style={{ border: 0, borderRadius: 5, background: 'rgba(241,239,234,0.12)', color: 'var(--paper)', cursor: 'pointer', padding: '2px 7px', fontSize: 15 }}
+           style={{ border: 0, borderRadius: 5, background: 'rgba(118,85,121,0.12)', color: 'var(--ink)', cursor: 'pointer', padding: '2px 7px', fontSize: 15 }}
         >
           +
         </button>
@@ -218,12 +197,12 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             title={thread.visibility === 'restricted' ? 'Selected members' : 'Team-visible'}
             style={({ isActive }) => ({
               ...navBase,
-              color: isActive ? 'var(--paper)' : '#A6A1B3',
-              background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+               color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+               background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
               overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
             })}
           >
-            <span style={{ color: 'var(--ink-faint)' }}>{thread.visibility === 'restricted' ? '◌' : '◦'}</span>
+           <span aria-hidden style={{ color: 'var(--ink-faint)', fontFamily: 'var(--mono)', fontSize: 11 }}>{thread.visibility === 'restricted' ? 'R' : 'T'}</span>
             {thread.title}
           </NavLink>
         ))}
@@ -302,18 +281,18 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             gap: 6,
             fontSize: 11,
             lineHeight: 1.45,
-            color: '#908B9E',
+             color: 'var(--text-soft)',
           }}
         >
           {lastCompile && (
             <div>
-              <span style={{ color: 'var(--terracotta-soft)' }}>▲</span> memory compiled · +
+              <span style={{ color: 'var(--terracotta-soft)' }}>+</span> memory compiled · +
               {lastCompile.entries_added} facts
             </div>
           )}
           {nextMilestone?.due_at && (
             <div>
-              <span style={{ color: 'var(--ink-faint)' }}>◆</span>{' '}
+               <span style={{ color: 'var(--ink-faint)' }}>•</span>{' '}
               {nextMilestone.title.toLowerCase()} in {daysUntil(nextMilestone.due_at)} days
             </div>
           )}
@@ -324,11 +303,11 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
             ...navBase,
             marginTop: 10,
             fontWeight: isActive ? 600 : 400,
-            color: isActive ? 'var(--paper)' : '#A6A1B3',
-            background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+             color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+             background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
           })}
         >
-          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>⚙</span> Project setup
+           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>04</span> Project setup
         </NavLink>
         {/* Sits with Sign out rather than in the main nav: leaving a team is
             the same class of action, and neither belongs beside Tasks. */}
@@ -337,17 +316,17 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           style={({ isActive }) => ({
             ...navBase,
             fontWeight: isActive ? 600 : 400,
-            color: isActive ? 'var(--paper)' : '#A6A1B3',
-            background: isActive ? 'rgba(241,239,234,0.1)' : 'transparent',
+             color: isActive ? 'var(--ink)' : 'var(--text-soft)',
+             background: isActive ? 'rgba(118,85,121,0.12)' : 'transparent',
           })}
         >
-          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>◇</span> Membership
+           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>05</span> Membership
         </NavLink>
         <button
           onClick={() => signOut()}
-          style={{ ...navBase, background: 'transparent', color: '#A6A1B3', marginTop: 2 }}
+           style={{ ...navBase, background: 'transparent', color: 'var(--text-soft)', marginTop: 2 }}
         >
-          <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>↦</span> Sign out
+           <span style={{ width: 16, textAlign: 'center', opacity: 0.7 }}>↗</span> Sign out
         </button>
       </div>
     </nav>

@@ -52,7 +52,7 @@ describe('TeamGate loading failures', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /try again/i }));
 
-    expect(await screen.findByText(/no teams yet/i)).toBeVisible();
+    expect(await screen.findByText(/no room yet/i)).toBeVisible();
     expect(screen.getByRole('button', { name: 'CREATE' })).toBeVisible();
   });
 });

@@ -146,7 +146,7 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
   };
 
   if (loading) {
-    return <div style={{ fontSize: 12.5, color: 'var(--muted)', paddingLeft: 35 }}>loading…</div>;
+    return <div className="github-loading" aria-label="Loading GitHub connections"><span className="skeleton" /><span className="skeleton" /></div>;
   }
 
   if (unavailable) {
@@ -161,7 +161,7 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
   const anyRepos = installs.some((i) => i.repositories.length > 0);
 
   return (
-    <div style={{ paddingLeft: 35 }}>
+    <div className="github-connect" style={{ paddingLeft: 35 }}>
       {installs.map((inst) => (
         <div key={inst.installation_id} style={{ marginBottom: 14 }}>
           <div
@@ -174,7 +174,7 @@ export function GitHubConnect({ teamId, isLeader }: Props) {
             <div style={{ fontSize: 12, color: 'var(--terracotta)' }}>{inst.error}</div>
           )}
           {inst.repositories.map((repo) => (
-            <div key={repo.full_name}>
+            <div className="repo-row" key={repo.full_name}>
             <div
               style={{
                 display: 'flex',

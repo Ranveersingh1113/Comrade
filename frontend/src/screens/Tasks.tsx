@@ -48,14 +48,14 @@ export function Tasks() {
   );
 
   return (
-    <main style={{ flex: 1, overflowY: 'auto' }}>
+    <main className="page-scroll tasks-page">
       <header className="screen-header">
         <div className="display">Tasks &amp; contribution</div>
         <div className="sub">
           proposed → confirmed → in progress → done · only the assignee confirms · no rankings
         </div>
       </header>
-      <div style={{ maxWidth: 780, margin: '0 auto', padding: '24px 32px 44px' }}>
+      <div className="content-column" style={{ maxWidth: 780, margin: '0 auto', padding: '24px 32px 44px' }}>
         {milestones.length > 0 && (
           <div style={{ display: 'flex', gap: 14, marginBottom: 22, flexWrap: 'wrap' }}>
             {milestones.map((ms) => {
@@ -76,7 +76,7 @@ export function Tasks() {
                   }}
                 >
                   <span className="display" style={{ fontSize: 30, color }}>
-                    ◆
+                    <span aria-hidden>+</span>
                   </span>
                   <span style={{ flex: 1 }}>
                     <span style={{ display: 'block', fontSize: 13, fontWeight: 700 }}>
@@ -250,8 +250,8 @@ export function Tasks() {
                                   onClick={() => void advance(t)}
                                   style={{
                                     marginLeft: 'auto',
-                                    border: '1px solid rgba(210,89,59,0.5)',
-                                    background: '#fff',
+                                     border: '1px solid rgba(199,104,99,0.5)',
+                                     background: 'var(--card)',
                                     color: 'var(--terracotta)',
                                     fontSize: 10.5,
                                     fontWeight: 600,

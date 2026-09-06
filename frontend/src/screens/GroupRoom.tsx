@@ -22,7 +22,7 @@ import type { AgentStep } from '../lib/agentApi';
 
 type RoomLayout = 'classic' | 'split' | 'board';
 
-export function GroupRoom({ thread }: { thread: Thread }) {
+export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread; allowTeamMessages?: boolean }) {
   const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
   const { messages, compilationsByMessage, error, refresh } = useMessages(thread.id);
@@ -41,17 +41,20 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   const [agentNote, setAgentNote] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [composerMode, setComposerMode] = useState<ComposerModeValue>(() => {
-    if (!thread) return 'team';
+    if (!allowTeamMessages) return 'agent';
     return (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
-      ?? (thread.kind === 'work' ? 'agent' : 'team');
+      ?? 'team';
   });
   useEffect(() => {
-    if (!thread) return;
+    if (!allowTeamMessages) {
+      setComposerMode('agent');
+      return;
+    }
     setComposerMode(
       (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
-        ?? (thread.kind === 'work' ? 'agent' : 'team'),
+        ?? 'team',
     );
-  }, [myUserId, thread]);
+  }, [myUserId, thread, allowTeamMessages]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -128,7 +131,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
     setSendError(null);
     setNote(null);
     setAgentNote(null);
-    const mentionsAi = composerMode === 'agent' || /@comrade/i.test(text);
+    const mentionsAi = !allowTeamMessages || composerMode === 'agent' || /@comrade/i.test(text);
     if (mentionsAi) {
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
@@ -159,7 +162,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
           // here is why — and emphatically not an error banner: nothing they
           // did went wrong.
           else if (f.type === 'empty') setAgentNote(f.detail ?? null);
-          // 🔴 And the same thing again, one layer down. Since the durable
+          // And the same thing again, one layer down. Since the durable
           // queue the agent no longer runs inside this request: the browser
           // replays the run row, so the reason a turn produced nothing now
           // arrives on the TERMINAL frame instead of as 'empty'. Dropping it
@@ -246,7 +249,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
   );
 
   return (
-    <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+    <main className="group-room" style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
       <header
         style={{
           flex: 'none',
@@ -366,9 +369,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                   borderLeft: '3px solid var(--terracotta-soft)',
                 }}
               >
-                <span className="orb" style={{ width: 36, height: 36, fontSize: 13, animation: 'breathe 2s ease-in-out infinite' }}>
-                  ◈
-                </span>
+                <AiOrb size={36} breathing />
                 {pending ? (
                   <div
                     style={{
@@ -421,9 +422,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                   borderLeft: '3px solid var(--border-soft)',
                 }}
               >
-                <span className="orb" style={{ width: 36, height: 36, fontSize: 13, opacity: 0.55 }}>
-                  ◈
-                </span>
+                <AiOrb size={36} style={{ opacity: 0.55 }} />
                 <div
                   style={{
                     paddingTop: 10,
@@ -455,14 +454,14 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                 the transcript where it scrolls away. */}
             <PreviewBar teamId={teamId} threadId={thread.id} />
             <div className="composer">
-              {thread && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode={thread.kind === 'work' ? 'agent' : 'team'} onChange={setComposerMode} />}
+              {allowTeamMessages && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode="team" onChange={setComposerMode} />}
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void send();
                 }}
-                placeholder={composerMode === 'agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'}
+                placeholder={!allowTeamMessages || composerMode === 'agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'}
               />
               <button className="btn-ink" onClick={() => void send()}>
                 SEND
@@ -504,11 +503,16 @@ function MessageRow({
     compilation?.diff_message_id ? new Set([compilation.diff_message_id]) : new Set(),
   );
   const isAI = cls.kind === 'ai';
+  const ownHumanMessage = mine && !isAI;
   const [hover, setHover] = useState(false);
 
   if (cls.kind === 'deleted') {
     return (
-      <div className="fade-up" style={{ display: 'flex', gap: 14, padding: '10px 28px' }}>
+      <div
+        className="fade-up"
+        data-message-side={ownHumanMessage ? 'right' : 'left'}
+        style={{ display: 'flex', gap: 14, padding: '10px 28px', justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start' }}
+      >
         <span
           style={{
             display: 'flex',
@@ -540,14 +544,16 @@ function MessageRow({
     <div
       className="fade-up"
       data-sender={m.sender_kind}
+      data-message-side={ownHumanMessage ? 'right' : 'left'}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
         display: 'flex',
         gap: 14,
         padding: '10px 28px',
-        borderLeft: `3px solid ${isAI ? 'var(--terracotta-soft)' : 'transparent'}`,
-        background: isAI ? 'rgba(228,121,91,0.05)' : 'transparent',
+        alignItems: 'flex-start',
+        justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start',
+        flexDirection: ownHumanMessage ? 'row-reverse' : 'row',
       }}
     >
       {isAI ? (
@@ -555,8 +561,26 @@ function MessageRow({
       ) : (
         <Avatar userId={m.sender_id ?? 'unknown'} name={senderName} size={36} />
       )}
-      <div style={{ minWidth: 0, flex: 1 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 9 }}>
+      <div style={{ minWidth: 0, maxWidth: 'min(76%, 700px)' }}>
+        <div
+          style={{
+            background: isAI ? 'rgba(118,85,121,0.09)' : ownHumanMessage ? 'rgba(239,173,154,0.16)' : 'var(--card)',
+            border: `1px solid ${isAI ? 'rgba(118,85,121,.22)' : 'var(--border-soft)'}`,
+            borderRadius: 12,
+            padding: '9px 12px',
+            boxShadow: '1px 1px 0 rgba(32,45,53,.06)',
+            textAlign: ownHumanMessage ? 'right' : 'left',
+          }}
+        >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: ownHumanMessage ? 'flex-end' : 'flex-start',
+            gap: 9,
+            flexWrap: 'wrap',
+          }}
+        >
           <span style={{ fontSize: 13.5, fontWeight: 700, letterSpacing: '-0.01em' }}>
             {senderName}
           </span>
@@ -567,7 +591,7 @@ function MessageRow({
                 fontWeight: 700,
                 letterSpacing: '0.14em',
                 color: 'var(--terracotta)',
-                border: '1px solid rgba(210,89,59,0.4)',
+                border: '1px solid rgba(118,85,121,0.4)',
                 borderRadius: 3,
                 padding: '2px 6px',
               }}
@@ -609,7 +633,7 @@ function MessageRow({
                 cursor: 'pointer',
               }}
             >
-              ✕ remove
+               remove
             </button>
           )}
           {/* Any member may mark any human message as worth keeping
@@ -631,7 +655,7 @@ function MessageRow({
                 cursor: 'pointer',
               }}
             >
-              ✦ remember this
+               remember this
             </button>
           )}
           {/* Proactive AI observations get a one-tap standing objection (any
@@ -642,7 +666,7 @@ function MessageRow({
               className="mono"
               title="Tombstones this message and tells Comrade not to post this kind of observation again"
               style={{
-                border: '1px solid rgba(210,89,59,0.35)',
+                border: '1px solid rgba(199,104,99,0.4)',
                 background: 'transparent',
                 color: 'var(--terracotta)',
                 fontSize: 9,
@@ -652,7 +676,7 @@ function MessageRow({
                 cursor: 'pointer',
               }}
             >
-              ✕ REMOVE · DON'T DO THIS AGAIN
+               REMOVE · DON'T DO THIS AGAIN
             </button>
           )}
         </div>
@@ -667,6 +691,7 @@ function MessageRow({
           }}
         >
           {m.body}
+        </div>
         </div>
         {compilation && <MemoryDiffCard compilation={compilation} />}
       </div>
@@ -825,7 +850,7 @@ function ClassicPanel({
           )}
           {docs.map((d) => (
             <div key={d.id} style={{ display: 'flex', gap: 9 }}>
-              <span>▤</span>
+              <span className="mono">DOC</span>
               <span>
                 {d.filename ?? d.kind}
                 <span
@@ -1024,7 +1049,7 @@ function BoardStrip({
           Docs
         </div>
         {docs.slice(0, 2).map((d) => (
-          <div key={d.id}>▤ {d.filename ?? d.kind}</div>
+          <div key={d.id}><span className="mono">DOC</span> {d.filename ?? d.kind}</div>
         ))}
         {docs.length === 0 && <span style={{ color: 'var(--faint)' }}>none yet</span>}
       </div>

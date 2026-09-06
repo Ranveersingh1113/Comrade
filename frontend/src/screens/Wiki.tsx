@@ -132,7 +132,7 @@ export function Wiki() {
     c.source_kind === 'message' ? 'MSG' : c.source_kind === 'document' ? 'DOC' : 'GITHUB';
 
   return (
-    <main style={{ flex: 1, overflowY: 'auto' }}>
+    <main className="page-scroll wiki-page">
       <header className="screen-header" style={{ display: 'flex', alignItems: 'flex-end' }}>
         <div>
           <div className="display">Team wiki</div>
@@ -146,6 +146,7 @@ export function Wiki() {
         )}
       </header>
       <div
+        className="content-column"
         style={{
           maxWidth: 720,
           margin: '0 auto',

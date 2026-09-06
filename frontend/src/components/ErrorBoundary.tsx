@@ -27,8 +27,9 @@ export class ErrorBoundary extends Component<Props, State> {
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <main style={{ flex: 1, overflowY: 'auto', padding: '40px 32px' }}>
-        <div className="display" style={{ fontSize: 28 }}>
+      <main className="error-screen" style={{ flex: 1, overflowY: 'auto', padding: '40px 32px' }}>
+        <div className="micro-label">A room interruption</div>
+        <div className="display" style={{ fontSize: 38, marginTop: 12 }}>
           This screen hit an error.
         </div>
         <div style={{ fontSize: 13, color: 'var(--muted)', marginTop: 10, lineHeight: 1.6 }}>

@@ -22,6 +22,7 @@ import { Setup } from './screens/Setup';
 import { Team } from './screens/Team';
 import { GitHubCallback } from './screens/GitHubCallback';
 import { LegacyThreadRedirect, Threads } from './screens/Threads';
+import { OrbLogo } from './components/Avatar';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { session, loading, error, retry } = useAuth();
@@ -29,15 +30,15 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
     return (
       <div
         style={{
-          height: '100vh',
+          minHeight: '100dvh',
+          background: 'var(--canvas)',
+          flexDirection: 'column',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        <span className="orb breathing" style={{ width: 44, height: 44, fontSize: 17 }}>
-          ◈
-        </span>
+        <OrbLogo size={44} breathing />
       </div>
     );
   }
@@ -160,7 +161,7 @@ function TeamShellInner() {
                 cursor: 'pointer',
               }}
             >
-              <span aria-hidden>☰</span> Menu
+                <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>≡</span> Menu
             </button>
           )}
           <ErrorBoundary key={location.pathname}>

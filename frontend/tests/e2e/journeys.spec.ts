@@ -89,9 +89,9 @@ test.describe.serial('Comrade journeys', () => {
     const t2Card = page
       .getByTestId('consent-card')
       .filter({ hasText: 'standup moved to 3pm' });
-    await expect(t2Card.getByText('task_create').first()).toBeVisible();
-    await t2Card.getByRole('button', { name: 'ALLOW ONCE' }).click();
-    await expect(page.getByText('EXECUTED', { exact: false }).first()).toBeVisible({
+    await expect(t2Card.getByText(/New task/i).first()).toBeVisible();
+    await t2Card.getByRole('button', { name: 'Approve once' }).click();
+    await expect(page.getByText('COMPLETED', { exact: false }).first()).toBeVisible({
       timeout: 15000,
     });
 
@@ -117,7 +117,7 @@ test.describe.serial('Comrade journeys', () => {
     test.skip(!process.env.GEMINI_API_KEY, 'live agent turn needs a Gemini key');
     await page.goto(`/t/${state.teamId}/threads`);
     await page.getByText('General', { exact: true }).click();
-    await page.getByRole('button', { name: 'Agent mode' }).click();
+    await page.getByRole('button', { name: 'Comrade mode' }).click();
     await page.getByPlaceholder('Ask Comrade…').fill('What tasks are open right now?');
     await page.getByRole('button', { name: 'SEND' }).click();
     // the user's message and a non-empty AI reply both arrive via the server

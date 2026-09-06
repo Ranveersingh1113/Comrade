@@ -135,6 +135,11 @@ def tick() -> int:
     # version that installed a manifest the moment a repo was connected.
     from pipeline.repo_env import enforce_env_disk_cap, sweep_environments
 
+    # Long-running sandbox processes. NOTHING else reclaims one: a development
+    # server started three hours ago holds a port and a CPU share for as long
+    # as the host lives, and the turn that started it is long gone.
+    from agent.processes import reap as reap_processes
+
     try:
         sweep_stale_checkouts()
         sweep_environments()
@@ -143,6 +148,13 @@ def tick() -> int:
         enforce_disk_cap()
     except Exception:  # noqa: BLE001
         logger.exception("workspace sweep failed; queue drain unaffected")
+
+    try:
+        reaped = reap_processes()
+        if reaped:
+            logger.info("reaped %d idle sandbox process(es)", reaped)
+    except Exception:  # noqa: BLE001
+        logger.exception("process reap failed; queue drain unaffected")
     return processed
 
 

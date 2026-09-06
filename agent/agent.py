@@ -12,6 +12,7 @@ from google.adk.apps import App
 from agent.permission_plugin import ChokepointPlugin
 from agent.plan_tools import plan_update
 from agent.repo_tools import (
+    process_logs, process_start, process_stop,
     repo_edit, repo_glob, repo_grep, repo_guide, repo_propose_pr, repo_read,
     repo_run,
 )
@@ -255,6 +256,9 @@ root_agent = LlmAgent(
         repo_grep,
         repo_edit,
         repo_run,
+        process_start,
+        process_logs,
+        process_stop,
         repo_propose_pr,
         repo_activity,
         messages_search,

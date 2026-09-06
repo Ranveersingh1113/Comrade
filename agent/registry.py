@@ -142,6 +142,22 @@ REGISTRY: dict[str, ToolSpec] = {
     "repo_run": ToolSpec(
         "sandbox", writes=False, needs_human=False, args=RUN_POLICY
     ),
+    # A command that OUTLIVES the turn. Same surface and same command policy as
+    # repo_run — the containment is identical and the allowlist is the same
+    # one — but it is recorded in sandbox_processes because nothing else would
+    # know the container exists once the turn ends.
+    #
+    # needs_human=False for repo_run's reason: what a capped, non-root
+    # container with no credentials can do is bounded by the container, and a
+    # consent card per `npm run dev` is the fatigue §5 exists to avoid. The
+    # reviewable action downstream is still the pull request.
+    "process_start": ToolSpec(
+        "sandbox", writes=False, needs_human=False, args=RUN_POLICY
+    ),
+    # Neither takes a path or a command — they take an id this thread already
+    # owns, and RLS decides whether it does.
+    "process_logs": ToolSpec("db", writes=False, needs_human=False),
+    "process_stop": ToolSpec("db", writes=True, needs_human=False),
     # The thread's own plan. writes=True and needs_human=False, and unlike
     # team_propose_task that is not because the approval happens elsewhere —
     # there is no approval, because there is nothing to approve. The row is

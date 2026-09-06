@@ -24,7 +24,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "Deploy Comrade $GITHUB_SHA" \
-            --parameters "commands=[\"cd /opt/comrade && sh scripts/deploy_host.sh $GITHUB_SHA\"]" \
+            --parameters "commands=[\"cd /opt/comrade && git fetch --depth=1 origin \"$GITHUB_SHA\" && git show \"$GITHUB_SHA:scripts/deploy_host.sh\" | sh -s \"$GITHUB_SHA\"\"]" \
             --query 'Command.CommandId' --output text)
           # SSM's built-in waiter gives a Docker build only ~100 seconds.
           # The host build routinely exceeds that, so wait for its real terminal state.

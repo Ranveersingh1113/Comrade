@@ -8,6 +8,19 @@ permissions:
   contents: read
   id-token: write
 
+# 🔴 SERIALIZED, AND NEVER CANCELLED. Two deploys to one host interleave: the
+# second fetches a different commit into the same working tree while the first
+# is mid-build. Worse, GitHub's default cancel-in-progress would kill a run
+# during `shared.migrations` — a migration interrupted halfway is the one
+# failure this whole pipeline cannot roll back, because the schema is already
+# partly changed and the code that expects it was never activated.
+#
+# So a newer push WAITS. The host lock in deploy_host.sh is the second line of
+# defence for anything that reaches the box by another route.
+concurrency:
+  group: deploy-pilot
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

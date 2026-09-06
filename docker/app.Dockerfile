@@ -13,9 +13,17 @@ FROM python:3.12-slim
 
 # git is a runtime dependency, not a build one: repo_sync clones and
 # ensure_thread_checkout makes worktrees by shelling out to it.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# 🔴 THE DOCKER CLI IS A RUNTIME DEPENDENCY, and its absence was invisible.
+# agent/sandbox.py and agent/processes.py shell out to `docker` — that is how a
+# team's tests run and how a preview starts — and this image did not contain
+# it. Every repo_run, every process_start and every dependency install would
+# have failed in production with "Docker is not available", which reads like a
+# daemon problem rather than a missing binary.
+#
+# The CLI only; the DAEMON stays on the host. The workers reach it over the
+# mounted socket, and which services get that socket is an explicit choice in
+# compose rather than a property of this image.
+RUN apt-get update  && apt-get install -y --no-install-recommends       git ca-certificates curl gnupg  && install -m 0755 -d /etc/apt/keyrings  && curl -fsSL https://download.docker.com/linux/debian/gpg       -o /etc/apt/keyrings/docker.asc  && chmod a+r /etc/apt/keyrings/docker.asc  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable"       > /etc/apt/sources.list.d/docker.list  && apt-get update  && apt-get install -y --no-install-recommends docker-ce-cli  && apt-get purge -y curl gnupg && apt-get autoremove -y  && rm -rf /var/lib/apt/lists/*
 
 # uv, pinned. The lockfile is the reproducibility claim and a floating
 # installer is a way to lose it quietly.

@@ -125,3 +125,45 @@ certificate. Do not work around it by pointing the preview domain at the app.
 
 **Known limit.** WebSockets are not proxied, so hot reload does not work inside
 a preview; the page loads and a manual reload shows changes.
+
+## Release ordering
+
+`scripts/deploy_host.sh` builds a candidate, migrates, and only then activates:
+
+1. take the host lock (`flock`) — before the checkout, so two deploys cannot
+   fetch different commits into one working tree
+2. fetch and check out the exact SHA, never a branch tip
+3. `docker compose build` — a broken build stops here, previous stack untouched
+4. `docker compose run --rm --no-deps -T api python -m shared.migrations`
+5. `docker compose up -d` — **the first irreversible step**
+6. poll `/ready`, and fail loudly if it never comes
+
+🔴 This used to be `up -d --build` followed by the migrations, which is
+backwards in the way that costs you the site: `up` activates the new code, so a
+failing migration left the running stack on new code against an old schema. The
+healthy stack was gone before anything checked whether the release worked.
+
+The GitHub workflow is `concurrency: deploy-pilot` with
+`cancel-in-progress: false`. A newer push **waits**. Cancelling mid-run could
+interrupt `shared.migrations`, and a half-applied migration is the one failure
+this pipeline cannot roll back.
+
+### Who gets the Docker socket
+
+Both workers, and not the API.
+
+- `agent-worker` — runs a team's commands and starts previews
+- `pipeline-worker` — runs dependency setup and reaps idle processes
+- `api` — **no socket**. It is internet-facing and proxies a team's own code;
+  the socket is root on the host, so granting it would make a request-handling
+  bug a host compromise.
+
+Set `COMRADE_DOCKER_GID` to the host's docker group id
+(`getent group docker | cut -d: -f3`). The containers run as uid 10001, so
+group membership is what makes a root:docker socket usable, and a wrong value
+fails at runtime rather than at build.
+
+The workspaces directory is `chown`ed on the **host** by the deploy script. A
+Dockerfile `chown` sets ownership in an image layer and a bind mount replaces
+that layer wholesale, so image-layer ownership says nothing about a
+host-mounted folder.

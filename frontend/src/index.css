@@ -235,6 +235,24 @@ input, textarea, select {
   animation: breathe 3.4s ease-in-out infinite;
 }
 
+.orb-logo {
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  overflow: hidden;
+}
+.orb-logo img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.orb-logo.breathing {
+  animation: breathe 3.4s ease-in-out infinite;
+}
+
 .btn-primary {
   border: none;
   background: var(--terracotta);

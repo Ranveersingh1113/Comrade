@@ -1,4 +1,5 @@
 import { avatarColors, initialsOf } from '../lib/format';
+import type { CSSProperties } from 'react';
 
 export function Avatar({
   userId,
@@ -35,13 +36,25 @@ export function Avatar({
   );
 }
 
-export function AiOrb({ size = 36, breathing = false }: { size?: number; breathing?: boolean }) {
+export function OrbLogo({
+  size = 36,
+  breathing = false,
+  style,
+}: {
+  size?: number;
+  breathing?: boolean;
+  style?: CSSProperties;
+}) {
   return (
     <span
-      className={`orb${breathing ? ' breathing' : ''}`}
-      style={{ width: size, height: size, fontSize: Math.round(size * 0.36) }}
+      className={`orb-logo${breathing ? ' breathing' : ''}`}
+      style={{ width: size, height: size, ...style }}
     >
-      <span aria-hidden style={{ fontWeight: 700 }}>+</span>
+      <img src="/images/comrade-orb.png" alt="" aria-hidden />
     </span>
   );
+}
+
+export function AiOrb(props: { size?: number; breathing?: boolean; style?: CSSProperties }) {
+  return <OrbLogo {...props} />;
 }

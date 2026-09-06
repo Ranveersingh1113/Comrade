@@ -5,7 +5,7 @@ import type { MemoryCompilation, Milestone } from '../lib/types';
 import { daysUntil } from '../lib/format';
 import { useAuth } from '../state/AuthContext';
 import { useTeam } from '../state/TeamContext';
-import { Avatar } from './Avatar';
+import { AiOrb, Avatar, OrbLogo } from './Avatar';
 import { useThreads } from '../hooks/useThreads';
 
 const NAV_ITEMS = [
@@ -95,23 +95,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
     >
       <div style={{ padding: '0 10px 6px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 16 }}>
-          <span
-            style={{
-              width: 28,
-              height: 28,
-              flex: 'none',
-              borderRadius: 9,
-               background: 'var(--paper)',
-              boxShadow: '0 0 0 1px rgba(241,239,234,0.14)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--ink)',
-              fontSize: 15,
-            }}
-          >
-            <span aria-hidden>+</span>
-          </span>
+          <OrbLogo size={28} />
           <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: '0.02em' }}>comrade</span>
         </div>
         <div className="display" style={{ fontSize: 26, letterSpacing: '0.01em' }}>
@@ -156,12 +140,7 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void } = {}) {
           textDecoration: 'none',
         })}
       >
-        <span
-          className="orb breathing"
-          style={{ width: 34, height: 34, fontSize: 14 }}
-        >
-          <span aria-hidden>+</span>
-        </span>
+        <AiOrb size={34} breathing />
         <span>
           <span style={{ display: 'block', fontSize: 13, fontWeight: 600 }}>Comrade</span>
           <span

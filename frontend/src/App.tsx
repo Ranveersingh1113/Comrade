@@ -22,6 +22,7 @@ import { Setup } from './screens/Setup';
 import { Team } from './screens/Team';
 import { GitHubCallback } from './screens/GitHubCallback';
 import { LegacyThreadRedirect, Threads } from './screens/Threads';
+import { OrbLogo } from './components/Avatar';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { session, loading, error, retry } = useAuth();
@@ -37,9 +38,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
           justifyContent: 'center',
         }}
       >
-        <span className="orb breathing" style={{ width: 44, height: 44, fontSize: 17 }}>
-          <span aria-hidden>+</span>
-        </span>
+        <OrbLogo size={44} breathing />
       </div>
     );
   }

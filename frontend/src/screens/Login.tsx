@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Navigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../state/AuthContext';
+import { OrbLogo } from '../components/Avatar';
 
 export function Login() {
   const { session } = useAuth();
@@ -79,7 +80,7 @@ export function Login() {
       <div className="login-grid" style={{ width: 'min(100%, 1160px)', margin: 'auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(320px, 420px)', gap: 64, alignItems: 'center', padding: '56px 32px' }}>
         <div style={{ maxWidth: 570 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, color: 'var(--ink)' }}>
-            <span className="orb breathing" style={{ width: 48, height: 48, fontSize: 20 }} aria-hidden>+</span>
+            <OrbLogo size={48} breathing />
             <span className="mono" style={{ fontSize: 12, letterSpacing: '.2em', textTransform: 'uppercase' }}>COMRADE / TEAM ROOM</span>
           </div>
           <div className="display" style={{ fontSize: 'clamp(54px, 8vw, 96px)', lineHeight: .91, marginTop: 34, color: 'var(--ink)' }}>

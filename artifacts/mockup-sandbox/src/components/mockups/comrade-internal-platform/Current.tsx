@@ -11,7 +11,16 @@ const people = [
 ];
 
 function Avatar({ initials, ai = false }: { initials: string; ai?: boolean }) {
-  return <span className={ai ? 'ci-orb' : 'ci-avatar'}>{ai ? '+' : initials}</span>;
+  return ai ? (
+    <img
+      className="ci-orb"
+             src="/__mockup/images/comrade-internal-platform-brand-orb.png"
+      alt="Comrade"
+      style={{ objectFit: 'cover' }}
+    />
+  ) : (
+    <span className="ci-avatar">{initials}</span>
+  );
 }
 
 function Message({
@@ -43,7 +52,15 @@ export function Current() {
   return (
     <main className="comrade-current">
       <nav className="ci-sidebar">
-        <div className="ci-brand"><span className="ci-brand-mark">+</span><b>comrade</b></div>
+        <div className="ci-brand">
+          <img
+            className="ci-brand-mark"
+            src="/__mockup/images/comrade-landing-orb.png"
+            alt="Comrade"
+            style={{ objectFit: 'cover' }}
+          />
+          <b>comrade</b>
+        </div>
         <div className="ci-team-name">Northstar</div>
         <button className="ci-switch">switch team</button>
 

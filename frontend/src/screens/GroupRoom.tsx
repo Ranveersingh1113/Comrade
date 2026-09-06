@@ -365,9 +365,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                   borderLeft: '3px solid var(--terracotta-soft)',
                 }}
               >
-                <span className="orb" style={{ width: 36, height: 36, fontSize: 13, animation: 'breathe 2s ease-in-out infinite' }}>
-                  <span aria-hidden>+</span>
-                </span>
+                <AiOrb size={36} breathing />
                 {pending ? (
                   <div
                     style={{
@@ -420,9 +418,7 @@ export function GroupRoom({ thread }: { thread: Thread }) {
                   borderLeft: '3px solid var(--border-soft)',
                 }}
               >
-                <span className="orb" style={{ width: 36, height: 36, fontSize: 13, opacity: 0.55 }}>
-                  <span aria-hidden>+</span>
-                </span>
+                <AiOrb size={36} style={{ opacity: 0.55 }} />
                 <div
                   style={{
                     paddingTop: 10,

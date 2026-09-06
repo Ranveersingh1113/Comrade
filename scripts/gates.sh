@@ -93,8 +93,18 @@ done
 step "backend (pytest)"
 uv run pytest -q
 
-step "frontend typecheck"
-(cd frontend && npx tsc --noEmit)
+# 🔴 `npm run build`, NOT `npx tsc --noEmit`. They resolve different TypeScript
+# configurations — the build runs `tsc -b`, which follows the solution config,
+# and --noEmit does not. The typecheck lane was green for weeks while the
+# production image could not be built at all: `.catch` on a Supabase thenable
+# only fails under `tsc -b`, and it was found by building the Docker image
+# rather than by any gate. A lane that does not run the command the deploy runs
+# is not checking the deploy.
+step "frontend build (the command the deploy runs)"
+(cd frontend && npm run build)
+
+step "frontend lint"
+(cd frontend && npm run lint)
 
 step "frontend unit + component"
 (cd frontend && npm test -- --run)

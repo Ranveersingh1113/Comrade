@@ -8,6 +8,7 @@ git fetch --depth=1 origin "$1"
 git checkout --detach --force "$1"
 mkdir -p /workspaces
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T api python -m shared.migrations
 
 for attempt in $(seq 1 24); do
   if docker exec comrade-api-1 python -c \

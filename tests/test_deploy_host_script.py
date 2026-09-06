@@ -6,4 +6,6 @@ def test_deploy_script_pins_the_requested_commit_and_waits_for_ready() -> None:
 
     assert 'git checkout --detach --force "$1"' in script
     assert 'docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build' in script
+    assert 'docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T api python -m shared.migrations' in script
+    assert script.index('python -m shared.migrations') < script.index('http://localhost:8000/ready')
     assert 'http://localhost:8000/ready' in script

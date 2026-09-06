@@ -59,7 +59,7 @@ services:
       - ${COMRADE_WORKSPACES_ROOT:-/workspaces}:/workspaces
       # The sandbox runs as a sibling container, not a child. The bind mounts
       # it passes are resolved by the HOST daemon, so the workspaces volume
-      # must be mounted at the same path on the host — see docs/operations.md.
+      # must be mounted at the same path on the host — see docs/deployment.md.
       - /var/run/docker.sock:/var/run/docker.sock
     stop_grace_period: 300s
 

@@ -1,1 +1,0 @@
-**~~Open question — share prompt ownership~~** **Decided:** Any member can trigger AI actions on shared content. Result appears in group chat, visible to all.

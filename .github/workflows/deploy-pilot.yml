@@ -2,7 +2,7 @@ name: Deploy pilot
 
 on:
   push:
-    branches: [claude/multiplayer-harness]
+    branches: [master]
 
 permissions:
   contents: read

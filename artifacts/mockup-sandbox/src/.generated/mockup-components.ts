@@ -2,5 +2,6 @@
 type ModuleMap = Record<string, () => Promise<Record<string, unknown>>>;
 export const modules: ModuleMap = {
   "./components/mockups/comrade-landing/ComradeLanding.tsx": () => import("../components/mockups/comrade-landing/ComradeLanding.tsx"),
-  "./components/mockups/comrade-landing/ComradeLandingOrbit.tsx": () => import("../components/mockups/comrade-landing/ComradeLandingOrbit.tsx")
+  "./components/mockups/comrade-landing/ComradeLandingOrbit.tsx": () => import("../components/mockups/comrade-landing/ComradeLandingOrbit.tsx"),
+  "./components/mockups/templates/RedlineReadyInboxView-LBoY0d/App.tsx": () => import("../components/mockups/templates/RedlineReadyInboxView-LBoY0d/App.tsx")
 };

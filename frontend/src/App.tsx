@@ -24,7 +24,7 @@ import { GitHubCallback } from './screens/GitHubCallback';
 import { LegacyThreadRedirect, Threads } from './screens/Threads';
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { session, loading } = useAuth();
+  const { session, loading, error, retry } = useAuth();
   if (loading) {
     return (
       <div
@@ -38,6 +38,31 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
         <span className="orb breathing" style={{ width: 44, height: 44, fontSize: 17 }}>
           ◈
         </span>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div
+        role="alert"
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: 24,
+          background: 'var(--canvas)',
+        }}
+      >
+        <div className="card" style={{ width: 'min(100%, 420px)', padding: 24 }}>
+          <div className="display" style={{ fontSize: 26 }}>
+            Sign-in check failed
+          </div>
+          <p style={{ color: 'var(--text-soft)', fontSize: 13, lineHeight: 1.6 }}>{error}</p>
+          <button className="btn-primary" onClick={retry}>
+            TRY AGAIN
+          </button>
+        </div>
       </div>
     );
   }

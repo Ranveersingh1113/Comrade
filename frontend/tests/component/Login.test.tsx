@@ -45,4 +45,17 @@ describe('Login Google OAuth', () => {
     expect(await screen.findByText('Google sign-in is unavailable')).toBeVisible();
     expect(button).toBeEnabled();
   });
+
+  test('labels the email field and explains an empty submission', async () => {
+    render(<Login />);
+
+    expect(screen.getByRole('textbox', { name: /email address/i })).toBeRequired();
+    await userEvent.click(screen.getByRole('button', { name: /send link/i }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter a valid email address.');
+    expect(screen.getByRole('textbox', { name: /email address/i })).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
+  });
 });

@@ -16,7 +16,10 @@ export function Login() {
 
   const sendLink = async () => {
     const target = email.trim();
-    if (!target) return;
+    if (!target || !target.includes('@')) {
+      setError('Enter a valid email address.');
+      return;
+    }
     setBusy(true);
     setError(null);
     const { error: err } = await supabase.auth.signInWithOtp({
@@ -43,7 +46,14 @@ export function Login() {
 
   const signInPassword = async () => {
     const target = email.trim();
-    if (!target || !password) return;
+    if (!target || !target.includes('@')) {
+      setError('Enter a valid email address.');
+      return;
+    }
+    if (!password) {
+      setError('Enter your password.');
+      return;
+    }
     setBusy(true);
     setError(null);
     const { error: err } = await supabase.auth.signInWithPassword({
@@ -130,8 +140,12 @@ export function Login() {
               OR CONTINUE WITH EMAIL
               <span style={{ height: 1, background: 'var(--line)', flex: 1 }} />
             </div>
+            <label className="micro-label" htmlFor="login-email" style={{ display: 'block', marginTop: 22 }}>
+              Email address
+            </label>
             <div className="composer" style={{ marginTop: 26 }}>
               <input
+                id="login-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -139,6 +153,9 @@ export function Login() {
                   if (e.key === 'Enter') void (usePassword ? signInPassword() : sendLink());
                 }}
                 placeholder="you@university.edu"
+                required
+                aria-invalid={error?.toLowerCase().includes('email') || undefined}
+                aria-describedby={error ? 'login-error' : undefined}
                 autoFocus
               />
               {!usePassword && (
@@ -150,6 +167,7 @@ export function Login() {
             {usePassword && (
               <div className="composer" style={{ marginTop: 10 }}>
                 <input
+                  id="login-password"
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -157,7 +175,10 @@ export function Login() {
                     if (e.key === 'Enter') void signInPassword();
                   }}
                   placeholder="password"
-                  aria-label="password"
+                  aria-label="Password"
+                  required
+                  aria-invalid={error?.toLowerCase().includes('password') || undefined}
+                  aria-describedby={error ? 'login-error' : undefined}
                 />
                 <button className="btn-ink" disabled={busy} onClick={() => void signInPassword()}>
                   {busy ? '…' : 'SIGN IN'}
@@ -181,7 +202,9 @@ export function Login() {
               {usePassword ? '← MAGIC LINK INSTEAD' : 'USE A PASSWORD INSTEAD'}
             </button>
             {error && (
-              <div style={{ marginTop: 12, fontSize: 12, color: 'var(--terracotta)' }}>{error}</div>
+              <div id="login-error" role="alert" style={{ marginTop: 12, fontSize: 12, color: 'var(--terracotta)' }}>
+                {error}
+              </div>
             )}
           </>
         )}

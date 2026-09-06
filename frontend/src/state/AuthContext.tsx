@@ -7,6 +7,8 @@ interface AuthState {
   session: Session | null;
   profile: Profile | null;
   loading: boolean;
+  error: string | null;
+  retry: () => void;
   signOut: () => Promise<void>;
 }
 
@@ -14,6 +16,8 @@ const AuthContext = createContext<AuthState>({
   session: null,
   profile: null,
   loading: true,
+  error: null,
+  retry: () => {},
   signOut: async () => {},
 });
 
@@ -47,15 +51,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
+    setError(null);
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (cancelled) return;
-      setSession(data.session);
-      if (!data.session) setLoading(false);
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (cancelled) return;
+        setSession(data.session);
+        if (!data.session) setLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSession(null);
+        setProfile(null);
+        setError('We could not verify your session. Check your connection and try again.');
+        setLoading(false);
+      });
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
       setSession(next);
@@ -68,7 +85,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       sub.subscription.unsubscribe();
     };
-  }, []);
+  }, [retryNonce]);
 
   useEffect(() => {
     if (!session) return;
@@ -87,8 +104,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await supabase.auth.signOut();
   };
 
+  const retry = () => setRetryNonce((value) => value + 1);
+
   return (
-    <AuthContext.Provider value={{ session, profile, loading, signOut }}>
+    <AuthContext.Provider value={{ session, profile, loading, error, retry, signOut }}>
       {children}
     </AuthContext.Provider>
   );

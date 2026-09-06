@@ -16,33 +16,44 @@ export function TeamGate() {
   const [options, setOptions] = useState<TeamOption[] | null>(null);
   const [newName, setNewName] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const uid = session?.user.id ?? '';
 
   const load = async () => {
+    setOptions(null);
+    setLoadError(null);
     // Not `.eq('status','active')`: an INVITED row is exactly what this
     // screen exists to show. But a row you LEFT must not appear at all —
     // status !== 'active' renders the ACCEPT INVITE branch below, so a team
     // you walked out of would offer to let you back in, and the update would
     // be refused by the transition guard.
-    const { data: ms } = await supabase
+    const { data: ms, error: membershipsError } = await supabase
       .from('memberships')
       .select('*')
       .eq('user_id', uid)
       .in('status', ['invited', 'active']);
+    if (membershipsError) {
+      setLoadError('We could not load your teams. Check your connection and try again.');
+      return;
+    }
     const memberships = (ms as Membership[] | null) ?? [];
     if (memberships.length === 0) {
       setOptions([]);
       return;
     }
-    const { data: teams } = await supabase
+    const { data: teams, error: teamsError } = await supabase
       .from('teams')
       .select('*')
       .in(
         'id',
         memberships.map((m) => m.team_id),
       );
+    if (teamsError) {
+      setLoadError('We found your memberships, but could not load the teams. Please try again.');
+      return;
+    }
     const byId = new Map(((teams as Team[] | null) ?? []).map((t) => [t.id, t]));
     setOptions(
       memberships
@@ -121,7 +132,19 @@ export function TeamGate() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 26 }}>
-          {options === null && <div style={{ color: 'var(--faint)', fontSize: 13 }}>Loading…</div>}
+          {options === null && !loadError && (
+            <div style={{ color: 'var(--faint)', fontSize: 13 }}>Loading…</div>
+          )}
+          {loadError && (
+            <div className="card" role="alert" style={{ padding: '16px 18px' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-soft)', lineHeight: 1.5 }}>
+                {loadError}
+              </div>
+              <button className="btn-ink" style={{ marginTop: 12 }} onClick={() => void load()}>
+                TRY AGAIN
+              </button>
+            </div>
+          )}
           {options?.length === 0 && (
             <div className="card" style={{ padding: '15px 18px', fontSize: 13, color: 'var(--text-soft)' }}>
               No teams yet — create one below, or ask a teammate's leader to invite you.
@@ -159,22 +182,26 @@ export function TeamGate() {
           ))}
         </div>
 
-        <div className="micro-label" style={{ margin: '34px 0 12px' }}>
-          Start a new team
-        </div>
-        <div className="composer">
-          <input
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void createTeam();
-            }}
-            placeholder="Team name — e.g. MealShare"
-          />
-          <button className="btn-primary" disabled={busy} onClick={() => void createTeam()}>
-            CREATE
-          </button>
-        </div>
+        {!loadError && (
+          <>
+            <div className="micro-label" style={{ margin: '34px 0 12px' }}>
+              Start a new team
+            </div>
+            <div className="composer">
+              <input
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void createTeam();
+                }}
+                placeholder="Team name — e.g. MealShare"
+              />
+              <button className="btn-primary" disabled={busy} onClick={() => void createTeam()}>
+                CREATE
+              </button>
+            </div>
+          </>
+        )}
         {error && <div style={{ marginTop: 12, fontSize: 12, color: 'var(--terracotta)' }}>{error}</div>}
 
         <button

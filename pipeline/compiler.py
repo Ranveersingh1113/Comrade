@@ -905,11 +905,26 @@ def enqueue_document(
     dedupe_key = f"document:{document_id}"
     with team_session(Role.PIPELINE, team_id) as conn:
         document = conn.execute(
-            "select id from public.documents where id=%s and deleted_at is null",
+            "select id, purpose from public.documents"
+            " where id=%s and deleted_at is null",
             (document_id,),
         ).fetchone()
         if document is None:
             raise LookupError("document not found or not accessible")
+        # 🔴 The compiler used to ingest whatever it was given, into the TEAM
+        # wiki, which every member can read. A file attached to a restricted
+        # thread would have had its contents published to people who cannot
+        # open that thread — not by a bug here, but by this working exactly as
+        # designed on a document nobody had said was shareable.
+        #
+        # Promotion is a member's act, and this is where the absence of one is
+        # refused. Permanent rather than retryable: nothing about waiting will
+        # make an unpromoted document promotable.
+        if document[1] != "team_knowledge":
+            raise PermanentJobError(
+                f"document {document_id} is {document[1]}, not team knowledge —"
+                " a member has to promote it before it can go into the wiki"
+            )
         conn.execute(
             "update public.documents set status='parsing' where id=%s",
             (document_id,),

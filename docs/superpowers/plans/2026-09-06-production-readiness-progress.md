@@ -1306,6 +1306,66 @@ coverage of a background process writing to the tree after a check: the
 mechanism handles it by construction (the digest moves) but nothing exercises
 that path.
 
+### T24 — Add scoped thread attachments and explicit knowledge promotion
+
+**Changed:** `supabase/migrations/20260908100000_thread_attachments.sql`,
+`20260908110000_team_document_default.sql`, `pipeline/compiler.py`,
+`tests/test_thread_attachments.py`, `tests/test_server_budget.py`.
+
+**Regression — every uploaded document was TEAM KNOWLEDGE on arrival.** There
+was no thread binding and no purpose, and the compiler ingested whatever it
+was given straight into the team wiki, which every member can read. A file
+dropped into a restricted thread would have had its contents published to
+people who cannot open that thread — not by a bug in the compiler, but by the
+compiler working exactly as designed on a document nobody had said was
+shareable.
+
+**Design:** three purposes, and the DEFAULT IS THE NARROW ONE. A member
+dropping a file into a conversation is not publishing it, so an attachment is
+`turn_context` — shown to the model for this piece of work and nothing else —
+until a member promotes it. Promotion is refused permanently at the compiler
+if it has not happened (nothing about waiting makes an unpromoted document
+promotable) and recorded with who did it, in a table that outlives the row.
+
+**Also:** existing thread-less documents were migrated to `team_knowledge`,
+not to the safe-looking default. They were uploaded through the team screen
+and compiled into the wiki, so that is what they are — calling them
+`turn_context` would retroactively claim a privacy they never had, and
+backdating a guarantee is a worse lie than not having had one.
+**Also:** three T21 tests then went red, correctly. The column default made
+EVERY new document `turn_context`, including team-screen uploads with no
+thread — which would have quietly stopped the entire documents feature
+compiling anything. That is how a privacy default becomes a silent outage. The
+rule is about the SHAPE of the row: attached to a thread means scoped to that
+thread, attached to nothing means shared with the team.
+
+**A real flake, found and fixed on the way.** `test_server_budget._seed_runs`
+defaulted to `minutes_ago=5` and the usage bucket is
+`date_trunc('hour', ...)`, so for the first five minutes of every hour it
+seeded spend onto the PREVIOUS hour's row — one `reserve_turn` never reads.
+Confirmed directly: at 20:03, `date_trunc('hour', now() - 5 minutes)` is
+19:00 while the reservation reads 20:00. A full suite run takes nine minutes
+and crossed that window regularly, which is why this surfaced twice in this
+session and was mistaken for contention the first time. A test that fails on
+the clock is one everybody learns to re-run rather than read.
+
+**Passing:** 11 attachment tests; full suite below.
+
+**Migration/rollback:** additive — two columns, a purpose check, an audit
+table and two triggers. The data migration is one-way in meaning (it names
+what existing documents already were) but changes no behaviour on rollback.
+
+**Ceiling:** 🔴 NO UI AT ALL. There is no composer attachment control, no
+promotion button, no visibility warning shown to the member before they
+promote — the model and its rules exist and nothing in the product reaches
+them. 🔴 Storage authorization is unchanged: the bucket is private and read
+through the service key server-side, but nothing binds a signed URL's scope to
+the attachment's purpose, so a member who can call the download API for a
+document id is not checked against the thread. 🔴 One unexplained failure:
+`test_removing_someone_is_recorded_too` failed once in a full run and passed
+in isolation and in every run since. No cause found, and recorded rather than
+dismissed.
+
 ---
 
 ## Standing ceilings

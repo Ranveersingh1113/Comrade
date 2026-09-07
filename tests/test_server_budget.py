@@ -15,7 +15,7 @@ def _admin():
     return conn
 
 
-def _seed_runs(n: int, *, minutes_ago: int = 5) -> None:
+def _seed_runs(n: int, *, minutes_ago: int = 0) -> None:
     """Spend `n` turns against the team's hourly bucket.
 
     This used to insert agent_runs rows, because the cap was a `count(*)` over
@@ -26,6 +26,14 @@ def _seed_runs(n: int, *, minutes_ago: int = 5) -> None:
     `minutes_ago` still means what it did: the bucket is keyed by hour, so
     spend from two hours ago lands on a different row and falls out of the
     window for free rather than by a date comparison.
+
+    🔴 It DEFAULTED to 5, and the bucket is `date_trunc('hour', ...)`. So for
+    the first five minutes of every hour, `now() - 5 minutes` truncated to the
+    PREVIOUS hour: the spend was seeded onto a row `reserve_turn` never looks
+    at, and the cap test failed for four minutes in every sixty. A full suite
+    run takes nine minutes, so it crossed that window regularly — and a test
+    that fails on the clock is one everybody learns to re-run rather than
+    read.
     """
     conn = _admin()
     try:

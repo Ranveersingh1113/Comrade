@@ -21,7 +21,7 @@ capture is ambient — nobody asks for it, it just keeps up with the room.
 from psycopg.types.json import Json
 
 from pipeline.compiler import (
-    apply_compilation, consolidate, extract_candidates,
+    apply_compilation, bind_to_seen_versions, consolidate, extract_candidates,
 )
 from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
@@ -347,6 +347,9 @@ def compile_messages(
     decisions = (
         consolidate(candidates, pages, len(marked)) if candidates else []
     )
+    # Bind each revision to the version this snapshot showed, so a second
+    # compile cannot erase a first one it never saw.
+    bind_to_seen_versions(decisions, pages)
 
     with team_session(Role.PIPELINE, team_id) as conn:
         return apply_compilation(

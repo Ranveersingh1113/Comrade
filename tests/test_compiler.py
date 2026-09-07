@@ -262,13 +262,21 @@ def test_apply_add_without_page_title_lands_on_default_page(seeded):
         conn.close()
 
 
-def test_apply_bad_target_falls_back_to_add(seeded):
+def test_apply_rejects_a_decision_naming_an_unknown_entry(seeded):
+    """🔴 This test used to assert `added == 1`: a decision naming an entry
+    that does not exist FELL BACK to add, so a hallucinated entry id did not
+    fail and did not get rejected — it got published as a brand new fact.
+
+    T18 rejects it instead. A model that invented an id has told us nothing
+    about where this candidate belongs, and inventing a home for it is the
+    system agreeing."""
     cands = [Candidate(text="Orphan fact")]
     decs = [Decision(candidate_index=0, action="revise",
                      entry_id="00000000-0000-0000-0000-0000000000ff")]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
         result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
-    assert result["added"] == 1 and result["revised"] == 0
+    assert result["rejected"] == 1
+    assert result["added"] == 0 and result["revised"] == 0
 
 
 def test_a_new_page_gets_its_description_written(seeded):

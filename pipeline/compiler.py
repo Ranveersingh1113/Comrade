@@ -164,10 +164,25 @@ class Decision(BaseModel):
     # ever a fact page — without it the kind column exists and nothing can
     # produce one, which is decoration (§24.2, §6.3-3).
     page_kind: str | None = None
+    #: For 'revise'/'invalidate': the active version consolidation actually
+    #: READ. Without it the apply supersedes whatever happens to be active at
+    #: apply time, so two compiles touching one entry meant the second
+    #: silently overwrote the first's judgement from stale context.
+    seen_version_id: str | None = None
 
 
 class _Consolidation(BaseModel):
     decisions: list[Decision]
+
+
+class StaleConsolidation(RuntimeError):
+    """The wiki moved while this compile was deciding what to do with it.
+
+    Raised rather than resolved: the right answer is to consolidate again
+    against fresh state, and the job retries with backoff (T12). Guessing which
+    of two judgements should win — from a snapshot we already know is out of
+    date — is how one compile silently erases another.
+    """
 
 
 class ExtractionUnavailable(RuntimeError):
@@ -469,6 +484,73 @@ def _resolve_page(
     ).fetchone()[0]
 
 
+def _normalise_source(text: str) -> str:
+    """Lowercase, collapse everything that is not a letter or digit.
+
+    The model re-punctuates and re-cases. Requiring a byte-identical quote
+    would quarantine facts that ARE supported, and a quarantine that fires on
+    correct work is one everybody learns to ignore.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", _unmark(text).lower()).strip()
+
+
+def _source_text(conn, team_id: str, source: tuple[str, str] | None) -> str | None:
+    """The text a citation points at, or None when it cannot be read here.
+
+    Team-scoped on purpose: a real quote from a source this team cannot see is
+    not support for a fact in this team's wiki, so scope is part of
+    verification rather than a separate check.
+    """
+    if source is None:
+        return None
+    kind, source_id = source
+    if kind != "message":
+        # Documents and repository activity are compiled from text held in
+        # memory at extraction time and not stored, so apply cannot re-read
+        # them. Recorded as a ceiling rather than papered over.
+        return None
+    row = conn.execute(
+        "select body from public.messages where id=%s and team_id=%s",
+        (source_id, team_id),
+    ).fetchone()
+    # Empty string, not None, when a message source is not this team's. That
+    # is a checkable kind and the answer is "no such source here" — a real
+    # quote from a source this team cannot see is not support for a fact in
+    # this team's wiki. None is reserved for kinds apply cannot read at all.
+    return row[0] if row else ""
+
+
+def excerpt_is_supported(conn, team_id: str, source, excerpt: str) -> bool | None:
+    """True/False when the source is readable here; None when it is not.
+
+    Three answers rather than two, because "I checked and it is not there" and
+    "I could not check" are different facts about a citation.
+    """
+    if not excerpt:
+        return False
+    text = _source_text(conn, team_id, source)
+    if text is None:
+        return None
+    needle = _normalise_source(excerpt)
+    return bool(needle) and needle in _normalise_source(text)
+
+
+def bind_to_seen_versions(decisions: list["Decision"], pages: list[dict]) -> None:
+    """Tell each revision which version consolidation was looking at.
+
+    Filled in from the SNAPSHOT rather than asked of the model: the version id
+    is not a judgement, it is a fact about what was read, and making the model
+    echo it back would add a way for it to be wrong.
+    """
+    seen = {
+        fact["entry_id"]: fact.get("version_id")
+        for page in pages for fact in page.get("facts", [])
+    }
+    for decision in decisions:
+        if decision.action in ("revise", "invalidate") and decision.entry_id:
+            decision.seen_version_id = seen.get(decision.entry_id)
+
+
 def apply_compilation(
     conn,
     team_id: str,
@@ -499,6 +581,7 @@ def apply_compilation(
     ).fetchone()[0]
 
     added = revised = removed = skipped = 0
+    rejected = quarantined = 0
     for cand, dec, src in zip(candidates, decisions, sources):
         action, target = dec.action, dec.entry_id
         if action in ("revise", "invalidate", "noop"):
@@ -508,10 +591,44 @@ def apply_compilation(
                 (target, team_id),
             ).fetchone()
             if valid is None:
-                action = "add"
+                # 🔴 This was `action = "add"`. A decision naming an entry that
+                # does not exist, or belongs to another team, did not fail and
+                # did not get rejected — it got PUBLISHED, as a brand new fact.
+                # A hallucinated id is not evidence of anything.
+                logger.warning(
+                    "rejecting %s for unknown entry %s in team %s",
+                    action, target, team_id,
+                )
+                rejected += 1
+                continue
 
         if action == "noop":
             skipped += 1
+            continue
+
+        # Is there evidence for this? None means "could not check", which is
+        # not the same as "checked and it is absent".
+        supported = excerpt_is_supported(conn, team_id, src, cand.excerpt)
+        if supported is False:
+            # Quarantined, not published: written down so it can be reviewed,
+            # never active, so neither the wiki nor the next consolidation
+            # treats it as established. Otherwise the fabrication launders
+            # itself into memory one round later.
+            page_id = _resolve_page(
+                conn, team_id, dec.page_title, dec.page_description, dec.page_kind
+            )
+            entry_id = conn.execute(
+                "insert into public.memory_entries (team_id, page_id)"
+                " values (%s,%s) returning id",
+                (team_id, page_id),
+            ).fetchone()[0]
+            conn.execute(
+                "insert into public.memory_versions (entry_id, team_id,"
+                " compilation_id, fact, change_type, is_active, trust)"
+                " values (%s,%s,%s,%s,'added',false,'proposed')",
+                (entry_id, team_id, comp_id, _unmark(cand.text)),
+            )
+            quarantined += 1
             continue
 
         if action == "add":
@@ -525,11 +642,20 @@ def apply_compilation(
             ).fetchone()[0]
             change, added = "added", added + 1
         else:
-            conn.execute(
-                "update public.memory_versions set is_active=false, valid_until=now()"
-                " where entry_id=%s and is_active",
-                (target,),
+            # Bound to the version consolidation READ. Without the binding this
+            # supersedes whatever is active now, which is how a second compile
+            # erases a first one it never saw.
+            closed = conn.execute(
+                "update public.memory_versions set is_active=false, valid_until=now(),"
+                " trust='superseded' where entry_id=%s and is_active"
+                " and (%s::uuid is null or id = %s::uuid)",
+                (target, dec.seen_version_id, dec.seen_version_id),
             )
+            if closed.rowcount != 1:
+                raise StaleConsolidation(
+                    f"entry {target} changed while this compile was deciding;"
+                    " consolidate again from fresh state"
+                )
             if action == "revise":
                 change, revised = "revised", revised + 1
             else:
@@ -561,6 +687,13 @@ def apply_compilation(
             )
 
     body = f"Memory updated — {added} added, {revised} revised, {removed} removed."
+    if quarantined:
+        # Said out loud. A fact held back for want of evidence is a thing a
+        # member may want to look at, and a silent quarantine is a silent loss.
+        body += (
+            f" {quarantined} held back: the quoted source could not be"
+            " verified."
+        )
     general_thread_id = conn.execute(
         "select id from public.threads where team_id=%s and visibility='team'"
         " and kind='discussion' and title='General'",
@@ -584,6 +717,8 @@ def apply_compilation(
         "revised": revised,
         "removed": removed,
         "skipped": skipped,
+        "rejected": rejected,
+        "quarantined": quarantined,
         "diff_message_id": str(msg_id),
     }
 
@@ -602,6 +737,7 @@ def compile_document(team_id: str, document_id: str, marked_text: str) -> dict:
     decisions = (
         consolidate(candidates, pages, len(marked_text)) if candidates else []
     )
+    bind_to_seen_versions(decisions, pages)
     sources: list[tuple[str, str] | None] = [
         ("document", document_id) for _ in candidates
     ]

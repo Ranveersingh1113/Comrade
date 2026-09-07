@@ -898,6 +898,72 @@ these six traps once, not that it is stable. 🔴 No assertion that private
 threads stay out of promotion; that boundary is the fetch's
 `visibility='team'` and is unchanged, but the plan asks for it to be pinned.
 
+### T18 — Verify citations and fail safely on uncertain consolidation
+
+**Changed:** `supabase/migrations/20260907180000_memory_trust.sql`,
+`pipeline/compiler.py`, `pipeline/chat.py`, `pipeline/wiki.py`,
+`tests/test_citation_trust.py`, `tests/test_compiler.py`.
+
+**Regression 1 — excerpts were never checked.** The model's quote went
+straight into `memory_citations` with nothing verifying it appears in the
+source, so a GENERATED QUOTE BECAME EVIDENCE BY ITSELF — and the citation is
+the one thing a member looks at to decide whether to believe a fact.
+
+**Regression 2 — `if valid is None: action = "add"`.** A decision naming an
+entry that does not exist, or belongs to another team, did not fail and did
+not get rejected: it got PUBLISHED, as a brand new fact. A model that invented
+an id has said nothing about where the candidate belongs, and inventing a home
+for it is the system agreeing with the invention.
+
+**Regression 3 — revisions superseded whatever was active at APPLY time**,
+not the version consolidation read. Two compiles touching one entry meant the
+second silently overwrote the first's judgement from stale context.
+
+**Design:** an unsupported candidate is QUARANTINED rather than dropped or
+published — written down so it can be reviewed, never active, so neither the
+wiki nor the next consolidation treats it as established. Dropping it silently
+would hide a model that is fabricating; publishing it is the thing this task
+exists to stop; leaving it active-but-flagged would let it launder itself into
+the wiki one round later, when the next compile reads it as context.
+
+The version id for a revision comes from the SNAPSHOT, not the model. It is a
+fact about what was read rather than a judgement, and asking the model to echo
+it back would only add a way for it to be wrong.
+
+Matching is normalised, not byte-identical: the model re-punctuates, and a
+quarantine that fires on correct work is one everybody learns to ignore.
+
+**Also:** a DATABASE TRIGGER was the only thing standing between a cross-team
+citation and the wiki. My first pass treated "no such source under this team"
+as "could not check" and let it through; the DB raised
+`citation source must belong to the version team`. A message source that is
+not this team's is now an explicit NOT SUPPORTED — a real quote from a source
+this team cannot see is not support for a fact in this team's wiki.
+**Also:** `test_apply_bad_target_falls_back_to_add` was a test asserting the
+defect. Rewritten to assert rejection, with its docstring saying what it used
+to claim, rather than quietly deleted.
+**Also:** the diff card says how many facts were held back and why. A silent
+quarantine is a silent loss.
+
+**Trust vocabulary, deliberately modest:** `observed` means the excerpt was
+found in a source this team can read. It does NOT mean the fact follows from
+the source. Substring matching cannot establish entailment, and a column that
+claimed it could would be worse than no column at all.
+
+**Passing:** 9 citation-trust tests; 1123 backend tests, 6 skipped, 0 failed.
+
+**Migration/rollback:** additive — one column with a default, so every existing
+version reads as `observed`, which is what they were implicitly claiming.
+
+**Ceiling:** 🔴 DOCUMENT AND GITHUB EXCERPTS ARE STILL UNVERIFIED. Those
+sources are compiled from text held in memory at extraction time and never
+stored, so apply cannot re-read them; `excerpt_is_supported` returns "could not
+check" and they publish as before. The fabrication hole is closed on the chat
+path only. 🔴 No review surface for quarantined facts: the diff card says how
+many were held back, and nothing yet shows a member WHICH, or lets them
+confirm one. 🔴 `confirmed` and `verified` exist in the vocabulary with no
+path that sets them.
+
 ---
 
 ## Standing ceilings

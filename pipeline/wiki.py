@@ -24,7 +24,7 @@ def all_active_pages(conn, team_id: str) -> list[dict]:
         (team_id,),
     ).fetchall()
     fact_rows = conn.execute(
-        "select e.page_id, e.id, v.fact, v.valid_from,"
+        "select e.page_id, e.id, v.fact, v.valid_from, v.id, v.trust,"
         "       (select c.source_kind from public.memory_citations c"
         "         where c.version_id = v.id order by c.created_at limit 1)"
         " from public.memory_entries e"
@@ -35,11 +35,16 @@ def all_active_pages(conn, team_id: str) -> list[dict]:
 
     by_page: dict[str, list[dict]] = {}
     orphans: list[dict] = []
-    for page_id, entry_id, fact, valid_from, source_kind in fact_rows:
+    for page_id, entry_id, fact, valid_from, version_id, trust, source_kind in fact_rows:
         item = {
             "entry_id": str(entry_id),
             "text": fact,
             "valid_from": valid_from,
+            # The version this snapshot READ. A compile that decides to revise
+            # this entry binds its update to this id, so a second compile
+            # cannot erase a first one it never saw.
+            "version_id": str(version_id),
+            "trust": trust,
             "source_kind": source_kind,
         }
         if page_id is None:

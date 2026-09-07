@@ -23,7 +23,7 @@ from pathlib import Path
 from psycopg import errors as pg_errors
 
 from agent.sandbox import (
-    MOUNT, SANDBOX_UID, _SECURITY_FLAGS, _git_mask,
+    DEPS_MOUNT, MOUNT, SANDBOX_UID, VENV, _SECURITY_FLAGS, _git_mask,
 )
 from shared.config import settings
 from shared.db import Role, team_session
@@ -150,6 +150,7 @@ def _remove_network(process_id: str) -> None:
 
 def _run_argv(
     name: str, root: Path, command: str, port: int | None, network: str,
+    deps: str | None = None,
 ) -> list[str]:
     """The container line for a detached process.
 
@@ -179,6 +180,15 @@ def _run_argv(
         *_SECURITY_FLAGS,
         "--user", f"{SANDBOX_UID}:{SANDBOX_UID}",
         "-v", f"{root}:{MOUNT}",
+        # 🔴 The dependencies, which a preview did not have. repo_run mounts
+        # this and a preview did not, so `npm run dev` — the entire reason
+        # previews exist — failed on missing modules for any project with
+        # dependencies. READ-ONLY, like the finite-command path: a server that
+        # can write to what setup installed changes what the next run imports.
+        *(["-v", f"{deps}:{DEPS_MOUNT}:ro",
+           "-e", f"PATH={VENV}/bin:/usr/local/bin:/usr/bin:/bin",
+           "-e", f"VIRTUAL_ENV={VENV}",
+           "-e", f"NODE_PATH={DEPS_MOUNT}/node_modules"] if deps else []),
         "-w", MOUNT,
         settings.comrade_sandbox_image,
         "sh", "-lc", command,
@@ -220,7 +230,8 @@ def _admit(team_id: str) -> None:
 
 def start(
     team_id: str, thread_id: str, command: str, *,
-    root: Path, port: int | None = None, agent_run_id: str | None = None,
+    root: Path, port: int | None = None, deps: str | None = None,
+    agent_run_id: str | None = None,
 ) -> dict:
     """Start a long-running process for this thread and record it.
 
@@ -265,7 +276,9 @@ def start(
     network = None
     try:
         network = _ensure_network(process_id)
-        container_id = _docker(_run_argv(name, root, command, port, network))
+        container_id = _docker(
+            _run_argv(name, root, command, port, network, deps)
+        )
     except ProcessError as exc:
         # A start that died after the network existed must not leave it: one
         # network per process means one leak per failure.

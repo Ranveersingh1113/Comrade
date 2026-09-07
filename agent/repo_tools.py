@@ -663,18 +663,40 @@ def process_start(command: str, port: int, tool_context: ToolContext) -> dict:
         port: the port it listens on, or 0 if it does not serve anything.
     """
     from agent import processes
+    from pipeline.repo_deps import volume_for
+    from pipeline.repo_env import status_for
 
     try:
         root = _root(tool_context)
     except (CapabilityError, WorkspaceError) as exc:
         return {"error": str(exc)}
+
+    # The SAME status gate repo_run uses, and for the same reasons: a partial
+    # venv from a failed build reads as a broken repository rather than a
+    # broken environment, and `stale` is out of date rather than absent.
+    #
+    # Without this a preview mounted nothing at all, so `npm run dev` — the
+    # whole point — failed on missing modules for any project with
+    # dependencies.
+    state = tool_context.state
+    team_id, repo = state.get("team_id"), state.get("repo_full_name")
+    deps = None
+    if team_id and repo:
+        try:
+            environment = status_for(team_id, repo, state["requester_id"])
+            if environment["status"] in ("ready", "stale"):
+                deps = volume_for(team_id, repo)
+        except (KeyError, WorkspaceError) as exc:
+            logger.debug("could not resolve the environment: %s", exc)
+
     try:
         return processes.start(
-            str(tool_context.state["team_id"]),
+            str(team_id),
             str(tool_context.state["thread_id"]),
             command,
             root=root,
             port=port or None,
+            deps=deps,
             agent_run_id=tool_context.state.get("agent_run_id"),
         )
     except processes.ProcessError as exc:

@@ -578,3 +578,34 @@ def test_scratch_space_is_sized(seeded, admin, no_docker, tmp_path):
     argv = no_docker[-1]
     sized = [a for a in argv if a.startswith("/tmp:size=")]
     assert sized, argv
+
+
+# ---------------------------------------------------------------------------
+# A preview needs the dependencies (T08)
+# ---------------------------------------------------------------------------
+
+def test_a_preview_mounts_the_installed_dependencies(
+    seeded, admin, no_docker, tmp_path
+):
+    """🔴 It mounted NONE. `repo_run` gets the dependency volume and a preview
+    did not, so `npm run dev` — the entire reason previews exist — failed on
+    missing modules for any project that has dependencies. The preview system
+    could not run a real development server.
+
+    Read-only, like the finite-command path: a server that can write to what
+    setup installed changes what the next run imports.
+    """
+    processes.start(TEAM_A, _thread(admin), "npm run dev", root=tmp_path,
+                    port=3000, deps="comrade-deps-abc")
+    argv = no_docker[-1]
+
+    mounts = [a for a in argv if a.startswith("comrade-deps-abc:")]
+    assert mounts, argv
+    assert mounts[0].endswith(":ro"), "a preview must not write to installed deps"
+
+
+def test_a_preview_without_dependencies_still_starts(seeded, admin, no_docker, tmp_path):
+    """A stdlib-only project has no volume, and that is not an error."""
+    processes.start(TEAM_A, _thread(admin), "python -m http.server",
+                    root=tmp_path, port=8000, deps=None)
+    assert not [a for a in no_docker[-1] if a.startswith("comrade-deps")]

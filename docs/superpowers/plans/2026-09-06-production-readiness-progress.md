@@ -140,7 +140,7 @@ network into `sandbox_cleanup` before the cascade, drained by the worker.
 the trigger; orphan reclamation stops, nothing else changes.
 **Ceiling:** 🔴 no termination-at-each-boundary test against a real daemon.
 
-## T07 — Bounded output, disk and resource admission · pending commit
+## T07 — Bounded output, disk and resource admission · `73e62da`
 
 **Changed:** `agent/sandbox.py`, `agent/processes.py`, `pipeline/repo_sync.py`,
 `shared/config.py`, `tests/test_repo_run.py`, `tests/test_sandbox_processes.py`.
@@ -167,6 +167,42 @@ undercount read as under budget.
 **Migration/rollback:** none.
 **Ceiling:** 🔴 no fork-bomb / disk-fill / quota-contention integration run on a
 Linux daemon; the bounds are unit-verified plus the existing Docker lanes.
+
+## T08 — Reproducible dependency environments · pending commit
+
+**Changed:** `pipeline/repo_deps.py`, `agent/processes.py`,
+`agent/repo_tools.py`, `tests/test_repo_deps.py`,
+`tests/test_sandbox_processes.py`.
+**Regression 1 (mine):** 🔴 **a preview mounted no dependencies at all.**
+`repo_run` gets the dependency volume; `process_start` did not — so `npm run
+dev`, the entire reason previews exist, failed on missing modules for any
+project that has them. The preview system could not run a real development
+server. Now mounted read-only, behind the same ready/stale status gate
+`repo_run` uses.
+**Regression 2:** lockfiles were found and hashed and then **ignored** — the
+script ran `pip install -r requirements.txt` regardless. That is
+reproducibility theatre: the hash moves when the lock does, so the cache looks
+right while the install resolves whatever the registry serves that day.
+Replaced with a recipe table, lockfiles first, each carrying its own frozen
+installer (`uv sync --frozen`, `poetry install --sync`, `npm ci`).
+**Regression 3:** JavaScript was not supported at all — a Node project reported
+`no-manifest`, which reads as "this project has no dependencies". Added, along
+with an explicit `unsupported` status for Go/Rust/Ruby/Java, because "we do not
+install your language" and "you have no dependencies" are different sentences
+and only one is true.
+**Regression 4:** the cache key omitted the image. An unchanged manifest against
+a new base image reused wheels built for the old interpreter and reported it
+current.
+**Review finding:** my first attempt added a SECOND `environment_key`, shadowing
+an existing one that already handled a subtle case — the commit is folded into
+the key only on the `pyproject` path, because that installs the repo itself.
+Deleted the duplicate and extended the original instead.
+**Passing:** 73 passed, 6 skipped.
+**Migration/rollback:** none. The changed cache key rebuilds every environment
+once, which is the intended effect.
+**Ceiling:** 🔴 no frozen-reinstall reproducibility run and no src-layout
+edited-code check on a real daemon; recipe selection and key composition are
+unit-verified only.
 
 ---
 

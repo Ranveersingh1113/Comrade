@@ -57,12 +57,14 @@ WHAT IS HONESTLY NOT SOLVED
 execution with a network connection, here and in every CI system there has ever
 been. The container is the boundary and nothing of Comrade's is inside it.
 """
+import dataclasses
 import hashlib
 import logging
 import subprocess
 from pathlib import Path
 
 from agent.sandbox import DEPS_MOUNT, MOUNT, VENV, SandboxError, run_setup
+from shared.config import settings
 from shared.workspace import deps_volume, repo_checkout
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,76 @@ MANIFESTS = ("requirements.txt", "pyproject.toml")
 #: A manifest bigger than this is not a manifest. Bounded because it is read
 #: into memory to be hashed, from a repository anyone can open a PR against.
 MANIFEST_MAX_BYTES = 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# What we install, and with what (T08)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class Recipe:
+    """One way to install a project's dependencies.
+
+    `name` is the file whose content decides the cache key; `frozen` says
+    whether this recipe installs an exact locked set or resolves afresh.
+    """
+    name: str
+    runtime: str
+    command: str
+    frozen: bool
+
+
+#: In priority order, and LOCKFILES FIRST.
+#:
+#: 🔴 The previous table was `("requirements.txt", "pyproject.toml")` — Python
+#: only, and it read lockfiles for hashing while installing from the manifest.
+#: That is reproducibility theatre: the hash moved when the lock did, so the
+#: cache looked correct while the install resolved whatever the registry served
+#: that day. A lock is only reproducible if the installer is told to obey it.
+RECIPES = (
+    Recipe("uv.lock", "python",
+           f"{VENV}/bin/uv sync --frozen --project {MOUNT}", frozen=True),
+    Recipe("poetry.lock", "python",
+           f"cd {MOUNT} && {VENV}/bin/poetry install --sync --no-root", frozen=True),
+    Recipe("requirements.txt", "python",
+           f"{VENV}/bin/pip install -r {MOUNT}/requirements.txt", frozen=False),
+    Recipe("pyproject.toml", "python",
+           f"{VENV}/bin/pip install {MOUNT}", frozen=False),
+    Recipe("package-lock.json", "node",
+           f"cd {MOUNT} && npm ci --prefix {DEPS_MOUNT}", frozen=True),
+    Recipe("pnpm-lock.yaml", "node",
+           f"cd {MOUNT} && pnpm install --frozen-lockfile --dir {DEPS_MOUNT}",
+           frozen=True),
+    Recipe("package.json", "node",
+           f"cd {MOUNT} && npm install --prefix {DEPS_MOUNT}", frozen=False),
+)
+
+#: Manifests we recognise but do not install.
+#:
+#: Named explicitly, because "no manifest" and "we do not support your
+#: language" are different sentences. A Go repository HAS dependencies; saying
+#: it has none invites the agent to report an import failure as the team's bug.
+UNSUPPORTED = ("go.mod", "Cargo.toml", "Gemfile", "pom.xml", "build.gradle")
+
+
+def recipe_for(root: Path) -> Recipe | None:
+    """The first recipe this repository matches, lockfiles first."""
+    for recipe in RECIPES:
+        candidate = root / recipe.name
+        if candidate.is_file() and candidate.stat().st_size <= MANIFEST_MAX_BYTES:
+            return recipe
+    return None
+
+
+def unsupported_runtime(root: Path) -> str | None:
+    """The manifest of a language we recognise and cannot install."""
+    if recipe_for(root) is not None:
+        return None
+    for name in UNSUPPORTED:
+        if (root / name).is_file():
+            return name
+    return None
 
 
 def manifest_for(root: Path) -> str | None:
@@ -126,6 +198,11 @@ def environment_key(root: Path, manifest: str) -> str:
     """What an environment was built FROM. Comparing it is how staleness is
     answered without storing a second copy of it.
 
+    THE IMAGE IS PART OF IT. An unchanged manifest against a new base image is
+    a different environment — the interpreter moved and every installed wheel
+    was built for the old one — and keying on the manifest alone hands that
+    venv back as current.
+
     🔴 THE COMMIT IS IN THE KEY ONLY WHEN THE REPOSITORY'S OWN PACKAGE IS
     INSTALLED, and that asymmetry is the point rather than an oversight.
 
@@ -142,7 +219,11 @@ def environment_key(root: Path, manifest: str) -> str:
     team turns off.
     """
     parts = [f"recipe={RECIPE_VERSION}", f"manifest={manifest}",
-             f"mhash={manifest_hash(root, manifest)}"]
+             f"mhash={manifest_hash(root, manifest)}",
+             # The image the venv was built INSIDE. Without it an unchanged
+             # manifest against a new base image reuses wheels built for the
+             # old interpreter, and the cache reports it as current.
+             f"image={settings.comrade_sandbox_image}"]
     for lock in LOCKFILES:
         if (root / lock).is_file():
             digest = hashlib.sha256((root / lock).read_bytes()).hexdigest()[:16]
@@ -163,7 +244,7 @@ def has_lockfile(root: Path) -> str | None:
     return None
 
 
-def _install_script(name: str, digest: str) -> str:
+def _install_script(recipe: "Recipe", digest: str) -> str:
     """Compare-then-install, in one container.
 
     The alternative was reading the marker from the volume first, which costs a
@@ -186,11 +267,13 @@ def _install_script(name: str, digest: str) -> str:
         # "it works here" would depend on install order and history.
         f"rm -rf {DEPS_MOUNT}/venv\n"
         f"python -m venv {VENV}\n"
-        + (
-            f"{VENV}/bin/pip install -r {MOUNT}/requirements.txt\n"
-            if name == "requirements.txt"
-            else f"{VENV}/bin/pip install {MOUNT}\n"
-        )
+        # The recipe's OWN command. This used to be a two-way branch that
+        # ran `pip install` whatever the project was, which is exactly what
+        # made a hashed lockfile meaningless: the hash moved when the lock
+        # did, while the install resolved fresh from the registry.
+        + (f"{VENV}/bin/pip install uv poetry\n"
+           if recipe.name in ("uv.lock", "poetry.lock") else "")
+        + f"{recipe.command}\n"
         # World-readable, because the run phase is a different, non-root user
         # and mounts this read-only.
         + f"chmod -R a+rX {DEPS_MOUNT}\n"
@@ -209,15 +292,21 @@ def install(team_id: str, repo_full_name: str) -> dict:
     if not root.exists():
         return {"status": "no-checkout"}
 
-    name = manifest_for(root)
-    if name is None:
+    recipe = recipe_for(root)
+    if recipe is None:
+        # "No manifest" and "we do not install your language" are different
+        # sentences, and only one of them is true for a Go repository.
+        other = unsupported_runtime(root)
+        if other:
+            return {"status": "unsupported", "manifest": other,
+                    "detail": f"{other} projects are not installed yet."}
         return {"status": "no-manifest"}
 
-    digest = manifest_hash(root, name)
+    digest = environment_key(root, recipe.name)
     volume = deps_volume(team_id, repo_full_name)
     try:
         result = run_setup(
-            ["sh", "-c", _install_script(name, digest)], root=root, deps=volume
+            ["sh", "-c", _install_script(recipe, digest)], root=root, deps=volume
         )
     except SandboxError as exc:
         logger.warning("dependency install could not start for %s: %s",
@@ -225,18 +314,18 @@ def install(team_id: str, repo_full_name: str) -> dict:
         return {"status": "error", "detail": str(exc)}
 
     if result["timed_out"]:
-        return {"status": "timeout", "manifest": name}
+        return {"status": "timeout", "manifest": recipe.name}
     if result["exit_code"] != 0:
         # The tail, not the head: pip prints its resolution conflict last.
         detail = (result["stderr"] or result["stdout"]).strip()[-600:]
         logger.warning("dependency install failed for %s: %s",
                        repo_full_name, detail[:200])
-        return {"status": "failed", "manifest": name, "detail": detail}
+        return {"status": "failed", "manifest": recipe.name, "detail": detail}
 
     if "already current" in result["stdout"]:
-        return {"status": "current", "manifest": name}
-    logger.info("installed dependencies for %s from %s", repo_full_name, name)
-    return {"status": "installed", "manifest": name}
+        return {"status": "current", "manifest": recipe.name}
+    logger.info("installed dependencies for %s from %s", repo_full_name, recipe.name)
+    return {"status": "installed", "manifest": recipe.name, "frozen": recipe.frozen}
 
 
 def volume_for(team_id: str, repo_full_name: str) -> str | None:

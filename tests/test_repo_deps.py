@@ -390,3 +390,72 @@ def test_the_planned_allowlist_is_gone_now_that_a_policy_is_enforced():
     import agent.sandbox as sandbox
 
     assert not hasattr(sandbox, "PLANNED_SETUP_EGRESS_ALLOWLIST")
+
+
+# ---------------------------------------------------------------------------
+# Reproducibility (T08)
+# ---------------------------------------------------------------------------
+
+def test_a_lockfile_is_installed_with_its_frozen_installer(tmp_path):
+    """🔴 Lockfiles were FOUND and HASHED and then ignored: the script ran
+    `pip install -r requirements.txt` regardless. Hashing a uv.lock while
+    installing from a manifest is reproducibility theatre — the hash changes
+    when the lock does, so the cache looks right while the install resolves
+    whatever the registry serves today."""
+    from pipeline.repo_deps import _install_script, recipe_for
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    recipe = recipe_for(tmp_path)
+
+    assert recipe.name == "uv.lock"
+    script = _install_script(recipe, "digest")
+    assert "--frozen" in script or "--locked" in script
+
+
+def test_npm_uses_ci_when_a_lockfile_exists(tmp_path):
+    """`npm ci` installs the lock exactly; `npm install` rewrites it."""
+    from pipeline.repo_deps import _install_script, recipe_for
+
+    (tmp_path / "package.json").write_text('{"name":"x"}')
+    (tmp_path / "package-lock.json").write_text("{}")
+    recipe = recipe_for(tmp_path)
+
+    assert "npm ci" in _install_script(recipe, "digest")
+
+
+def test_javascript_is_supported_at_all(tmp_path):
+    """The pilot's own repositories are Python AND JavaScript, and only Python
+    was recognised — a Node project reported 'no manifest', which reads as
+    'this project has no dependencies'."""
+    from pipeline.repo_deps import recipe_for
+
+    (tmp_path / "package.json").write_text('{"name":"x"}')
+    assert recipe_for(tmp_path) is not None
+
+
+def test_an_unsupported_runtime_says_so_rather_than_looking_empty(tmp_path):
+    """A Go repository has dependencies; we simply do not install them. Saying
+    'no manifest' invites the agent to conclude the project has none and to
+    report an import failure as the team's bug."""
+    from pipeline.repo_deps import recipe_for, unsupported_runtime
+
+    (tmp_path / "go.mod").write_text("module x\n")
+    assert recipe_for(tmp_path) is None
+    assert unsupported_runtime(tmp_path) == "go.mod"
+
+
+def test_the_cache_key_covers_the_image_not_only_the_manifest(tmp_path, monkeypatch):
+    """An unchanged manifest against a NEW base image is a different
+    environment. Keying on the manifest alone reuses a venv built for another
+    Python."""
+    from shared.config import settings
+    from pipeline.repo_deps import environment_key, recipe_for
+
+    (tmp_path / "requirements.txt").write_text("cowsay==6.1\n")
+    recipe = recipe_for(tmp_path)
+
+    monkeypatch.setattr(settings, "comrade_sandbox_image", "comrade-sandbox:a")
+    first = environment_key(tmp_path, recipe.name)
+    monkeypatch.setattr(settings, "comrade_sandbox_image", "comrade-sandbox:b")
+    assert environment_key(tmp_path, recipe.name) != first

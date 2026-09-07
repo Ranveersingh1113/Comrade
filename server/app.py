@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
+from agent import processes
 from agent.run_queue import enqueue_turn, get_run
 from pipeline.compiler import enqueue_document
 from pipeline.chat import enqueue_remember
@@ -955,6 +956,10 @@ async def _serve_preview(request: Request, host: str, process_id: str) -> Respon
     if grant["process_id"] != process_id:
         return Response("that preview is not available.",
                         status_code=status.HTTP_403_FORBIDDEN)
+
+    # Record the use. Idle expiry means idle, and without this a preview
+    # somebody is actively looking at dies mid-session because nothing said so.
+    await run_in_threadpool(processes.touch, grant["team_id"], process_id)
 
     body = await request.body()
     if len(body) > PREVIEW_MAX_BYTES:

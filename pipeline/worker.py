@@ -138,7 +138,10 @@ def tick() -> int:
     # Long-running sandbox processes. NOTHING else reclaims one: a development
     # server started three hours ago holds a port and a CPU share for as long
     # as the host lives, and the turn that started it is long gone.
-    from agent.processes import reap as reap_processes
+    from agent.processes import (
+        drain_cleanup, reap as reap_processes,
+        reconcile as reconcile_processes,
+    )
 
     try:
         sweep_stale_checkouts()
@@ -150,11 +153,23 @@ def tick() -> int:
         logger.exception("workspace sweep failed; queue drain unaffected")
 
     try:
+        # Reconcile FIRST. A server that crashed on its own leaves the row
+        # saying `running` forever, and the thread keeps offering a preview
+        # link to nothing. Reaping before reconciling would expire rows that
+        # had already exited and report work that was never done.
+        changed = reconcile_processes()
+        if changed:
+            logger.info("reconciled %d sandbox process(es) with the daemon", changed)
         reaped = reap_processes()
         if reaped:
-            logger.info("reaped %d idle sandbox process(es)", reaped)
+            logger.info("reaped %d sandbox process(es) past a lifetime", reaped)
+        # Containers whose owning thread was deleted. The evidence outlives the
+        # row on purpose (20260907100000); this is what acts on it.
+        reclaimed = drain_cleanup()
+        if reclaimed:
+            logger.info("reclaimed %d orphaned container(s)", reclaimed)
     except Exception:  # noqa: BLE001
-        logger.exception("process reap failed; queue drain unaffected")
+        logger.exception("process reconciliation failed; queue drain unaffected")
     return processed
 
 

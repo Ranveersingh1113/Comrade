@@ -369,3 +369,164 @@ def test_stopping_reclaims_the_network(seeded, admin, no_docker, tmp_path, monke
 
     removed = [a for a in no_docker if a[1:3] == ["network", "rm"]]
     assert removed and removed[0][-1] == processes.network_for(proc["id"])
+
+
+# ---------------------------------------------------------------------------
+# Truthful lifecycle (T06)
+# ---------------------------------------------------------------------------
+
+def test_the_container_name_is_persisted_before_the_launch(
+    seeded, admin, tmp_path, monkeypatch
+):
+    """🔴 The crash window. The name was generated, the container started, and
+    only THEN written back — so a worker that died in between left a container
+    running under a name no row had ever seen. Unfindable by any reconciler,
+    because reconciliation works from the row."""
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+    thread_id = _thread(admin)
+    seen: list[tuple] = []
+
+    def _fake(argv):
+        if argv[1] == "network":
+            return "true"
+        seen.append(admin.execute(
+            "select container_name, state from public.sandbox_processes"
+            " where thread_id=%s", (thread_id,),
+        ).fetchone())
+        return "c" * 64
+
+    monkeypatch.setattr(processes, "_docker", _fake)
+    processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    assert seen, "the container never started"
+    name, state = seen[0]
+    assert name and name.startswith("comrade-proc-"), (
+        "the intended container name must exist in the row before docker run"
+    )
+    assert state == "starting"
+
+
+def test_a_failed_start_reclaims_its_network(seeded, admin, tmp_path, monkeypatch):
+    """A start that dies after the network exists must not leave it behind:
+    one per process means one leak per failure."""
+    monkeypatch.setattr(settings, "comrade_preview_proxy_container", "comrade-api")
+    thread_id = _thread(admin)
+    calls: list[list[str]] = []
+
+    def _fake(argv):
+        calls.append(argv)
+        if argv[1] == "network":
+            return "true"
+        raise processes.ProcessError("no such image")
+
+    monkeypatch.setattr(processes, "_docker", _fake)
+    with pytest.raises(processes.ProcessError):
+        processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    assert [a for a in calls if a[1:3] == ["network", "rm"]], calls
+
+
+def test_stopping_is_only_recorded_once_removal_is_confirmed(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    """"I asked Docker to stop it" is not "it stopped". A row that says stopped
+    while the container runs is the false signal this table exists to avoid, so
+    a failed removal stays retryable instead."""
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    monkeypatch.setattr(processes, "_remove_container",
+                        lambda cid: (_ for _ in ()).throw(processes.ProcessError("busy")))
+    with pytest.raises(processes.ProcessError):
+        processes.stop(TEAM_A, proc["id"])
+
+    assert admin.execute(
+        "select state from public.sandbox_processes where id=%s", (proc["id"],)
+    ).fetchone()[0] == "running", "it was marked stopped without being stopped"
+
+
+def test_reconcile_records_an_exit_code_the_row_did_not_know_about(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    """A dev server that crashed on its own leaves the row saying running
+    forever, and the thread shows a preview link to nothing."""
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    monkeypatch.setattr(processes, "_inspect_state",
+                        lambda cid: {"running": False, "exit_code": 137})
+    assert processes.reconcile() == 1
+
+    row = admin.execute(
+        "select state, exit_code from public.sandbox_processes where id=%s",
+        (proc["id"],),
+    ).fetchone()
+    assert row == ("exited", 137)
+
+
+def test_a_container_docker_has_never_heard_of_is_marked_missing(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    monkeypatch.setattr(processes, "_inspect_state", lambda cid: None)
+
+    processes.reconcile()
+    assert admin.execute(
+        "select state from public.sandbox_processes where id=%s", (proc["id"],)
+    ).fetchone()[0] == "failed"
+
+
+def test_absolute_lifetime_caps_a_process_that_never_goes_idle(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    """🔴 Idle expiry alone is not a bound. A preview someone keeps refreshing
+    — or a server that talks to itself — resets last_seen_at forever and runs
+    until the host does. Busy is not a reason to run indefinitely."""
+    monkeypatch.setattr(processes, "_kill", lambda cid: None)
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    admin.execute(
+        "update public.sandbox_processes"
+        "   set started_at = now() - interval '40 hours', last_seen_at = now()"
+        " where id=%s", (proc["id"],),
+    )
+
+    assert processes.reap() == 1
+    assert admin.execute(
+        "select state from public.sandbox_processes where id=%s", (proc["id"],)
+    ).fetchone()[0] == "expired"
+
+
+def test_using_a_preview_keeps_it_alive(seeded, admin, no_docker, tmp_path):
+    """Idle means idle. Without this, a preview someone is actively using dies
+    mid-session because nothing recorded the use."""
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    admin.execute(
+        "update public.sandbox_processes set last_seen_at = now() - interval '9 hours'"
+        " where id=%s", (proc["id"],),
+    )
+    processes.touch(TEAM_A, proc["id"])
+    assert processes.reap() == 0
+
+
+def test_deleting_the_thread_keeps_the_evidence_needed_to_clean_up(
+    seeded, admin, no_docker, tmp_path
+):
+    """🔴 The cascade turned a tidy delete into a permanent leak: removing the
+    thread removed the only record of a running container's name, so it kept
+    running where nothing could ever find it."""
+    thread_id = str(admin.execute(
+        "insert into public.threads (team_id, title, visibility, kind, created_by)"
+        " values (%s,'Doomed','team','discussion',%s) returning id",
+        (TEAM_A, A1),
+    ).fetchone()[0])
+    processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    admin.execute("delete from public.threads where id=%s", (thread_id,))
+
+    pending = admin.execute(
+        "select container_id, network from public.sandbox_cleanup where done_at is null"
+    ).fetchall()
+    assert pending, "the container was forgotten along with its thread"
+    assert pending[0][0] == "c" * 64

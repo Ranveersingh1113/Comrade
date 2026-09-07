@@ -530,3 +530,51 @@ def test_deleting_the_thread_keeps_the_evidence_needed_to_clean_up(
     ).fetchall()
     assert pending, "the container was forgotten along with its thread"
     assert pending[0][0] == "c" * 64
+
+
+# ---------------------------------------------------------------------------
+# Admission and scratch limits (T07)
+# ---------------------------------------------------------------------------
+
+def test_a_team_cannot_start_processes_without_limit(
+    seeded, admin, no_docker, tmp_path, monkeypatch
+):
+    """🔴 A preview holds a container, a network and a CPU share for hours.
+    Without admission control one team starting servers in a loop takes the
+    host, and the reaper only runs later — by which time it is done."""
+    monkeypatch.setattr(settings, "comrade_max_processes_per_team", 2)
+    thread_id = _thread(admin)
+    for _ in range(2):
+        processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+    with pytest.raises(processes.ProcessError, match="limit"):
+        processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+
+def test_the_host_limit_counts_every_team(seeded, admin, no_docker, tmp_path, monkeypatch):
+    """Per-team alone stops one team crowding out others; it does not stop
+    every team together crowding out the host."""
+    monkeypatch.setattr(settings, "comrade_max_processes_per_team", 99)
+    monkeypatch.setattr(settings, "comrade_max_processes_total", 1)
+    processes.start(TEAM_A, _thread(admin), "npm run dev", root=tmp_path, port=3000)
+
+    with pytest.raises(processes.ProcessError, match="host"):
+        processes.start(TEAM_B, _thread(admin, TEAM_B), "npm run dev",
+                        root=tmp_path, port=3000)
+
+
+def test_a_stopped_process_frees_its_slot(seeded, admin, no_docker, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "comrade_max_processes_per_team", 1)
+    thread_id = _thread(admin)
+    proc = processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+    processes.stop(TEAM_A, proc["id"])
+    processes.start(TEAM_A, thread_id, "npm run dev", root=tmp_path, port=3000)
+
+
+def test_scratch_space_is_sized(seeded, admin, no_docker, tmp_path):
+    """/tmp is a tmpfs, which is MEMORY. An unbounded one lets a command fill
+    the host's RAM by writing a file."""
+    processes.start(TEAM_A, _thread(admin), "npm run dev", root=tmp_path, port=3000)
+    argv = no_docker[-1]
+    sized = [a for a in argv if a.startswith("/tmp:size=")]
+    assert sized, argv

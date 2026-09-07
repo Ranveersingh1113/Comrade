@@ -427,8 +427,68 @@ def _live_checkouts(conn) -> set[tuple[str, str]]:
     }
 
 
-def _dir_size(path: Path) -> int:
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+def _dir_size(path: Path) -> tuple[int, int]:
+    """Bytes under a path, and how many files could not be measured.
+
+    🔴 Failures are COUNTED, not swallowed. A stat that raises — a file deleted
+    mid-walk, a permission error, a broken link — used to abort the whole
+    measurement; treating it as zero would be worse still, because an
+    undercount means never evicting and a full disk takes Postgres with it.
+    The caller refuses to act on an incomplete number rather than guessing.
+    """
+    total = 0
+    failed = 0
+    for entry in path.rglob("*"):
+        try:
+            if entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            failed += 1
+    return total, failed
+
+
+def _teams_with_live_processes() -> set[str]:
+    """Teams that currently have a sandbox process running.
+
+    Their workspace is mounted into a container right now: evicting it deletes
+    files out from under a running server, which surfaces to the member as
+    their preview breaking for no stated reason.
+    """
+    from shared.db import Role as _Role, connect as _connect
+
+    try:
+        with _connect(_Role.CONTROL) as conn:
+            conn.autocommit = True
+            rows = conn.execute(
+                "select distinct team_id::text from public.sandbox_processes"
+                " where state in ('starting','running')"
+            ).fetchall()
+        return {row[0] for row in rows}
+    except Exception:  # noqa: BLE001 - a lookup failure must not license eviction
+        logger.exception("could not list live processes; refusing to evict")
+        raise
+
+
+def _has_uncommitted_work(space: Path) -> bool:
+    """Whether any checkout under this workspace has changes nobody proposed.
+
+    A thread's worktree holds work in progress. It is NOT recoverable from
+    GitHub — that is the whole point of it — so the "eviction is safe because a
+    checkout is a copy" reasoning does not apply to a dirty one.
+    """
+    for git_dir in list(space.rglob(".git"))[:50]:
+        checkout = git_dir.parent
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv
+                ["git", *GIT_FLAGS, "status", "--porcelain"],
+                cwd=checkout, capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            # Cannot tell: assume there is work rather than deleting it.
+            return True
+        if proc.returncode == 0 and proc.stdout.strip():
+            return True
+    return False
 
 
 #: How old a checkout may be before the reconciler refreshes it. A push
@@ -587,11 +647,23 @@ def enforce_disk_cap() -> list[str]:
         return []
     budget = int(settings.comrade_workspaces_max_gb * 1024**3)
     spaces = [d for d in root.iterdir() if d.is_dir()]
-    total = sum(_dir_size(d) for d in spaces)
-    if total <= budget:
+    measured = [_dir_size(d) for d in spaces]
+    total = sum(size for size, _ in measured)
+    unmeasured = sum(failed for _, failed in measured)
+    if unmeasured:
+        # Reported, and it does NOT read as "under budget". An undercount that
+        # silently passes is how a disk fills while a check says it is fine.
+        logger.warning(
+            "%d file(s) under the workspaces root could not be measured;"
+            " the total of %.1f GB is a floor, not the real usage",
+            unmeasured, total / 1024**3,
+        )
+    if total <= budget and not unmeasured:
         return []
 
+    busy = _teams_with_live_processes()
     evicted: list[str] = []
+    skipped: list[str] = []
     # Oldest touched first: the team least likely to be mid-turn.
     for entry in sorted(spaces, key=lambda d: d.stat().st_mtime):
         if total <= budget:
@@ -600,9 +672,23 @@ def enforce_disk_cap() -> list[str]:
             team_id = str(uuid.UUID(entry.name))
         except ValueError:
             continue
-        total -= _dir_size(entry)
+        if team_id in busy:
+            # Its workspace is mounted into a running container right now.
+            skipped.append(f"{team_id} (process running)")
+            continue
+        if _has_uncommitted_work(entry):
+            # Not recoverable from GitHub, which is exactly what makes the
+            # usual "a checkout is just a copy" argument not apply.
+            skipped.append(f"{team_id} (uncommitted work)")
+            continue
+        total -= _dir_size(entry)[0]
         remove_workspace(team_id)
         evicted.append(team_id)
+    if skipped:
+        logger.warning(
+            "kept %d workspace(s) that were not safe to evict: %s",
+            len(skipped), ", ".join(skipped),
+        )
     logger.warning(
         "workspaces exceeded %.1f GB; evicted %d checkout(s): %s",
         settings.comrade_workspaces_max_gb, len(evicted), ", ".join(evicted),

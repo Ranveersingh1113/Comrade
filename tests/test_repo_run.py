@@ -367,3 +367,59 @@ def test_the_run_names_the_uid_rather_than_trusting_the_image():
     argv = _docker_run_argv(["pytest", "-q"], root=Path("/tmp/x"), deps=None)
     assert "--user" in argv
     assert argv[argv.index("--user") + 1] == f"{SANDBOX_UID}:{SANDBOX_UID}"
+
+
+# ---------------------------------------------------------------------------
+# Bounded output (T07)
+# ---------------------------------------------------------------------------
+
+def test_output_is_bounded_while_it_is_read_not_after():
+    """🔴 `capture_output=True` buffered an untrusted command's entire output in
+    memory and clipped it afterwards. A team's test suite printing in a loop —
+    or `yes` — grows the worker's memory until it dies, and clipping at the end
+    is far too late to matter.
+
+    The reader keeps a head and a tail and drops the middle as it goes, so the
+    memory it uses is the budget rather than whatever the command produced.
+    """
+    from agent.sandbox import BoundedOutput
+
+    reader = BoundedOutput(limit=100)
+    for _ in range(1000):
+        reader.feed(b"0123456789")          # 10,000 bytes through a 100 budget
+
+    text = reader.text()
+    assert len(text) < 400, len(text)
+    assert reader.truncated is True
+    assert text.startswith("0123456789")     # the head survives
+    assert text.rstrip().endswith("0123456789")   # and so does the tail
+
+
+def test_a_single_enormous_line_cannot_grow_memory():
+    """A line with no newline in it defeats any line-based cap."""
+    from agent.sandbox import BoundedOutput
+
+    reader = BoundedOutput(limit=100)
+    reader.feed(b"x" * 5_000_000)
+    assert len(reader.text()) < 400
+    assert reader.truncated is True
+
+
+def test_output_under_the_limit_is_returned_whole_and_unmarked():
+    from agent.sandbox import BoundedOutput
+
+    reader = BoundedOutput(limit=1000)
+    reader.feed(b"hello\n")
+    reader.feed(b"world\n")
+    assert reader.text() == "hello\nworld\n"
+    assert reader.truncated is False
+
+
+def test_the_truncation_is_visible_in_what_the_model_reads():
+    """A silently shortened result is a result the agent will reason about as
+    though it were complete."""
+    from agent.sandbox import BoundedOutput
+
+    reader = BoundedOutput(limit=50)
+    reader.feed(b"a" * 500)
+    assert "omitted" in reader.text() or "truncated" in reader.text().lower()

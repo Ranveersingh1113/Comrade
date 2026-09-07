@@ -167,6 +167,19 @@ class Settings(BaseSettings):
     # "no setup" and never "setup with the whole internet".
     comrade_setup_proxy_container: str = ""
     comrade_setup_proxy_url: str = ""
+    # How many long-running processes may be alive at once. A preview holds a
+    # container, a network and a CPU share for hours; without an admission
+    # limit one team can take the host by starting servers in a loop, and
+    # nothing downstream would refuse them.
+    #
+    # Per team AND host-wide: the first stops one team crowding out others, the
+    # second stops every team together crowding out the host.
+    comrade_max_processes_per_team: int = 3
+    comrade_max_processes_total: int = 20
+    # Writable scratch inside a sandbox container. The rootfs is read-only and
+    # /tmp is a tmpfs, which is MEMORY — so an unbounded one is a command
+    # filling the host's RAM by writing a file.
+    comrade_sandbox_tmp_mb: int = 256
     comrade_preview_proxy_container: str = ""
     comrade_preview_domain: str = ""
     # How long a launch grant may be redeemed for. Single-use as well as short:

@@ -34,6 +34,10 @@ reaches the model exactly like a chat message does — so it is datamarked with
 what marked text means. This is the same reasoning as marking a PR body from a
 stranger; the surface is new, the rule is not.
 """
+import collections
+import contextlib
+import threading
+import types
 import logging
 import subprocess
 import uuid
@@ -65,6 +69,11 @@ MOUNT = "/workspace"
 
 #: Where a checkout's installed dependencies are mounted. A Docker volume, not
 #: a directory in the working tree — see shared.workspace.deps_volume.
+#: The byte budget for one command's output, enforced AS IT ARRIVES.
+#: Generous enough for a real test suite's failure output; finite because the
+#: alternative is a repository choosing how much of the host's memory to use.
+MAX_OUTPUT_BYTES = 256 * 1024
+
 DEPS_MOUNT = "/deps"
 
 #: The uid the team's code runs as. Matches `useradd --uid 10001 runner` in
@@ -94,6 +103,127 @@ class SandboxError(Exception):
     """The command could not be run at all. Distinct from a command that ran
     and failed — a failing test suite is a RESULT, not an error, and the agent
     needs to be able to tell the two apart."""
+
+
+class BoundedOutput:
+    """Keep the head and the tail of a stream, drop the middle as it arrives.
+
+    🔴 This replaces `subprocess.run(capture_output=True)` on untrusted
+    commands, which buffered a team's entire output in memory and clipped it
+    afterwards. `yes`, a test suite printing in a loop, or one line with no
+    newline in it all grew the worker's memory until it died — and clipping at
+    the end is far too late to matter.
+
+    Head AND tail, because each answers a different question: the head has the
+    command that failed and the first error, the tail has the summary and the
+    exit message. Keeping only one loses the half somebody needs.
+
+    The middle is counted, not stored, so the memory this uses is the budget
+    rather than whatever the command produced.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(limit, 0)
+        self._head = bytearray()
+        self._tail = collections.deque(maxlen=max(limit // 2, 1))
+        self._total = 0
+        self.truncated = False
+
+    def feed(self, chunk: bytes) -> None:
+        self._total += len(chunk)
+        for byte in chunk:
+            if len(self._head) < self._limit // 2:
+                self._head.append(byte)
+            else:
+                if len(self._tail) == self._tail.maxlen:
+                    self.truncated = True
+                self._tail.append(byte)
+
+    @property
+    def total(self) -> int:
+        return self._total
+
+    def text(self) -> str:
+        head = bytes(self._head).decode("utf-8", "replace")
+        tail = bytes(self._tail).decode("utf-8", "replace")
+        if not self.truncated:
+            return head + tail
+        dropped = self._total - len(self._head) - len(self._tail)
+        # Said out loud, in the result the model reads. A silently shortened
+        # result is one the agent reasons about as though it were complete.
+        return (
+            f"{head}\n\n... {dropped:,} bytes omitted (output exceeded the"
+            f" {self._limit:,}-byte limit) ...\n\n{tail}"
+        )
+
+
+def _drain(stream, into: "BoundedOutput", on_limit) -> None:
+    """Read one pipe to exhaustion, into a bounded buffer.
+
+    Its own thread per stream, and that is not tidiness: a process writing
+    heavily to stderr while nobody reads it fills the pipe buffer and BLOCKS,
+    so a reader that drains stdout first and stderr second deadlocks against
+    any command noisy on the wrong stream.
+    """
+    try:
+        while True:
+            chunk = stream.read(8192)
+            if not chunk:
+                return
+            was_truncated = into.truncated
+            into.feed(chunk)
+            if into.truncated and not was_truncated:
+                on_limit()
+    except (OSError, ValueError):
+        return
+    finally:
+        with contextlib.suppress(Exception):
+            stream.close()
+
+
+def run_bounded(
+    argv: list[str], *, timeout: int, container: str, limit: int,
+) -> dict:
+    """Run a container, draining both streams concurrently under a byte budget.
+
+    Kills the CONTAINER rather than the docker client on timeout or overflow.
+    Killing the client leaves the container running — that is how two of them
+    survived a test run here and spun host CPUs for a quarter of an hour.
+    """
+    proc = subprocess.Popen(  # noqa: S603 - fixed argv, never a shell string
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    out, err = BoundedOutput(limit), BoundedOutput(limit)
+    over = threading.Event()
+
+    def _hit_limit() -> None:
+        if not over.is_set():
+            over.set()
+            logger.info("output limit reached; killing %s", container)
+            _kill(container)
+
+    threads = [
+        threading.Thread(target=_drain, args=(proc.stdout, out, _hit_limit), daemon=True),
+        threading.Thread(target=_drain, args=(proc.stderr, err, _hit_limit), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        proc.wait(timeout=timeout)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        _kill(container)
+        proc.kill()
+        timed_out = True
+    for thread in threads:
+        thread.join(timeout=5)
+
+    return {
+        "exit_code": None if timed_out else proc.returncode,
+        "stdout": out.text(), "stderr": err.text(),
+        "timed_out": timed_out,
+        "output_limited": out.truncated or err.truncated,
+    }
 
 
 def _clip(text: str) -> str:
@@ -220,7 +350,10 @@ def _docker_run_argv(
     return [
         "docker", "run", "--rm", "--name", name,
         "--network", "bridge" if network else "none",
-        "--read-only", "--tmpfs", "/tmp",
+        "--read-only",
+        # SIZED. /tmp is a tmpfs, which is memory: an unbounded one lets a
+        # command fill the host's RAM by writing a file.
+        "--tmpfs", f"/tmp:size={settings.comrade_sandbox_tmp_mb}m",
         # An empty tmpfs OVER the checkout's .git, which does two jobs. It
         # keeps the promise the file tools already make — repo_read refuses
         # .git, and a shell in the same tree must not quietly re-open what
@@ -290,22 +423,17 @@ def run_contained(
     docker = _docker_run_argv(
         argv, root=root, deps=deps, network=network, name=name,
     )
+    # 🔴 BOUNDED, and drained while it runs. `capture_output=True` buffered a
+    # team's entire output in memory and clipped it afterwards, so `yes` — or a
+    # test suite printing in a loop, or one line with no newline in it — grew
+    # the worker's memory until it died. Both streams are read concurrently
+    # because a process writing heavily to stderr while nobody reads it fills
+    # the pipe and blocks, and the container is killed by NAME when the budget
+    # or the clock runs out, since killing the client leaves it running.
     try:
-        proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
-            docker, capture_output=True, text=True, timeout=timeout,
-            errors="replace",
+        result = run_bounded(
+            docker, timeout=timeout, container=name, limit=MAX_OUTPUT_BYTES,
         )
-    except subprocess.TimeoutExpired:
-        # The container outlives the client that was waiting on it, so it has
-        # to be killed by name or it keeps burning CPU after we stopped
-        # reading. --rm removes it once it actually stops.
-        _kill(name)
-        return {
-            "exit_code": None,
-            "stdout": "",
-            "stderr": spotlight(f"the command ran for {timeout}s and was stopped."),
-            "timed_out": True,
-        }
     except FileNotFoundError as exc:
         raise SandboxError(
             "Docker is not available, and Comrade does not run a team's code"
@@ -326,6 +454,20 @@ def run_contained(
     # branch exists to prevent. A command inside the container that exits 127
     # on its own has no "docker:" line, which is what makes this the right
     # discriminator rather than the exit code.
+    if result["timed_out"]:
+        return {
+            "exit_code": None,
+            "stdout": spotlight(result["stdout"]),
+            "stderr": spotlight(
+                f"the command ran for {timeout}s and was stopped."
+            ),
+            "timed_out": True,
+        }
+
+    proc = types.SimpleNamespace(
+        stderr=result["stderr"], stdout=result["stdout"],
+        returncode=result["exit_code"],
+    )
     if "docker:" in proc.stderr:
         if "executable file not found" in proc.stderr:
             raise SandboxError(
@@ -442,7 +584,10 @@ def run_setup(argv: list[str], *, root: Path, deps: str, timeout: int = SETUP_TI
         # reason: there is nowhere to go. The registry proxy attached to this
         # network is the only way out, and it decides what it will fetch.
         "--network", network,
-        "--read-only", "--tmpfs", "/tmp",
+        "--read-only",
+        # SIZED. /tmp is a tmpfs, which is memory: an unbounded one lets a
+        # command fill the host's RAM by writing a file.
+        "--tmpfs", f"/tmp:size={settings.comrade_sandbox_tmp_mb}m",
         # Only when there is something to mask. Docker has to CREATE the
         # mountpoint for a tmpfs, and it cannot create one inside a bind
         # mounted read-only — so an unconditional mask fails the whole

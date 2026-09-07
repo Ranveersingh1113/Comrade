@@ -170,7 +170,11 @@ def _run_argv(
         # the same network and dials this container by name; nothing else can
         # reach it, and the container has no route out. See PREVIEW_NETWORK.
         "--network", network,
-        "--read-only", "--tmpfs", "/tmp",
+        "--read-only",
+        # SIZED. /tmp is a tmpfs, which is memory: an unbounded one lets a
+        # development server fill the host's RAM by writing a file, and this
+        # one lives for hours rather than for one command.
+        "--tmpfs", f"/tmp:size={settings.comrade_sandbox_tmp_mb}m",
         *_git_mask(root),
         *_SECURITY_FLAGS,
         "--user", f"{SANDBOX_UID}:{SANDBOX_UID}",
@@ -179,6 +183,39 @@ def _run_argv(
         settings.comrade_sandbox_image,
         "sh", "-lc", command,
     ]
+
+
+def _admit(team_id: str) -> None:
+    """Refuse a new process when the team or the host is already full.
+
+    A preview holds a container, a network and a CPU share for hours. Without
+    this, one team starting servers in a loop takes the host and nothing
+    downstream refuses them — the reaper only runs later, by which time the
+    damage is done.
+
+    Counted across every team for the host limit, which is why it reads as
+    CONTROL: the agent role is scoped to one team and cannot see the total.
+    """
+    from shared.db import connect
+
+    with connect(Role.CONTROL) as conn:
+        conn.autocommit = True
+        mine, total = conn.execute(
+            "select count(*) filter (where team_id = %s), count(*)"
+            "  from public.sandbox_processes"
+            " where state in ('starting','running')",
+            (team_id,),
+        ).fetchone()
+    if mine >= settings.comrade_max_processes_per_team:
+        raise ProcessError(
+            f"this team already has {mine} processes running, which is the"
+            " limit. Stop one before starting another."
+        )
+    if total >= settings.comrade_max_processes_total:
+        raise ProcessError(
+            "the host is running as many sandbox processes as it allows."
+            " Try again shortly."
+        )
 
 
 def start(
@@ -204,6 +241,8 @@ def start(
         )
     if not command.strip():
         raise ProcessError("no command given")
+
+    _admit(team_id)
 
     # Written FIRST, and the INTENDED CONTAINER NAME with it.
     #

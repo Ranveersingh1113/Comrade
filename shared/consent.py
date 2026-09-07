@@ -13,11 +13,14 @@ attacker — that is what the role split + RLS provide.
 """
 import hashlib
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
 import psycopg
 from psycopg.types.json import Json
+
+logger = logging.getLogger(__name__)
 
 from shared.db import Role, team_session, user_session
 
@@ -604,6 +607,28 @@ def _exec_repo_open_pr(conn, team_id, requester_id, args) -> dict:
         )
     except PullRequestError as exc:
         raise ConsentError(str(exc)) from exc
+
+    # Remember whose work this is. Without it a failing check has no thread to
+    # report to, and the delivery becomes repository trivia for the wiki while
+    # the people who wrote the change hear nothing.
+    from pipeline.ci import record_pull_request
+    from pipeline.repo_pr import branch_for
+
+    thread_id = conn.execute(
+        "select thread_id from public.consent_queue"
+        " where team_id=%s and action_hash=%s order by created_at desc limit 1",
+        (team_id, action_hash),
+    ).fetchone()
+    try:
+        record_pull_request(
+            team_id, args["repo_full_name"], int(result["number"]),
+            branch_for(action_hash),
+            thread_id=str(thread_id[0]) if thread_id and thread_id[0] else None,
+            action_hash=action_hash,
+            head_sha=result.get("head_sha"),
+        )
+    except Exception:  # noqa: BLE001 - the pull request is open either way
+        logger.exception("could not record the pull request for %s", team_id)
     return result
 
 

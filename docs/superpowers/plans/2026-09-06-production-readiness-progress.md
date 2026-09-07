@@ -1366,6 +1366,63 @@ document id is not checked against the thread. 🔴 One unexplained failure:
 in isolation and in every run since. No cause found, and recorded rather than
 dismissed.
 
+### T25 — Return GitHub CI results to originating work
+
+**Changed:** `supabase/migrations/20260908120000_ci_correlation.sql`,
+`pipeline/ci.py` (new), `server/app.py`, `shared/consent.py`,
+`tests/test_ci_correlation.py`.
+
+**Regression — a pull request Comrade opened was forgotten the moment it was
+created.** `open_pull_request` returned its number to the consent flow and
+nothing persisted it: no row, no branch, no thread. So when GitHub reported
+that the checks had failed, there was no way to say WHOSE work had failed —
+the delivery was ingested as repository activity for the wiki, and the thread
+that produced the change never heard about it. A member had to go and look.
+
+**Design:** the check result is recorded BEFORE the delivery is acknowledged.
+One that is only queued is one a worker crash loses, and losing it is the
+whole defect. The bookkeeping never fails the delivery, though — GitHub
+retries anything that is not 2xx, and a redelivery loop is a worse outcome
+than a missing row.
+
+Matched by pull request number, falling back to BRANCH: GitHub does not always
+populate `pull_requests` — a check on a fork, or one that arrives before the
+PR is linked — and the branch is the other handle, the one Comrade itself
+chose.
+
+**Also:** a stale result — one about a commit the branch has moved past — is
+KEPT AND MARKED rather than dropped. The failure it reports may already be
+fixed, so it must not drive a decision; but an audit that quietly omits the
+failures nobody acted on is not an audit.
+**Also:** a check for work this team did not open is recorded with NO thread
+rather than discarded. It is real repository history, and a row that cannot
+say which thread is better than one that guesses.
+**Also:** the existing delivery dedupe turned out to be PARTIAL rather than
+absent. The job queue dedupes on `X-GitHub-Delivery`, but only while a job is
+pending or processing — a manual redelivery from GitHub's UI after the first
+finished would have landed twice. Closed with a unique constraint on the
+delivery id.
+**Also:** visibility follows the thread, consistent with T22's tasks and T24's
+attachments — CI on restricted work is invisible to non-participants.
+
+**Passing:** 13 CI-correlation tests; 106 GitHub and consent tests; 1212
+backend tests, 6 skipped, 0 failed.
+
+**Migration/rollback:** additive — two tables. Nothing existing changes shape,
+and a deployment without the new code simply writes no rows.
+
+**Ceiling:** 🔴 NOTHING SHOWS THIS TO ANYBODY. The rows are correlated,
+scoped and queryable, and no thread UI reads them — the member still has to go
+and look, which is the defect this task named. The data is in place for that
+screen and the screen is not built. 🔴 No continuation policy: the plan asks
+for at most one policy-authorised continuation per failure revision, and
+nothing continues anything. That satisfies "never automatically publish a new
+patch" by construction rather than by design. 🔴 No failure-summary fetch, so
+no log clipping, no datamarking and no secret redaction — none of which exist
+because nothing reads logs yet. 🔴 `head_sha` is recorded from what
+`open_pull_request` returns; if that is absent the first check result cannot
+be judged stale.
+
 ---
 
 ## Standing ceilings

@@ -46,6 +46,7 @@ from server.github_connect import (
 from server import previews
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
+from pipeline.ci import CHECK_EVENTS, record_check_result
 from server.webhooks import verify_signature
 from shared.config import settings
 from shared.consent import (
@@ -943,6 +944,18 @@ async def github_webhook(request: Request) -> dict:
             await run_in_threadpool(enqueue_sync, team_id, full_name)
         except Exception:  # noqa: BLE001
             logger.exception("could not queue a sync for %s", full_name)
+
+    # BEFORE acknowledging. A check result that is only queued is a check
+    # result that a worker crash loses, and the thread whose work failed never
+    # hears about it — which is the whole defect this closes.
+    if event in CHECK_EVENTS:
+        try:
+            await run_in_threadpool(
+                record_check_result, team_id, full_name, event, body,
+                request.headers.get("X-GitHub-Delivery"),
+            )
+        except Exception:  # noqa: BLE001 - never fail a delivery on bookkeeping
+            logger.exception("could not record a check result for %s", full_name)
 
     job_id = await run_in_threadpool(
         enqueue_github_event,

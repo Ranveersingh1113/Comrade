@@ -31,7 +31,7 @@ from agent.tools import (
     team_propose_task,
 )
 from pipeline.parsers import SPACE_MARK
-from pipeline.wiki import all_active_pages
+from pipeline.wiki import index_is_truncated, page_index
 from shared.config import settings
 from shared.db import user_session
 
@@ -162,8 +162,13 @@ def wiki_section(team_id: str, requester_id: str) -> str:
 
     Read as the requesting member (findings §4.1), not as the agent role.
     """
+    # 🔴 This called `all_active_pages` — every active fact of every page,
+    # with its date and first citation kind — to print a list of page NAMES.
+    # On every turn. A team with two thousand facts paid two thousand rows for
+    # an index, and the cost grew with the wiki forever.
     with user_session(requester_id) as conn:
-        pages = [p for p in all_active_pages(conn, team_id) if p["facts"]]
+        pages = page_index(conn, team_id)
+        truncated = index_is_truncated(conn, team_id)
     if not pages:
         return (
             "\n## The team wiki\n"
@@ -174,11 +179,17 @@ def wiki_section(team_id: str, requester_id: str) -> str:
         f"- {p['title']}" + (f" — {p['description']}" if p["description"] else "")
         for p in pages
     )
+    more = (
+        "\nThis is the first part of the index, not all of it — use"
+        " memory_search when something you expect is not listed.\n"
+        if truncated else ""
+    )
     return (
         "\n## The team wiki\n"
         "Compiled from the team's own documents and chat. Every fact is cited,"
         " versioned, and revertible by any member.\n\n"
-        f"{lines}\n\n"
+        f"{lines}\n"
+        f"{more}\n"
         "Call memory_read_page with a title before answering about decisions,"
         " deadlines, scope, or history. Cite what you find. If the wiki does not"
         " say it, say that it does not.\n"

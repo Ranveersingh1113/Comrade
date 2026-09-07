@@ -12,7 +12,7 @@ from typing import Literal
 from google.adk.tools import ToolContext
 
 from pipeline.parsers import spotlight
-from pipeline.wiki import ORPHAN_TITLE, all_active_pages
+from pipeline.wiki import ORPHAN_TITLE, all_active_pages, page_facts, page_index
 from shared.consent import propose_action
 from shared.db import user_session
 from shared.nudge import send_nudge
@@ -99,21 +99,31 @@ def fetch_team_state(team_id: str, requester_id: str) -> dict:
     }
 
 
+#: How many facts one page may put into a turn.
+#:
+#: 🔴 Nothing capped this. CONSOLIDATION_FACT_CAP bounds what the COMPILER is
+#: shown; a page with a thousand facts on it went into the agent's prompt
+#: whole, and one oversized page is exactly how a budget gets bypassed without
+#: anybody choosing to.
+MAX_PAGE_FACTS = 200
+
+
 def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
     """One wiki page's active facts with their citations, read as the member.
+
+    🔴 This used to call `all_active_pages` — loading every page's every fact —
+    and then pick one page out of the list in Python. Opening one page cost the
+    whole wiki.
 
     Titles match case-insensitively — the model reads them off an index, so a
     capitalisation slip should not read as "no such page".
     """
     with user_session(requester_id) as conn:
-        pages = [p for p in all_active_pages(conn, team_id) if p["facts"]]
-        page = next(
-            (p for p in pages if p["title"].lower() == title.strip().lower()), None
-        )
-        if page is None:
+        page = page_facts(conn, team_id, title, MAX_PAGE_FACTS)
+        if page is None or not page["facts"]:
             return {
                 "error": "no such page",
-                "available": [p["title"] for p in pages],
+                "available": [p["title"] for p in page_index(conn, team_id)],
             }
         entry_ids = [f["entry_id"] for f in page["facts"]]
         rows = conn.execute(
@@ -135,7 +145,7 @@ def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
                 "excerpt": spotlight(excerpt or ""),
             }
         )
-    return {
+    result = {
         "title": page["title"],
         "description": page["description"],
         "facts": [
@@ -143,6 +153,16 @@ def read_memory_page(team_id: str, requester_id: str, title: str) -> dict:
             for f in page["facts"]
         ],
     }
+    if page["truncated"]:
+        # Said out loud. A page cut short in silence teaches the agent the rest
+        # is not there, and it will report that absence to the team as fact.
+        result["truncated"] = True
+        result["note"] = (
+            f"This page has more than {MAX_PAGE_FACTS} facts; the rest were not"
+            " loaded. Use memory_search for anything you expected and cannot"
+            " see here."
+        )
+    return result
 
 
 # Ranked full-text search over one team's messages, read as the member.

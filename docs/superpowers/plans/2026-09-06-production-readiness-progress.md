@@ -1039,6 +1039,60 @@ wrong summary via the API, but nothing shows it to them. 🔴 `open_questions`,
 `plan_version` and `pending` are in the contract and in the schema, and
 nothing populates them yet.
 
+### T20 — Bound retrieval cost and measure memory usefulness
+
+**Changed:** `pipeline/wiki.py`, `agent/agent.py`, `agent/tools.py`,
+`tests/test_retrieval_cost.py`.
+
+**Regression 1 — the index loaded the whole wiki to print page names.**
+`wiki_section` renders TITLES AND DESCRIPTIONS ONLY, and built them by calling
+`all_active_pages` — every active fact of every page, each with its
+`valid_from` and its first citation kind. On EVERY turn of EVERY thread. A
+team with two thousand facts paid two thousand rows for a list of page names,
+and the cost grew with the corpus forever.
+
+**Regression 2 — opening ONE page cost the whole wiki too.**
+`read_memory_page` called the same function and picked one page out of the
+result in Python.
+
+**Regression 3 — one oversized page bypassed every budget.**
+`CONSOLIDATION_FACT_CAP` bounds what the COMPILER is shown; nothing bounded
+what a single page could contribute to a TURN, so a page with a thousand facts
+went into the prompt whole.
+
+**Design:** `exists` rather than a join for "does this page have anything on
+it" — a join would fetch the facts to answer the question, which is the bug. A
+truncated index and a truncated page both SAY SO: showing part of the wiki in
+silence teaches the agent the rest does not exist, and it will report that
+absence to the team as fact.
+
+**Also:** an existing test caught a hole I would have shipped. Entries that
+predate pages have no `page_id`, and a metadata-only index over
+`memory_pages` cannot see them — those facts would have disappeared from the
+index entirely, which is the starvation this system is most afraid of.
+`test_page_less_facts_still_surface` went red; the orphan bucket is now served
+by both the index and the page reader.
+**Also:** two of my own assertions were wrong and were fixed rather than the
+code. One forbade the string `memory_versions` in the index SQL, but an
+`EXISTS` against it is the right way to ask whether a page has content —
+fetching `v.fact` is the bug, so that is what it forbids. The other counted
+occurrences of the word "select"; what matters is that the statement count
+does not grow with the number of pages, so it counts statements.
+
+**Passing:** 8 retrieval-cost tests; 1146 backend tests, 6 skipped, 0 failed.
+
+**Migration/rollback:** none — no schema change.
+
+**Ceiling:** 🔴 NO BENCHMARK. The plan asks for a growing-corpus benchmark and
+measured retrieval quality: paraphrase, negation and identifier cases, revision
+recall beyond 400 facts. What exists here is a structural fix with tests that
+prove the queries no longer read what they do not need — the number of rows is
+bounded now, and nobody has measured the latency or the recall at size. 🔴 No
+token attribution: the plan asks for tokens split across prompt, tool schema,
+history, memory, files and output, and nothing counts them. 🔴 `memory_search`
+is unchanged — it was already FTS-backed and bounded, but the "retrieve
+broadly, rerank cheaply" half of the item is not built.
+
 ---
 
 ## Standing ceilings

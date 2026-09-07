@@ -31,6 +31,8 @@ export const supaState = {
    *  refresh does not arrive. Cleared as it fires, so one failure is one
    *  failure rather than a mode the test has to remember to leave. */
   failNextSelect: null as string | null,
+  /** Per-table update failures, the same shape as insertErrors. */
+  updateErrors: {} as Record<string, string>,
   updates: [] as WriteRecord[],
   deletes: [] as WriteRecord[],
   /** set to make the next insert into a table fail */
@@ -44,6 +46,7 @@ export function resetSupa(): void {
   supaState.deletes = [];
   supaState.insertErrors = {};
   supaState.failNextSelect = null;
+  supaState.updateErrors = {};
 }
 
 function makeQuery(table: string) {
@@ -79,7 +82,11 @@ function makeQuery(table: string) {
       };
       Object.assign(u, {
         eq: () => u,
-        then: (resolve: (v: { data: null; error: null }) => unknown) => {
+        then: (resolve: (v: { data: null; error: { message: string } | null }) => unknown) => {
+          const message = supaState.updateErrors[table];
+          if (message) {
+            return Promise.resolve({ data: null, error: { message } }).then(resolve);
+          }
           record();
           return Promise.resolve({ data: null, error: null }).then(resolve);
         },

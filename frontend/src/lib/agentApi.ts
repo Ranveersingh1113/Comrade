@@ -45,20 +45,49 @@ async function request<T>(path: string, body?: unknown): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** Human-readable text for a failed agent call. */
+/**
+ * Log the technical detail and return a short reference for the member.
+ *
+ * 🔴 The detail used to go in the message. "Agent endpoint not reachable — is
+ * the backend running on :8000?" is a sentence about somebody else's laptop:
+ * it tells the person reading it nothing they can act on, and it tells anyone
+ * helping them nothing they can search for. The detail belongs in the console
+ * where support can ask for it; the member gets something to DO and a short
+ * code to quote.
+ */
+export function failureReference(e: unknown): string {
+  const reference = Math.random().toString(36).slice(2, 8).toUpperCase();
+  // console.error, not a swallowed log: this is the only copy of the cause.
+  console.error(`[comrade ${reference}]`, e);
+  return reference;
+}
+
+/** What to tell the member, and what to do about it. */
 export function agentErrorText(e: unknown): string {
+  const reference = failureReference(e);
+  const tail = ` (reference ${reference})`;
   if (e instanceof AgentApiError) {
-    if (e.status === 401) return 'Your session expired — sign in again.';
-    if (e.status === 403) return "You're not an active member of this team.";
-    if (e.status === 404) return 'Agent endpoint not reachable — is the backend running on :8000?';
-    if (e.status === 422) return `The runtime rejected that request: ${e.message}`;
-    return `${e.status} — ${e.message}`;
+    if (e.status === 401) return 'Your session has expired. Sign in again to carry on.';
+    if (e.status === 403) return "You're not an active member of this team, so this thread is read-only for you.";
+    if (e.status === 429) return `This team has used its turns for the hour. Try again a little later.${tail}`;
+    if (e.status >= 500) return `Comrade hit a problem on its side. Try again in a moment.${tail}`;
+    // Other 4xx: the server wrote that sentence FOR the member — a refused
+    // GitHub installation, a document with nothing stored, a rejected
+    // argument. Replacing it with "something went wrong" would throw away the
+    // one part of the failure that is actually actionable. Generic text is
+    // for failures nobody wrote a sentence for.
+    if (e.message && e.message !== 'Not Found' && e.message !== 'Bad Request') {
+      return `${e.message}${tail}`;
+    }
+    return `Comrade could not do that. Reload and try again; if it keeps happening, tell whoever runs this deployment.${tail}`;
   }
-  // fetch() rejects with a TypeError when the host is unreachable / CORS-blocked.
+  // fetch() rejects with a TypeError when the host is unreachable or the
+  // request was blocked — from here that is indistinguishable from being
+  // offline, and both have the same answer.
   if (e instanceof TypeError) {
-    return `Can't reach Comrade's runtime at ${BASE} — is the backend running?`;
+    return `No connection to Comrade. Check your network and try again — nothing you typed has been lost.${tail}`;
   }
-  return e instanceof Error ? e.message : 'Send failed';
+  return `Something went wrong. Try again.${tail}`;
 }
 
 export interface ConsentActionResult {
@@ -129,6 +158,20 @@ export async function ingestDocument(
     throw new AgentApiError(res.status, detail);
   }
   return (await res.json()) as { job_id: string };
+}
+
+/**
+ * Parse an already-uploaded document again.
+ *
+ * 🔴 The only retry was `/ingest`, which takes the bytes as multipart — so a
+ * member whose ingestion failed had to find the file and upload it a second
+ * time, and after a reload the browser no longer had it. This reads back what
+ * is already stored.
+ */
+export function reingestDocument(documentId: string, teamId: string) {
+  return request<{ job_id: string }>(
+    `/documents/${encodeURIComponent(documentId)}/reingest`, { team_id: teamId },
+  );
 }
 
 export interface StreamFrame {

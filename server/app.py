@@ -994,6 +994,86 @@ def document_ingest(
     return {"job_id": job_id}
 
 
+#: Where uploaded documents live. The browser writes here under RLS; this is
+#: the same bucket read back so a retry does not ask for the file again.
+DOCUMENT_BUCKET = "documents"
+
+
+def download_document(storage_path: str) -> bytes:
+    """Read a stored document back with the service key.
+
+    Separated so the retry endpoint can be tested without Storage: the network
+    call is the one part of this that a test has no business making.
+    """
+    url = (
+        f"{settings.supabase_url.rstrip('/')}/storage/v1/object/"
+        f"{DOCUMENT_BUCKET}/{storage_path.lstrip('/')}"
+    )
+    response = httpx.get(
+        url,
+        headers={
+            "Authorization": f"Bearer {settings.supabase_secret_key}",
+            "apikey": settings.supabase_secret_key,
+        },
+        timeout=30.0,
+    )
+    response.raise_for_status()
+    return response.content
+
+
+@app.post("/documents/{document_id}/reingest")
+def document_reingest(
+    document_id: str, req: TeamScoped, user_id: CurrentUserId,
+) -> dict:
+    """Parse a document again from what is already stored.
+
+    🔴 The only way to retry was `/ingest`, which takes the bytes as multipart
+    — so a member whose ingestion failed had to find the file and upload it a
+    second time, and after a reload the browser no longer had it at all. They
+    were told what went wrong and offered nothing to do about it, for a file
+    the system was already holding.
+    """
+    require_membership(user_id, req.team_id)
+    with user_session(user_id) as conn:
+        row = conn.execute(
+            "select kind, storage_path from public.documents"
+            " where id=%s and team_id=%s and deleted_at is null",
+            (document_id, req.team_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
+    kind, storage_path = row
+    if not storage_path:
+        # Older rows exist with no stored file. "Retry" cannot mean anything
+        # for them, and saying so is better than a confusing failure later.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this document has no stored file to read — upload it again",
+        )
+
+    try:
+        raw = download_document(storage_path)
+    except httpx.HTTPError as exc:
+        logger.warning("could not read %s back from storage: %s", storage_path, exc)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "the stored file could not be read back just now — try again shortly",
+        ) from exc
+
+    # Encoded exactly as the upload path encodes it. A pdf that arrives base64
+    # on one path and raw on the other is a parser bug waiting for whichever
+    # path is used second.
+    content = (
+        base64.b64encode(raw).decode("ascii") if kind in _BINARY_KINDS
+        else raw.decode("utf-8", errors="replace")
+    )
+    try:
+        job_id = enqueue_document(req.team_id, document_id, kind, content)
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return {"job_id": job_id}
+
+
 # ---------- previews ----------
 # The one route that forwards a request into a team's own unreviewed code.
 # server/previews.py is the boundary; this is the plumbing around it.

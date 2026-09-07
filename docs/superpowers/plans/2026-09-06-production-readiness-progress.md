@@ -657,6 +657,72 @@ RLS and component level, not by two real sessions watching each other. 🔴
 Owner management is display-only — the owner is shown and cannot be removed,
 but ownership cannot be transferred.
 
+### T15 — Consolidate daily UX failure and recovery states
+
+**Changed:** `server/app.py`, `frontend/src/lib/agentApi.ts`,
+`frontend/src/screens/GroupRoom.tsx`, `frontend/src/screens/Documents.tsx`,
+`frontend/tests/component/failureStates.test.tsx`,
+`frontend/tests/component/mocks.tsx`, `tests/test_document_reingest.py`.
+
+**Regression 1 — `deleteForEveryone` awaited its update and looked at
+nothing.** RLS refusing the delete produced no error, no message, and the
+refresh underneath put the message straight back — so a refused delete was
+indistinguishable from a UI that had not noticed the click.
+
+**Regression 2 — `markOpened` ignored its result too.** Open-tracking drives
+"who has read this", so a silently refused write meant the team was reading a
+list that quietly understated itself.
+
+**Regression 3 — the draft lived in component state.** Switching threads to
+check something threw away whatever had been typed.
+
+**Regression 4 — nothing stopped a second send.** A double click, or an
+impatient press while the first was still in flight, asked the question twice.
+The attempt id from T10 makes a RETRY safe; it does not make a second
+deliberate press free.
+
+**Regression 5 — the errors were written for whoever wrote the code.** "Agent
+endpoint not reachable — is the backend running on :8000?" is a sentence about
+somebody else's laptop: nothing the reader can act on, nothing a helper can
+search for. Failures now log the cause against a short reference and tell the
+member what to do.
+
+**Regression 6 — a failed ingestion offered nothing to do about it.** The only
+retry was `/ingest`, which takes the bytes as multipart, so a member had to
+find the file and upload it a second time — and after a reload the browser no
+longer had it. The ingest endpoint's own docstring had this queued as "a later
+slice that removes the double upload".
+
+**Design:** drafts are keyed per member AND per thread, because two people at
+one machine must not inherit each other's half-written messages. The send
+guard clears in exactly one place, which is why the body moved into `deliver`.
+`/reingest` encodes bytes exactly as the upload path does — a pdf that arrives
+base64 on one path and raw on the other is a parser bug waiting for whichever
+path is used second.
+
+**Also:** the first rewrite of the error text replaced EVERY 4xx with generic
+copy, and the GitHub-callback test caught it. When the server wrote a sentence
+FOR the member — "that installation does not belong to an account you can
+administer" — that sentence is the actionable part. Generic text is for
+failures nobody wrote a sentence for.
+**Also:** a document row with no `storage_path` gets a 409 saying to upload it
+again, rather than a confusing failure further down.
+**Also:** the delete control only exists while its row is hovered, and moving a
+synthetic pointer onto it drops the hover that renders it. A harness problem
+rather than a product one, but worth knowing before the next such test.
+
+**Passing:** 5 reingest tests, 7 failure-state tests; 1095 backend tests, 6
+skipped, 0 failed; 210 frontend tests; build ✅; lint ✅.
+
+**Migration/rollback:** none. One new endpoint, additive.
+
+**Ceiling:** 🔴 no upload PROGRESS — the Storage client used here reports
+none, so uploading shows an indeterminate state with the filename rather than
+a bar. 🔴 No keyboard, screen-reader or narrow-layout journey: the plan asks
+for focus-after-error and status announcements tested in a browser, and this
+is component-level evidence only. 🔴 `/reingest` is proven against a mocked
+download; the real Storage read has never run.
+
 ---
 
 ## Standing ceilings

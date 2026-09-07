@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { AgentApiError, ingestDocument } from '../lib/agentApi';
+import {
+  AgentApiError, agentErrorText, ingestDocument, reingestDocument,
+} from '../lib/agentApi';
 import { messageTime } from '../lib/format';
 import type { DocumentKind, DocumentOpen, DocumentRow } from '../lib/types';
 import { isConfirmedEmpty } from '../lib/listState';
@@ -25,6 +27,8 @@ export function Documents() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  /** Which document is being parsed again, so its own control can say so. */
+  const [retrying, setRetrying] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -95,7 +99,10 @@ export function Documents() {
   const markOpened = async (doc: DocumentRow) => {
     const existing = myOpens.get(doc.id);
     if (existing?.first_opened_at) return;
-    await supabase.from('document_opens').upsert(
+    // 🔴 The result was ignored. Open-tracking drives "who has read this", so
+    // a silently refused write meant the team was reading a list that quietly
+    // understated itself — and nothing anywhere said so.
+    const { error: openErr } = await supabase.from('document_opens').upsert(
       {
         document_id: doc.id,
         user_id: myUserId,
@@ -104,7 +111,28 @@ export function Documents() {
       },
       { onConflict: 'document_id,user_id' },
     );
+    if (openErr) {
+      // Not an error banner over the document they just opened: this is
+      // bookkeeping, and failing it should not look like the file failed.
+      console.error('could not record that this document was opened', openErr);
+      return;
+    }
     await load();
+  };
+
+  const retryIngest = async (doc: DocumentRow) => {
+    setRetrying(doc.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await reingestDocument(doc.id, teamId);
+      setNotice(`${doc.filename} queued again — compiling into the wiki.`);
+      await load();
+    } catch (e) {
+      setError(agentErrorText(e));
+    } finally {
+      setRetrying(null);
+    }
   };
 
   const openDoc = async (doc: DocumentRow) => {
@@ -231,6 +259,19 @@ export function Documents() {
                       {(uploader?.display_name ?? 'unknown').toUpperCase()} ·{' '}
                       {messageTime(d.created_at).toUpperCase()} ·{' '}
                       {d.status === 'ready' ? 'IN WIKI' : d.status.toUpperCase()}
+                      {d.status === 'failed' && (
+                        // The file is already stored, so this asks the server
+                        // to read it back rather than asking the member to
+                        // find it and upload it a second time.
+                        <button
+                          className="btn-ghost"
+                          style={{ marginLeft: 8, fontSize: 10 }}
+                          disabled={retrying === d.id}
+                          onClick={(e) => { e.stopPropagation(); void retryIngest(d); }}
+                        >
+                          {retrying === d.id ? 'RETRYING…' : 'RETRY'}
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div style={{ textAlign: 'right' }}>

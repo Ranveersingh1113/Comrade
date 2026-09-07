@@ -38,7 +38,28 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
   const [layout, setLayout] = useState<RoomLayout>(
     () => (localStorage.getItem('comrade.roomLayout') as RoomLayout | null) ?? 'classic',
   );
-  const [draft, setDraft] = useState('');
+  // 🔴 The draft lived in component state alone, so switching threads to
+  // check something threw away whatever had been typed. Kept per thread AND
+  // per member: two people at one machine must not inherit each other's
+  // half-written messages.
+  const draftKey = `comrade.draft.${myUserId}.${thread.id}`;
+  const [draft, setDraftState] = useState(
+    () => localStorage.getItem(draftKey) ?? '',
+  );
+  const setDraft = useCallback((next: string) => {
+    setDraftState(next);
+    try {
+      if (next) localStorage.setItem(draftKey, next);
+      else localStorage.removeItem(draftKey);
+    } catch {
+      // A browser refusing storage must not stop somebody typing.
+    }
+  }, [draftKey]);
+  useEffect(() => {
+    setDraftState(localStorage.getItem(draftKey) ?? '');
+  }, [draftKey]);
+  /** In flight, so a second press is not a second question. */
+  const [sending, setSending] = useState(false);
   const [aiTyping, setAiTyping] = useState(false);
   const [pending, setPending] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
@@ -302,12 +323,25 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || !teamId) return;
+    // 🔴 Nothing stopped a second send. A double click, or an impatient press
+    // while the first was still in flight, asked the question twice — and the
+    // attempt id makes a RETRY safe, not a second deliberate press.
+    if (!text || !teamId || sending) return;
+    setSending(true);
     setDraft('');
     setSendError(null);
     setNote(null);
     setAgentNote(null);
     const mentionsAi = !allowTeamMessages || composerMode === 'agent' || /@comrade/i.test(text);
+    try {
+      await deliver(text, mentionsAi);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  /** The send itself, so the in-flight flag has exactly one place to clear. */
+  const deliver = async (text: string, mentionsAi: boolean) => {
     if (mentionsAi) {
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
@@ -352,7 +386,12 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
 
   const deleteForEveryone = async (m: Message) => {
     // Deletion leaves a trace: set deleted_scope, never remove the row.
-    await supabase
+    //
+    // 🔴 The result was awaited and then ignored. RLS refusing this produced
+    // no error and no message, and the refresh underneath put the message
+    // straight back — so a refused delete was indistinguishable from a UI
+    // that had not noticed the click.
+    const { error: err } = await supabase
       .from('messages')
       .update({
         deleted_scope: 'everyone',
@@ -360,6 +399,11 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
         deleted_at: new Date().toISOString(),
       })
       .eq('id', m.id);
+    if (err) {
+      setSendError(`That message could not be deleted: ${err.message}`);
+      return;
+    }
+    setSendError(null);
     await refresh();
   };
 
@@ -695,7 +739,12 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
                 }}
                 placeholder={!allowTeamMessages || composerMode === 'agent' ? 'Ask Comrade…' : 'Message the team… @Comrade to ask the AI'}
               />
-              <button className="btn-ink" onClick={() => void send()}>
+              <button
+                className="btn-ink"
+                onClick={() => void send()}
+                disabled={sending}
+                aria-busy={sending}
+              >
                 SEND
               </button>
             </div>

@@ -723,6 +723,28 @@ for focus-after-error and status announcements tested in a browser, and this
 is component-level evidence only. 🔴 `/reingest` is proven against a mocked
 download; the real Storage read has never run.
 
+## Phase C exit gate
+
+**1095 backend tests, 6 skipped, 0 failed. 210 frontend tests. Build and lint
+green.** Six tasks, T10 through T15, and the pattern across them is worth
+naming: every one was a case where the SYSTEM was correct and the account of
+itself it gave was not.
+
+- A durable run kept working while the browser had stopped listening (T10).
+- A run parked on a person was reaped by a clock built for dead processes,
+  and rejecting a card resumed nothing (T11).
+- Two workers could each believe they owned one job (T12).
+- A stream re-read four hundred rows to find one, and a dropped socket froze
+  a room in silence (T13).
+- A thread named anything but "General" would not let the team talk in it
+  (T14).
+- A refused delete looked exactly like a missed click (T15).
+
+The through-line for Phase D: the ceilings are almost entirely about EVIDENCE.
+No load measurement, no two-browser journey, no real Storage read, no
+keyboard or screen-reader pass, no Linux Docker daemon. The code is argued
+for; a lot of it has never been watched working.
+
 ---
 
 ## Standing ceilings

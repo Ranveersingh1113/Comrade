@@ -250,6 +250,73 @@ index.
 **Ceiling:** 🔴 no real-Supabase integration run for pagination, and no
 browser-level scroll-anchor check.
 
+### T10 — Reconnect browser to durable runs and prevent duplicate sends
+
+**Changed:** `supabase/migrations/20260907110000_turn_idempotency.sql`,
+`agent/run_queue.py`, `server/app.py`, `frontend/src/lib/agentApi.ts`,
+`frontend/src/screens/GroupRoom.tsx`, `tests/test_turn_idempotency.py`,
+`tests/test_run_stream_resume.py`,
+`frontend/tests/component/turnResume.test.tsx`, plus the three existing
+component/stream tests whose doubles held the old contract.
+
+**Regression:** two failures from one design. The browser watched a run only
+through the POST that started it, and that POST carried nothing identifying
+the attempt.
+
+1. A refresh, a sleeping laptop or a dropped proxy connection ended the
+   stream and nothing reconnected — indicator off, no reply, no reason —
+   while the run itself carried on, durable and leased, answering nobody. A
+   finished turn and a severed one were the same observation.
+2. An accepted POST whose response never arrived was indistinguishable from
+   one that never landed. The room restored the draft, the member pressed
+   send again, and the thread got the same question twice: two messages, two
+   runs, two model bills.
+
+**Design:** a `client_request_id` identifies the ATTEMPT and survives the
+retry; `(team_id, sender_id, thread_id, client_request_id)` is unique where
+present, so the retry resolves to the turn already accepted and comes back as
+`duplicate` carrying its run. Watching a run is now GET `/agent/runs/{id}/stream`
+with an `after_seq` cursor — the same call for attaching, reattaching and
+rejoining after a refresh, instead of a live path and a lost one.
+
+**Also:** the lookup alone is check-then-act. The **partial unique index** is
+what holds against two simultaneous retries; the lookup only avoids raising.
+Proven by a test that inserts the colliding row directly.
+**Also:** a duplicate **releases its budget reservation**. Budget is reserved
+before the turn is persisted (T-earlier's ordering fix), so without this every
+uncertain send costs a turn that never reached the model. Confirmed
+discriminating: the test fails with the release removed.
+**Also:** `waiting_for_permission` / `waiting_for_user` arrived as `done`, so a
+run parked on a consent card stopped the indicator and read as a turn that
+died in silence — beside the card that would have continued it. Lifecycle now
+has its own frame type, and `done` means finished.
+**Also:** a follow that ends without a terminal frame reports `truncated`, not
+success, and reattaches from its cursor (bounded, 5 attempts). Replaying from
+zero would show the first half of an answer twice.
+**Also:** navigation aborts the subscription **and nothing else**. The run is
+durable; leaving a room must not quietly kill a turn a teammate is waiting on.
+
+**Passing:** 7 backend idempotency tests, 6 stream-resume tests, 9 new
+frontend tests; 184 frontend tests; build ✅; lint ✅ (warnings only).
+
+**Migration/rollback:** expand-only, deliberately. The column is nullable and
+the index partial, so existing rows and any client sending no id keep working.
+The RPC gained a five-argument form **alongside** the four-argument one, which
+survives as a shim: releases build → migrate → activate (T05), so between the
+migration and the new image the running API still calls the old signature, and
+dropping it here would have made that window an outage. A later release
+contracts it away. The fifth parameter takes no default on purpose — with one,
+a four-argument call matches both signatures and Postgres refuses it as
+ambiguous. Rollback of the code under this migration is safe; a test pins the
+old signature.
+
+**Ceiling:** 🔴 no real-network evidence. The truncation path is exercised
+against a mocked stream, not a killed TCP connection or a proxy timeout; the
+retry-after-uncertain-POST path is exercised against a mocked failure, not a
+genuine accepted-then-dropped request. Both need a real deployment to prove.
+🔴 Reconstruct-after-refresh follows `queued`/`running` runs only; a run
+already waiting on a decision surfaces through its consent card instead.
+
 ---
 
 ## Standing ceilings

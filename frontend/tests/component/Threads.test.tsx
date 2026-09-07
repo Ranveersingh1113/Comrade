@@ -43,10 +43,14 @@ test('creates and opens a public thread with one click', async () => {
 
 test('non-group threads are Comrade-only and send through the agent', async () => {
   let body: unknown;
-  server.use(http.post('http://localhost:8000/agent/turn/stream', async ({ request }) => {
-    body = await request.json();
-    return new HttpResponse('{"type":"done"}\n');
-  }));
+  server.use(
+    http.post('http://localhost:8000/agent/turn', async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ run_id: 'run-1', status: 'queued' });
+    }),
+    http.get('http://localhost:8000/agent/runs/run-1/stream', () =>
+      new HttpResponse('{"type":"done"}\n')),
+  );
   supaState.tables.threads = [thread];
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>);
@@ -54,7 +58,7 @@ test('non-group threads are Comrade-only and send through the agent', async () =
   expect(screen.queryByRole('button', { name: 'Comrade mode' })).not.toBeInTheDocument();
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'check the release');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
-  await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'check the release', thread_id: 'thread-1' }));
+  await waitFor(() => expect(body).toMatchObject({ team_id: 'team-1', text: 'check the release', thread_id: 'thread-1' }));
 });
 
 test('shows a thread consent card inline with its messages', async () => {
@@ -101,10 +105,14 @@ test('changing member identity resets the mounted thread composer and its send p
   localStorage.setItem('comrade.composerMode.u2.thread-1', 'agent');
   supaState.tables.threads = [thread];
   let body: unknown;
-  server.use(http.post('http://localhost:8000/agent/turn/stream', async ({ request }) => {
-    body = await request.json();
-    return new HttpResponse('{"type":"done"}\n');
-  }));
+  server.use(
+    http.post('http://localhost:8000/agent/turn', async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ run_id: 'run-1', status: 'queued' });
+    }),
+    http.get('http://localhost:8000/agent/runs/run-1/stream', () =>
+      new HttpResponse('{"type":"done"}\n')),
+  );
   const user = userEvent.setup();
   const app = () => <MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>;
   const { rerender } = render(app());
@@ -115,5 +123,5 @@ test('changing member identity resets the mounted thread composer and its send p
   expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'review this');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
-  await waitFor(() => expect(body).toEqual({ team_id: 'team-1', text: 'review this', thread_id: 'thread-1' }));
+  await waitFor(() => expect(body).toMatchObject({ team_id: 'team-1', text: 'review this', thread_id: 'thread-1' }));
 });

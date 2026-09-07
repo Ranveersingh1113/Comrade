@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
-  streamTurn, agentErrorText, getThreadRuns, rememberMessage, suppressObservation,
+  startTurn, followRun, ACTIVE_RUN_STATUSES, agentErrorText, getThreadRuns,
+  rememberMessage, suppressObservation,
 } from '../lib/agentApi';
+import type { StreamFrame } from '../lib/agentApi';
 import { activityLabel } from '../lib/toolActivity';
 import { useIsNarrow } from '../hooks/useIsNarrow';
 import { daysUntil, firstNameOf, messageTime, shortDate } from '../lib/format';
@@ -65,6 +67,104 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
 
   const teamId = team?.id ?? '';
 
+  /** The GET stream currently being followed, so navigation can drop it.
+   *
+   *  Aborting this cancels the SUBSCRIPTION and nothing else. The run is
+   *  durable and keeps working; leaving a room must not quietly kill a turn a
+   *  teammate is waiting on. */
+  const followRef = useRef<AbortController | null>(null);
+  /** The attempt id of a send not yet confirmed accepted.
+   *
+   *  Retained across a retry of the SAME text, which is what makes the retry
+   *  safe: the server recognises it and returns the run already accepted
+   *  instead of posting the question a second time. */
+  const attemptRef = useRef<{ text: string; id: string } | null>(null);
+
+  const attemptId = (text: string) => {
+    if (attemptRef.current?.text === text) return attemptRef.current.id;
+    const id = globalThis.crypto?.randomUUID?.()
+      ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    attemptRef.current = { text, id };
+    return id;
+  };
+
+  const handleFrame = useCallback((f: StreamFrame) => {
+    if (f.type === 'text') setPending((prev) => prev + (f.text ?? ''));
+    // The runtime already says what it is doing; the room was throwing it
+    // away and showing three dots instead.
+    else if (f.type === 'tool_call' || f.type === 'tool_result') {
+      if (f.type === 'tool_call') setStep(activityLabel(f.tool ?? ''));
+      setActivity((steps) => [...steps, {
+        type: f.type, seq: f.seq, tool: f.tool, args: f.args, response: f.response,
+      }]);
+    }
+    // Lifecycle, kept apart from content. 'queued' means no worker has picked
+    // this up yet, which is a different wait from a model that is thinking,
+    // and the room can now say which one the member is looking at.
+    else if (f.type === 'run' || f.type === 'status') {
+      if (f.status === 'queued') setStep('waiting for a worker');
+      else if (f.status && f.status.startsWith('waiting_')) {
+        setStep('');
+        setAgentNote(f.detail ?? 'Waiting for your decision above.');
+      }
+    }
+    // Q6. The room's turn lock is held by someone else's question, so this
+    // turn never runs. Surfaced as a real message, not an error, because
+    // nothing has gone wrong.
+    else if (f.type === 'busy') setAgentNote(f.detail ?? null);
+    // The model returned nothing. Same slot as 'busy' because it is the same
+    // thing from the member's side: Comrade did not answer, and here is why.
+    else if (f.type === 'empty') setAgentNote(f.detail ?? null);
+    // Gated on the detail, not the status: this frame ends every turn,
+    // including the ones that answered.
+    else if (f.type === 'done' && f.detail) setAgentNote(f.detail);
+    else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
+  }, []);
+
+  /** Watch a durable run to its end, reattaching across dropped connections.
+   *
+   *  There was no such thing before: the browser watched a run only through
+   *  the POST that started it, so a refresh or a severed connection ended the
+   *  watch for good. The indicator stopped, no reply appeared, and the member
+   *  could not tell a finished turn from an abandoned one, while the run
+   *  itself carried on perfectly well, leased and durable, answering nobody. */
+  const follow = useCallback(async (runId: string, fromSeq = -1) => {
+    followRef.current?.abort();
+    const control = new AbortController();
+    followRef.current = control;
+    setAiTyping(true);
+    let cursor = fromSeq;
+    // Bounded. A server that keeps cutting the stream is a thing to report,
+    // not a thing to hammer.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      let outcome;
+      try {
+        outcome = await followRun(teamId, runId, (f) => {
+          if (typeof f.seq === 'number') cursor = Math.max(cursor, f.seq);
+          handleFrame(f);
+        }, { afterSeq: cursor, signal: control.signal });
+      } catch (e) {
+        setSendError(agentErrorText(e));
+        break;
+      }
+      // Navigated away. Leave every piece of state alone: this room is going.
+      if (outcome === 'aborted') return;
+      if (outcome !== 'truncated') break;
+      if (attempt === 4) {
+        setSendError('Lost the connection to this turn - reload to catch up.');
+      }
+    }
+    if (control.signal.aborted) return;
+    followRef.current = null;
+    setAiTyping(false);
+    setPending('');
+    setStep('');
+    await refresh();
+  }, [teamId, handleFrame, refresh]);
+
+  // Dropping the subscription is the ONLY thing leaving a thread does.
+  useEffect(() => () => followRef.current?.abort(), [thread.id]);
+
   useEffect(() => {
     if (!teamId) return;
     const request = ++activityRequest.current;
@@ -74,10 +174,15 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       setActivity(runs.flatMap((run) => run.steps).filter(
         (item) => item.type === 'tool_call' || item.type === 'tool_result',
       ));
+      // Reconstructed from server history, not from anything the browser
+      // kept. A refresh mid-turn used to land on a silent room; it now
+      // rejoins the run that is still going.
+      const live = runs.find((run) => ACTIVE_RUN_STATUSES.has(run.status ?? ''));
+      if (live) void follow(live.id);
     }).catch(() => {
       // A historical activity read must not break a new live conversation.
     });
-  }, [teamId, thread.id]);
+  }, [teamId, thread.id, follow]);
 
   const refreshConsents = useCallback(async () => {
     if (!teamId) return;
@@ -181,48 +286,23 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       setStep('');
       activityRequest.current += 1;
       setActivity([]);
+      const requestId = attemptId(text);
+      let accepted;
       try {
-        await streamTurn(teamId, text, thread.id, (f) => {
-          if (f.type === 'text') setPending((p) => p + (f.text ?? ''));
-          // The runtime already says what it is doing; the room was throwing
-          // it away and showing three dots instead.
-          else if (f.type === 'tool_call' || f.type === 'tool_result') {
-            if (f.type === 'tool_call') setStep(activityLabel(f.tool ?? ''));
-            setActivity((steps) => [...steps, {
-              type: f.type, seq: f.seq, tool: f.tool, args: f.args, response: f.response,
-            }]);
-          }
-          // Q6. The room's turn lock is held by someone else's question, so
-          // this turn never runs — and until D6 that arrived as nothing at
-          // all: the indicator vanished, no reply appeared, and the member
-          // had no way to tell it apart from a hang. Surfaced as a real
-          // message, not an error, because nothing has gone wrong.
-          else if (f.type === 'busy') setAgentNote(f.detail ?? null);
-          // The model returned nothing. Same slot as 'busy' because it is the
-          // same thing from the member's side — Comrade did not answer, and
-          // here is why — and emphatically not an error banner: nothing they
-          // did went wrong.
-          else if (f.type === 'empty') setAgentNote(f.detail ?? null);
-          // And the same thing again, one layer down. Since the durable
-          // queue the agent no longer runs inside this request: the browser
-          // replays the run row, so the reason a turn produced nothing now
-          // arrives on the TERMINAL frame instead of as 'empty'. Dropping it
-          // put the blank screen back — indicator stops, no reply, no reason.
-          //
-          // Gated on the detail, not the status: this frame ends every turn,
-          // including the ones that answered.
-          else if (f.type === 'done' && f.detail) setAgentNote(f.detail);
-          else if (f.type === 'error') setSendError(f.detail ?? 'Turn failed');
-        });
+        accepted = await startTurn(teamId, text, thread.id, requestId);
       } catch (e) {
+        // The turn may or may not have been accepted - that is exactly what
+        // this failure cannot tell us. Putting the text back is safe only
+        // because the retry carries the SAME attempt id, so a turn that did
+        // land comes back as a duplicate instead of being asked twice.
+        setAiTyping(false);
         setSendError(agentErrorText(e));
         setDraft(text);
-      } finally {
-        setAiTyping(false);
-        setPending('');
-        setStep('');
-        await refresh();
+        return;
       }
+      // Accepted. The next send is a new attempt, even with identical text.
+      attemptRef.current = null;
+      await follow(accepted.run_id);
     } else {
       const { error: err } = await supabase.from('messages').insert({
         team_id: teamId,

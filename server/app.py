@@ -81,6 +81,10 @@ class TeamScoped(BaseModel):
 class TurnRequest(TeamScoped):
     text: str
     thread_id: uuid.UUID
+    #: Identifies the ATTEMPT, not the text, and survives a retry.
+    #: Without it an accepted POST whose connection then died looked exactly
+    #: like one that never arrived, and the member sent their question twice.
+    client_request_id: str | None = None
 
 
 class TurnResponse(BaseModel):
@@ -279,13 +283,22 @@ def _admit_turn(req, user_id: str):
         ) from exc
     try:
         thread_id = _resolve_thread(user_id, req.team_id, req.thread_id)
-        turn = enqueue_turn(req.team_id, user_id, thread_id, req.text)
+        turn = enqueue_turn(
+            req.team_id, user_id, thread_id, req.text,
+            client_request_id=req.client_request_id,
+        )
     except BaseException:
         # An inaccessible thread, a database error, a disconnect. None of them
         # spent anything, and leaving the estimate on the bucket would refuse
         # a team work it never did.
         release_turn(req.team_id, reservation)
         raise
+    if getattr(turn, "status", "") == "duplicate":
+        # A retry of a turn already admitted. It was charged the first time;
+        # charging it again lets a flaky connection eat a team's hourly budget
+        # without asking the model one extra question.
+        release_turn(req.team_id, reservation)
+        return turn
     record_reservation(req.team_id, str(turn), reservation)
     return turn
 
@@ -298,21 +311,53 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
     return TurnResponse(run_id=str(turn), status=getattr(turn, "status", "queued"))
 
 
-async def _run_frames(team_id: str, run_id: str):
-    """Replay durable steps until the queued run reaches a stable state."""
-    seen = 0
-    yield json.dumps({"type": "run", "run_id": run_id, "status": "queued"}) + "\n"
+#: The run is over and will produce nothing more.
+TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+#: The run is parked on a human decision. Emphatically NOT finished -- these
+#: arrived as `done` too, so a run waiting on a consent card stopped the typing
+#: indicator and read to the member as a turn that silently failed, while the
+#: card asking for the very permission that would continue it sat on screen.
+WAITING_STATUSES = {"waiting_for_permission", "waiting_for_user"}
+
+
+async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
+    """Replay durable steps from a cursor until the run stops producing them.
+
+    `after_seq` is the highest sequence the browser has already rendered.
+    Replaying from zero is right after a refresh -- nothing is on screen -- and
+    wrong after a dropped connection, where it duplicates every tool card the
+    member is already looking at.
+    """
+    seen = after_seq + 1
+    status: str | None = None
     while True:
         run = await run_in_threadpool(get_run, team_id, run_id)
         if run is None:
             yield json.dumps({"type": "error", "detail": "run not found"}) + "\n"
             return
+        if status is None:
+            # Opened with the REAL status, not an assumed "queued": a reattach
+            # needs to know whether it is resuming live work or reading history.
+            status = run["status"]
+            yield json.dumps(
+                {"type": "run", "run_id": run_id, "status": status}
+            ) + "\n"
+        elif run["status"] != status:
+            # Lifecycle, on its own frame type. Queued and running are
+            # different things to wait through, and the room can now say which.
+            status = run["status"]
+            yield json.dumps(
+                {"type": "status", "run_id": run_id, "status": status}
+            ) + "\n"
         for step in run["steps"]:
             if step["seq"] >= seen:
                 seen = step["seq"] + 1
                 yield json.dumps(step) + "\n"
-        if run["status"] in {"done", "failed", "cancelled", "waiting_for_permission", "waiting_for_user"}:
-            yield json.dumps({"type": "done", "run_id": run_id, "status": run["status"], "detail": run["last_error"]}) + "\n"
+        if status in WAITING_STATUSES or status in TERMINAL_STATUSES:
+            yield json.dumps({
+                "type": "done" if status in TERMINAL_STATUSES else "status",
+                "run_id": run_id, "status": status, "detail": run["last_error"],
+            }) + "\n"
             return
         await asyncio.sleep(0.2)
 
@@ -333,10 +378,21 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
 
 
 @app.get("/agent/runs/{run_id}/stream")
-async def agent_run_stream(run_id: str, team_id: str, user_id: CurrentUserId):
+async def agent_run_stream(
+    run_id: str, team_id: str, user_id: CurrentUserId, after_seq: int = -1,
+):
+    """Follow a durable run. This is how the browser watches one.
+
+    Reattaching is the same call as attaching, so a refresh, a reconnect and a
+    fresh send take one path instead of the POST-only path that lost the run
+    the moment its response ended.
+    """
     require_membership(user_id, team_id)
     await run_in_threadpool(_visible_run, team_id, user_id, run_id)
-    return StreamingResponse(_run_frames(team_id, run_id), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _run_frames(team_id, run_id, after_seq=after_seq),
+        media_type="application/x-ndjson",
+    )
 
 
 @app.get("/threads/{thread_id}/agent-runs")

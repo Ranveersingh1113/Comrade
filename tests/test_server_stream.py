@@ -22,7 +22,7 @@ async def _fake_frames(team_id, run_id):
 
 @pytest.fixture
 def as_a1(monkeypatch):
-    monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
+    monkeypatch.setattr("server.app.enqueue_turn", lambda *_, **__: "run-1")
     monkeypatch.setattr("server.app.reserve_turn", lambda *_: 0)
     monkeypatch.setattr("server.app.record_reservation", lambda *_: None)
     monkeypatch.setattr("server.app._run_frames", _fake_frames)
@@ -63,16 +63,22 @@ def test_stream_enqueues_the_canonical_thread(
 ):
     seen = {}
 
-    def _record(team_id, requester_id, thread_id, text):
-        seen.update(team_id=team_id, requester_id=requester_id, thread_id=thread_id, text=text)
+    def _record(team_id, requester_id, thread_id, text, **kwargs):
+        seen.update(team_id=team_id, requester_id=requester_id, thread_id=thread_id,
+                    text=text, **kwargs)
         return "r"
 
     monkeypatch.setattr("server.app.enqueue_turn", _record)
     as_a1.post(
         "/agent/turn/stream",
-        json={"team_id": TEAM_A, "text": "hi", "thread_id": _general_thread()},
+        json={"team_id": TEAM_A, "text": "hi", "thread_id": _general_thread(),
+              "client_request_id": "attempt-1"},
     )
-    assert seen == {"team_id": TEAM_A, "requester_id": A1, "thread_id": _general_thread(), "text": "hi"}
+    # The attempt id reaches the queue, or a retry cannot be recognised there.
+    assert seen == {
+        "team_id": TEAM_A, "requester_id": A1, "thread_id": _general_thread(),
+        "text": "hi", "client_request_id": "attempt-1",
+    }
 
 
 def test_final_frame_never_reaches_the_wire(seeded, as_a1):

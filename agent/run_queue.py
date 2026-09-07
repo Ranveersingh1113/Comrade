@@ -33,12 +33,21 @@ class EnqueuedTurn(str):
         return value
 
 
-def enqueue_turn(team_id: str, requester_id: str, thread_id: str, text: str, *, trigger_type: str = "user") -> EnqueuedTurn:
-    """Durably append the member message and queued turn in one transaction."""
+def enqueue_turn(
+    team_id: str, requester_id: str, thread_id: str, text: str, *,
+    trigger_type: str = "user", client_request_id: str | None = None,
+) -> EnqueuedTurn:
+    """Durably append the member message and queued turn in one transaction.
+
+    `client_request_id` identifies the ATTEMPT, not the text. It is what lets a
+    retry after an uncertain POST resolve to the turn already accepted instead
+    of posting the same question a second time; the disposition comes back as
+    "duplicate" so the caller can follow that run rather than start another.
+    """
     with user_session(requester_id) as conn:
         row = conn.execute(
-            "select run_id, disposition from public.enqueue_agent_turn(%s, %s, %s, %s)",
-            (team_id, thread_id, text, trigger_type),
+            "select run_id, disposition from public.enqueue_agent_turn(%s, %s, %s, %s, %s)",
+            (team_id, thread_id, text, trigger_type, client_request_id),
         ).fetchone()
     if row is None:
         raise RuntimeError("enqueue_agent_turn returned no run")

@@ -24,7 +24,7 @@ def client(monkeypatch):
     monkeypatch.setattr("server.app.reserve_turn", lambda *_: 0)
     monkeypatch.setattr("server.app.record_reservation", lambda *_: None)
     monkeypatch.setattr("server.app._resolve_thread", lambda _u, _t, thread: str(thread))
-    monkeypatch.setattr("server.app.enqueue_turn", lambda *_: "run-1")
+    monkeypatch.setattr("server.app.enqueue_turn", lambda *_, **__: "run-1")
     app.dependency_overrides[current_user_id] = lambda: USER
     yield TestClient(app)
     app.dependency_overrides.clear()
@@ -50,7 +50,7 @@ def test_turn_identity_comes_from_the_token_not_the_body(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         "server.app.enqueue_turn",
-        lambda team_id, requester_id, *_: seen.update(requester=requester_id) or "r",
+        lambda team_id, requester_id, *_, **__: seen.update(requester=requester_id) or "r",
     )
     resp = client.post(
         "/agent/turn",
@@ -64,7 +64,7 @@ def test_queue_is_told_the_canonical_thread(client, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         "server.app.enqueue_turn",
-        lambda team, user, thread, text: seen.update(
+        lambda team, user, thread, text, **__: seen.update(
             team=team, user=user, thread=thread, text=text
         ) or "r",
     )
@@ -80,7 +80,7 @@ def test_inaccessible_thread_is_rejected_before_enqueueing(client, monkeypatch):
         "server.app._resolve_thread",
         lambda *_: (_ for _ in ()).throw(HTTPException(status_code=404)),
     )
-    monkeypatch.setattr("server.app.enqueue_turn", lambda *_: pytest.fail("should not enqueue"))
+    monkeypatch.setattr("server.app.enqueue_turn", lambda *_, **__: pytest.fail("should not enqueue"))
 
     resp = client.post(
         "/agent/turn", json={"team_id": TEAM, "thread_id": GROUP_THREAD, "text": "hi"}

@@ -139,6 +139,10 @@ export interface StreamFrame {
   // outcome that decision was written to prevent.
   type:
     | 'run'
+    // Lifecycle, on its own frame type. Queued, running and the two waiting
+    // states are not content, and folding them into 'done' meant a run parked
+    // on a consent card read to the member as a turn that failed in silence.
+    | 'status'
     | 'busy'
     // The model came back with nothing at all. Was reported as a successful
     // turn that simply rendered no reply — see agent/runtime.py.
@@ -149,6 +153,8 @@ export interface StreamFrame {
     | 'done'
     | 'error';
   run_id?: string;
+  /** Carried by 'run' and 'status': the run's server-side lifecycle state. */
+  status?: string;
   tool?: string;
   text?: string;
   /** Carried by 'busy', 'empty', 'error', and a terminal 'done'
@@ -169,24 +175,75 @@ export interface AgentRun {
   steps: AgentStep[];
 }
 
+/** Statuses that mean a run is still doing work worth watching. */
+export const ACTIVE_RUN_STATUSES = new Set(['queued', 'running']);
+
+/** A run parked on a human decision. Not finished, and not failed either. */
+export const WAITING_RUN_STATUSES = new Set([
+  'waiting_for_permission', 'waiting_for_user',
+]);
+
+export interface TurnAccepted {
+  run_id: string;
+  /** 'queued' | 'steering' | 'duplicate'. */
+  status: string;
+}
+
 /**
- * Stream one agent turn, calling `onFrame` per NDJSON line.
- * fetch (not EventSource) because the turn needs the Authorization header.
+ * Submit a turn. Returns as soon as it is DURABLE, not when it is answered.
+ *
+ * `clientRequestId` identifies the attempt and must survive a retry: an
+ * accepted POST whose connection then died is indistinguishable from one that
+ * never arrived, and without the id the only safe options were to lose the
+ * member's message or to send it twice. With it, the retry comes back as
+ * `duplicate` carrying the run already accepted.
  */
-export async function streamTurn(
-  teamId: string,
-  text: string,
-  threadId: string,
-  onFrame: (frame: StreamFrame) => void,
-): Promise<void> {
-  const res = await fetch(`${BASE}/agent/turn/stream`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: await authHeader(),
-    },
-    body: JSON.stringify({ team_id: teamId, text, thread_id: threadId }),
+export function startTurn(
+  teamId: string, text: string, threadId: string, clientRequestId: string,
+): Promise<TurnAccepted> {
+  return request<TurnAccepted>('/agent/turn', {
+    team_id: teamId, text, thread_id: threadId,
+    client_request_id: clientRequestId,
   });
+}
+
+/**
+ * How a follow ENDED, which is the whole point of returning anything.
+ *
+ * 🔴 `truncated` is the case that did not exist before. The old reader
+ * returned normally whenever the body ended, so a severed connection and a
+ * finished turn looked identical: the indicator stopped, no reply arrived, and
+ * the run carried on answering into a browser that had stopped listening.
+ */
+export type FollowOutcome = 'done' | 'waiting' | 'truncated' | 'aborted';
+
+/**
+ * Follow a durable run over GET, from a cursor.
+ *
+ * GET rather than the POST that started it, because reattaching after a
+ * refresh or a dropped connection is then the SAME call as attaching — one
+ * path instead of a live path and a lost one.
+ */
+export async function followRun(
+  teamId: string,
+  runId: string,
+  onFrame: (frame: StreamFrame) => void,
+  opts: { afterSeq?: number; signal?: AbortSignal } = {},
+): Promise<FollowOutcome> {
+  const afterSeq = opts.afterSeq ?? -1;
+  const url =
+    `${BASE}/agent/runs/${encodeURIComponent(runId)}/stream`
+    + `?team_id=${encodeURIComponent(teamId)}&after_seq=${afterSeq}`;
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      headers: { Authorization: await authHeader() },
+      signal: opts.signal,
+    });
+  } catch (e) {
+    if (opts.signal?.aborted) return 'aborted';
+    throw e;
+  }
   if (!res.ok || !res.body) {
     let detail = res.statusText;
     try {
@@ -197,20 +254,36 @@ export async function streamTurn(
     }
     throw new AgentApiError(res.status, detail);
   }
+  // Truncated until proven otherwise. Only a terminal frame is evidence the
+  // turn is over; a body that simply stops is exactly the ambiguous case.
+  let outcome: FollowOutcome = 'truncated';
+  const emit = (line: string) => {
+    if (!line.trim()) return;
+    const frame = JSON.parse(line) as StreamFrame;
+    if (frame.type === 'done') outcome = 'done';
+    else if (frame.type === 'status' && WAITING_RUN_STATUSES.has(frame.status ?? '')) {
+      outcome = 'waiting';
+    }
+    onFrame(frame);
+  };
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? ''; // keep the partial line
-    for (const line of lines) {
-      if (line.trim()) onFrame(JSON.parse(line) as StreamFrame);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? ''; // keep the partial line
+      for (const line of lines) emit(line);
     }
+    emit(buffer);
+  } catch (e) {
+    if (opts.signal?.aborted) return 'aborted';
+    throw e;
   }
-  if (buffer.trim()) onFrame(JSON.parse(buffer) as StreamFrame);
+  return outcome;
 }
 
 

@@ -73,9 +73,14 @@ function stream(lines: object[]) {
   });
 }
 
+/** Accept the turn, then serve its events on the GET stream the room follows.
+ *  Two calls, because that is the shape that survives a refresh: the POST only
+ *  says the run is durable, and the GET is re-openable from a cursor. */
 async function askComrade(body: ReadableStream) {
   server.use(
-    http.post(`${BASE}/agent/turn/stream`, () =>
+    http.post(`${BASE}/agent/turn`, () =>
+      HttpResponse.json({ run_id: 'run-1', status: 'queued' })),
+    http.get(`${BASE}/agent/runs/run-1/stream`, () =>
       new HttpResponse(body, { headers: { 'Content-Type': 'application/x-ndjson' } }),
     ),
   );
@@ -216,11 +221,15 @@ describe('a plain user message', () => {
 });
 
 test('the General room toggle chooses team posts or Comrade turns', async () => {
-  let agentBody: unknown;
-  server.use(http.post(`${BASE}/agent/turn/stream`, async ({ request }) => {
-    agentBody = await request.json();
-    return new HttpResponse('{"type":"done"}\n');
-  }));
+  let agentBody: Record<string, unknown> | undefined;
+  server.use(
+    http.post(`${BASE}/agent/turn`, async ({ request }) => {
+      agentBody = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({ run_id: 'run-1', status: 'queued' });
+    }),
+    http.get(`${BASE}/agent/runs/run-1/stream`, () =>
+      new HttpResponse('{"type":"done"}\n')),
+  );
   const user = userEvent.setup();
   renderInApp(<GroupRoom thread={thread} allowTeamMessages />);
   const toggle = await screen.findByRole('button', { name: 'Comrade mode' });
@@ -234,9 +243,12 @@ test('the General room toggle chooses team posts or Comrade turns', async () => 
   expect(toggle).toHaveAttribute('aria-pressed', 'true');
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'help us plan');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
-  await waitFor(() => expect(agentBody).toEqual({
+  await waitFor(() => expect(agentBody).toMatchObject({
     team_id: 'team-1', text: 'help us plan', thread_id: 'thread-1',
   }));
+  // Every send carries an attempt id, or a retry cannot be told from a
+  // second question.
+  expect(agentBody?.client_request_id).toEqual(expect.any(String));
 });
 
 

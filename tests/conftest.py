@@ -29,6 +29,17 @@ os.environ["GIT_CONFIG_KEY_0"] = "core.fsmonitor"
 os.environ["GIT_CONFIG_VALUE_0"] = "false"
 
 
+@pytest.fixture(autouse=True)
+def _sweeps_are_due():
+    """Pipeline sweeps run on their own clock (T12), and that clock is module
+    state — so one test that ticks would otherwise silence the sweep for every
+    test after it. Reset per test rather than remembered per test file."""
+    from pipeline import worker
+
+    worker._reset_sweep_timers()
+    yield
+
+
 @pytest.fixture
 def seeded():
     """Fresh seed per test; cleaned up after (committed worker writes included)."""

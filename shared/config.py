@@ -195,6 +195,13 @@ class Settings(BaseSettings):
     # default is 500; a Comrade turn is one plan + a handful of tool calls, so
     # 20 is generous headroom that still stops a tool loop from spending the
     # team's budget on one question.
+    #: How many agent turns this worker process runs at once. Each is an
+    #: independent thread's turn — the queue already guarantees one active run
+    #: per thread, so the only thing serialising them was the worker loop.
+    comrade_agent_concurrency: int = 2
+    #: And the ceiling that stops one team taking every slot. Concurrency
+    #: without it is just a bigger blast radius for a single busy team.
+    comrade_agent_max_running_per_team: int = 2
     agent_max_llm_calls: int = 20
     # How many prior messages of the thread are replayed into the model's
     # context. Unbounded history is an unbounded bill; ~10 exchanges is enough

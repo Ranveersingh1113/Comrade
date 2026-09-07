@@ -65,6 +65,12 @@ def _steps_from_event(event: Any, start_seq: int) -> list[dict[str, Any]]:
     return steps
 
 
+def _still_ours(team_id: str, run_id: str, worker_id: str | None) -> bool:
+    """run_is_active with the worker fence, in a shape run_in_threadpool can
+    call — it forwards no keyword arguments."""
+    return run_is_active(team_id, run_id, worker_id=worker_id)
+
+
 def _finish(
     team_id: str, run_id: str, status: str, used_input: int, used_output: int,
     worker_id: str | None = None, last_error: str | None = None,
@@ -275,6 +281,9 @@ async def stream_turn(
                         "requester_id": requester_id,
                         "thread_id": thread_id,
                         "agent_run_id": run_id,
+                        # Carried so a tool can prove the run is still THIS
+                        # worker's before it does anything outside the process.
+                        "worker_id": worker_id,
                         "steering_message_ids": [],
                         # Server-bound like the two above. The repo tools
                         # derive the checkout path from these; the model names
@@ -325,7 +334,7 @@ async def stream_turn(
                     # can, and this is the boundary the loop actually passes
                     # through — before the next tool and before the next call.
                     if run_id and not await run_in_threadpool(
-                        run_is_active, team_id, run_id
+                        _still_ours, team_id, run_id, worker_id
                     ):
                         await run_in_threadpool(
                             _finish, team_id, run_id, "cancelled",

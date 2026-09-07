@@ -2,6 +2,7 @@
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from shared.config import settings
 from shared.db import Role, team_session, user_session
 
 MAX_ATTEMPTS = 3
@@ -67,10 +68,16 @@ def recover_expired_runs() -> int:
 
 
 def claim_next_run(worker_id: str) -> Run | None:
-    """Atomically claim the oldest runnable turn without blocking another worker."""
+    """Atomically claim the oldest runnable turn without blocking another worker.
+
+    The per-team ceiling travels with the claim rather than being checked
+    around it: two workers asking at the same moment must not both see a team
+    one under its limit.
+    """
     with team_session(Role.AGENT, "00000000-0000-0000-0000-000000000000") as conn:
         row = conn.execute(
-            "select * from public.claim_next_agent_run(%s)", (worker_id,)
+            "select * from public.claim_next_agent_run(%s, %s)",
+            (worker_id, settings.comrade_agent_max_running_per_team),
         ).fetchone()
     if row is None:
         return None

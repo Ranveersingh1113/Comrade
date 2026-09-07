@@ -72,8 +72,22 @@ def test_failing_job_retries_then_fails(seeded):
         raise RuntimeError("kaboom")
 
     handlers = {"parse_document": boom}
-    for _ in range(worker.MAX_ATTEMPTS):
-        worker.run_once(handlers=handlers)
+    conn = _admin()
+    try:
+        for _ in range(worker.MAX_ATTEMPTS):
+            worker.run_once(handlers=handlers)
+            # A retry now waits before it is claimable (T12): burning three
+            # attempts in a few milliseconds against a thing that has had no
+            # time to change is not retrying. Skip the wait rather than sleep
+            # through it — the backoff itself is tested in
+            # tests/test_pipeline_leases.py.
+            conn.execute(
+                "update public.jobs set available_at = now() - interval '1 second'"
+                " where id=%s",
+                (jid,),
+            )
+    finally:
+        conn.close()
 
     status, attempts, err = _status(jid)
     assert status == "failed"
@@ -119,12 +133,14 @@ def test_skip_locked_prevents_double_claim(seeded):
     # hold a claim open (uncommitted) so its row is locked
     holder = psycopg.connect(settings.comrade_db_url_admin)
     try:
-        first = holder.execute(worker._CLAIM_SQL).fetchone()  # in a transaction
+        first = holder.execute(
+            worker._CLAIM_SQL, ("worker-one",)
+        ).fetchone()  # in a transaction
         # a second claimer must SKIP the locked row and get the other job
         other = psycopg.connect(settings.comrade_db_url_admin)
         other.autocommit = True
         try:
-            second = other.execute(worker._CLAIM_SQL).fetchone()
+            second = other.execute(worker._CLAIM_SQL, ("worker-two",)).fetchone()
         finally:
             other.close()
         assert first is not None and second is not None

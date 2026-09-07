@@ -606,8 +606,9 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     # so stopping a turn reaches work that has ALREADY started rather than
     # only the step after it.
     run_id = state.get("agent_run_id")
+    worker_id = state.get("worker_id")
     stop = (
-        (lambda: not run_is_active(str(team_id), str(run_id)))
+        (lambda: not run_is_active(str(team_id), str(run_id), worker_id=worker_id))
         if team_id and run_id else None
     )
 

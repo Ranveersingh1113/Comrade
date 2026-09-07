@@ -26,10 +26,14 @@ def test_completed_effect_returns_its_saved_result_after_worker_restart(seeded):
     assert run is not None and run.id == run_id
     args = {"title": "Review migration"}
 
-    assert claim_effect(TEAM_A, run.id, "team_propose_task", args) is None
+    assert claim_effect(TEAM_A, run.id, "team_propose_task", args, worker_id="worker-one") is None
     complete_effect(TEAM_A, run.id, "team_propose_task", args, {"consent_id": "c-1"})
 
-    assert claim_effect(TEAM_A, run.id, "team_propose_task", args) == {"consent_id": "c-1"}
+    # The restarted worker re-claims the run, so it is the owner again; the
+    # fence is exercised in tests/test_worker_concurrency.py.
+    assert claim_effect(
+        TEAM_A, run.id, "team_propose_task", args, worker_id="worker-one",
+    ) == {"consent_id": "c-1"}
     assert completed_effects(TEAM_A, run.id) == [
         {"tool": "team_propose_task", "result": {"consent_id": "c-1"}}
     ]
@@ -52,7 +56,7 @@ def test_resumed_tool_call_uses_the_durable_effect_result(monkeypatch):
     from agent.permission_plugin import ChokepointPlugin
 
     monkeypatch.setattr(
-        "agent.permission_plugin.claim_effect", lambda *_: {"consent_id": "c-1"},
+        "agent.permission_plugin.claim_effect", lambda *_, **__: {"consent_id": "c-1"},
     )
     import asyncio
     result = asyncio.run(ChokepointPlugin().before_tool_callback(
@@ -70,7 +74,8 @@ def test_cancelled_run_cannot_begin_another_effect(seeded):
     assert cancel_run(TEAM_A, run.id, requester_id=A1)
 
     with pytest.raises(RunInactive):
-        claim_effect(TEAM_A, run.id, "team_propose_task", {"title": "Review migration"})
+        claim_effect(TEAM_A, run.id, "team_propose_task", {"title": "Review migration"},
+                     worker_id="worker-one")
 
 
 def test_approval_requeues_its_waiting_agent_run(seeded):

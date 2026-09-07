@@ -413,6 +413,100 @@ against a real Docker daemon. 🔴 Reconnect-after-refresh follows `queued` and
 `running` runs; a run already parked on a decision surfaces through its consent
 card instead.
 
+### T12 — Add fair bounded worker concurrency and independent maintenance
+
+**Changed:** `supabase/migrations/20260907130000_worker_concurrency.sql`,
+`supabase/migrations/20260907140000_job_leases.sql`, `agent/worker.py`,
+`agent/run_queue.py`, `agent/effects.py`, `agent/runtime.py`,
+`agent/permission_plugin.py`, `agent/repo_tools.py`, `pipeline/worker.py`,
+`shared/config.py`, `.env.example`, `tests/test_worker_concurrency.py`,
+`tests/test_pipeline_leases.py`, plus the worker tests whose doubles held the
+old contracts.
+
+**Regression 1 — the agent worker was strictly serial.** `main()` ran one turn
+to completion before claiming the next, so one long turn anywhere in the
+deployment made every other team wait behind it. Nothing in the queue required
+that: `claim_next_agent_run` already guarantees one active run per THREAD,
+which is the ordering guarantee that matters. The serialisation was in the
+worker loop alone.
+
+**Regression 2 — a worker that lost its lease kept working.** `renew_lease`
+returning False ended the renewer thread and told nothing else, and
+`claim_effect` fenced on the run being `running` — which says nothing about
+WHO is running it. After recovery handed a run to a second worker, the first
+could still perform that run's effects: the same external action, done twice,
+by two processes each believing they owned the job.
+
+**Regression 3 — the pipeline had no claim ownership at all.** `_finish`
+updated `where id = %s`. A worker whose lease expired, and whose job another
+worker had reclaimed, stamped its result over the new claim; the second
+worker's work was thrown away by the first one's late answer. There was no
+column to fence on, which is why the fence did not exist.
+
+**Regression 4 — a failed job retried instantly.** Straight back to `pending`
+and claimable on the very next iteration, so three attempts burned in
+milliseconds against whatever was already broken. Retrying only helps if
+something has had time to change.
+
+**Regression 5 — `tick()` drained the queue to EMPTY before any maintenance.**
+Under continuous ingestion the chat sweep, the disk cap and the sandbox
+reconciler never ran. Maintenance that only happens when the system is idle is
+maintenance that never happens on a busy system.
+
+**Design:** concurrency is threads, not an async rework — each turn is a
+blocking model call with blocking DB work around it, leasing is already
+per-run, and every slot needs its own identity because the fence is BY worker
+id. The per-team ceiling travels inside `claim_next_agent_run` rather than
+being checked around it, so two workers asking at the same moment cannot both
+see a team one under its limit. Ownership fences use `is not distinct from`,
+so a run or job nobody leased matches a null caller and nothing else — a fence
+rather than a hole.
+
+**Also:** the ceiling counts `running` only. A run parked on a consent card
+holds no worker, and counting it would let a team with two pending cards lock
+itself out of the very turns that would resolve them.
+**Also:** bounding the drain would have turned a five-second poll into a
+five-second full disk scan and Docker reconciliation — fixing starvation by
+replacing it with a stampede. Sweeps now run on their own clocks (chat 30s,
+processes 30s, workspaces 300s).
+**Also:** the job's worker id is KEPT on a terminal row as provenance and
+cleared on a retry, because a job going back on the queue belongs to whoever
+claims it next.
+**Also:** the pipeline lease was a flat thirty minutes with no renewal, so any
+honestly-long job was declared abandoned while still running and a second
+worker did it again. It is now renewed while the handler runs.
+**Also:** `comrade_control` holds COLUMN-level grants on `jobs`, so the two new
+columns were invisible to it until granted — the first run failed with
+`permission denied for table jobs`. That is the design working, and it is why
+adding a column to that table is never only a schema change.
+
+**Also:** the sweep clock is process-global module state, so one test that
+ticked silenced the sweep for every test after it — three `test_repo_sync`
+tests went red in the full suite while passing alone. Reset per test in
+`conftest.py` rather than remembered per file, because the leak is structural.
+**Also:** the first version of the sweep-interval test measured the machine
+rather than the gating: a tick does real workspace and Docker work, so three of
+them can outlast a 30-second interval and sweep twice, honestly.
+
+**Passing:** 10 concurrency tests, 10 pipeline-lease tests; 1072 backend tests,
+6 skipped, 0 failed.
+
+**Migration/rollback:** additive only. `claim_next_agent_run` gains a defaulted
+second parameter, so the previous one-argument call still resolves during the
+window between migrating and activating; `jobs` gains two columns with safe
+defaults, so the running image keeps working.
+
+**Ceiling:** 🔴 concurrency is proven by the claim behaving correctly under
+sequential calls and by slot identity, not by a load test with real
+simultaneous turns. 🔴 No measurement of what two slots cost the host in
+memory or Docker pressure; the default of 2 is a judgement, not a measurement.
+🔴 `test_the_worker_holding_the_claim_still_finishes_normally` failed ONCE and
+then passed seven consecutive runs of its file: the claim found nothing where a
+row had just been committed. Not reproduced, not explained, and recorded rather
+than dismissed — a claim that intermittently misses committed work is exactly
+the shape of bug worth remembering. T13 covers pool initialisation and is the
+likely place it gets an answer.
+
 ---
 
 ## Standing ceilings

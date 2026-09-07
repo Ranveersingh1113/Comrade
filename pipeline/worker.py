@@ -12,7 +12,9 @@ Run it: `uv run python -m pipeline.worker` — drains the queue, then sweeps
 chat->memory (ambient capture), then sleeps and repeats.
 """
 import logging
+import os
 import signal
+import socket
 import threading
 import time
 from typing import Callable
@@ -31,13 +33,25 @@ LEASE_INTERVAL = "30 minutes"
 class PermanentJobError(ValueError):
     """A job failure that cannot succeed by retrying the same payload."""
 
-# Atomic claim: pick the oldest pending job, skipping rows another worker holds.
+#: How long a retry waits before it is claimable again, and the ceiling on
+#: that wait. A retry that is instantly claimable is not a retry: it burns the
+#: attempt against a thing that has had no time to change.
+RETRY_BACKOFF_SECONDS = 30
+MAX_BACKOFF_SECONDS = 900
+#: How often a claim is renewed while its handler runs.
+RENEW_SECONDS = 60.0
+#: How many jobs one tick takes before it stops to do maintenance. Unbounded
+#: draining meant a team ingesting steadily starved every sweep forever.
+MAX_DRAIN_BATCH = 20
+
+# Atomic claim: pick the oldest available job, skipping rows another worker holds.
 _CLAIM_SQL = (
     "update public.jobs set status='processing', attempts=attempts+1,"
     f" picked_at=now(), lease_expires_at=now() + interval '{LEASE_INTERVAL}',"
-    " finished_at=null where id = ("
+    " finished_at=null, worker_id=%s where id = ("
     "  select id from public.jobs"
-    "  where (status='pending' or (status='processing' and lease_expires_at < now()))"
+    "  where ((status='pending' and available_at <= now())"
+    "         or (status='processing' and lease_expires_at < now()))"
     f"    and attempts < {MAX_ATTEMPTS}"
     "  order by created_at for update skip locked limit 1"
     ") returning id, team_id, job_type, payload, attempts"
@@ -48,16 +62,65 @@ def register(job_type: str, handler: Handler) -> None:
     _HANDLERS[job_type] = handler
 
 
-def _finish(job_id, status: str, error: str | None = None) -> None:
+def _backoff_seconds(attempts: int) -> int:
+    """Wait longer each time, up to a ceiling.
+
+    A fixed delay hammers a broken dependency at a steady rate; no delay at all
+    spends every attempt before anything could have recovered.
+    """
+    return min(RETRY_BACKOFF_SECONDS * (2 ** max(attempts - 1, 0)),
+               MAX_BACKOFF_SECONDS)
+
+
+def _finish(
+    job_id, status: str, error: str | None = None, *,
+    worker_id: str | None = None, retry_in: int = 0,
+) -> None:
+    """Close a job — but only if this worker still holds its claim.
+
+    🔴 This used to be `where id = %s`. A worker whose lease had expired, and
+    whose job another worker had already reclaimed, still stamped its result
+    over the new claim: two workers, one job, and the second one's work thrown
+    away by the first one's late answer.
+    """
     terminal = status in ("done", "failed")
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         conn.execute(
             "update public.jobs set status=%s, last_error=%s,"
             " lease_expires_at=null,"
-            " finished_at = case when %s then now() else null end where id=%s",
-            (status, error, terminal, job_id),
+            # Kept on a terminal row as provenance — which worker did this —
+            # and cleared on a retry, because a job going back on the queue
+            # belongs to whoever claims it next.
+            " worker_id = case when %s then worker_id else null end,"
+            " available_at = now() + make_interval(secs => %s),"
+            " finished_at = case when %s then now() else null end"
+            " where id=%s and worker_id is not distinct from %s",
+            (status, error, terminal, retry_in, terminal, job_id, worker_id),
         )
+
+
+def renew_job_lease(job_id, worker_id: str | None) -> bool:
+    """Push the lease out while the handler is still working.
+
+    A flat lease with no renewal declares any honestly-long job abandoned
+    while it is still running, and a second worker then does it again.
+    """
+    with connect(Role.CONTROL) as conn:
+        conn.autocommit = True
+        row = conn.execute(
+            "update public.jobs set lease_expires_at = now() + interval"
+            f" '{LEASE_INTERVAL}' where id=%s and status='processing'"
+            " and worker_id is not distinct from %s returning 1",
+            (job_id, worker_id),
+        ).fetchone()
+    return row is not None
+
+
+def _renew_until_done(job_id, worker_id: str | None, done: threading.Event) -> None:
+    while not done.wait(RENEW_SECONDS):
+        if not renew_job_lease(job_id, worker_id):
+            return
 
 
 def _fail_expired_leases() -> None:
@@ -74,55 +137,118 @@ def _fail_expired_leases() -> None:
         )
 
 
-def run_once(handlers: dict[str, Handler] | None = None) -> bool:
-    """Claim and process one pending job. Returns False if the queue was empty."""
+def _worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def run_once(
+    handlers: dict[str, Handler] | None = None, worker_id: str | None = None,
+) -> bool:
+    """Claim and process one available job. False means nothing was claimable."""
     handlers = _HANDLERS if handlers is None else handlers
+    worker_id = worker_id or _worker_id()
     _fail_expired_leases()
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
-        job = conn.execute(_CLAIM_SQL).fetchone()
+        job = conn.execute(_CLAIM_SQL, (worker_id,)).fetchone()
     if job is None:
         return False
 
     job_id, team_id, job_type, payload, attempts = job
+    # The claim is held for as long as the handler runs, not for a fixed
+    # window guessed in advance.
+    done = threading.Event()
+    renewer = threading.Thread(
+        target=_renew_until_done, args=(job_id, worker_id, done), daemon=True
+    )
+    renewer.start()
     try:
         handler = handlers.get(job_type)
         if handler is None:
             raise ValueError(f"no handler registered for job_type: {job_type}")
         handler(str(team_id), payload or {})
-        _finish(job_id, "done")
+        _finish(job_id, "done", worker_id=worker_id)
     except PermanentJobError as exc:
-        _finish(job_id, "failed", error=str(exc))
+        # It will never succeed, so scheduling it again is only noise.
+        _finish(job_id, "failed", error=str(exc), worker_id=worker_id)
     except Exception as exc:  # noqa: BLE001 - record any transient failure on the job
         retry = attempts < MAX_ATTEMPTS
-        _finish(job_id, "pending" if retry else "failed", error=str(exc))
+        _finish(
+            job_id, "pending" if retry else "failed", error=str(exc),
+            worker_id=worker_id,
+            retry_in=_backoff_seconds(attempts) if retry else 0,
+        )
+    finally:
+        done.set()
+        renewer.join(timeout=1)
     return True
 
 
 POLL_SECONDS = 5.0
 
+#: Sweeps run on their OWN clock, not once per tick.
+#:
+#: 🔴 They used to run every tick, which was survivable only because a tick
+#: drained the whole queue first and therefore happened rarely. Bounding the
+#: drain (MAX_DRAIN_BATCH) would otherwise have turned a five-second poll into
+#: a five-second full disk scan and Docker reconciliation — fixing starvation
+#: by replacing it with a stampede.
+CHAT_SWEEP_SECONDS = 30.0
+WORKSPACE_SWEEP_SECONDS = 300.0
+PROCESS_SWEEP_SECONDS = 30.0
+
+_last_swept: dict[str, float] = {}
+
+
+def _due(name: str, interval: float) -> bool:
+    """True at most once per `interval`, and always on the first call."""
+    now = time.monotonic()
+    last = _last_swept.get(name)
+    if last is not None and now - last < interval:
+        return False
+    _last_swept[name] = now
+    return True
+
+
+def _reset_sweep_timers() -> None:
+    """Make every sweep due again. For tests, and for a fresh process."""
+    _last_swept.clear()
+
 
 def tick() -> int:
-    """One worker iteration: drain the queue, then sweep chat->memory.
+    """One worker iteration: take a bounded batch of jobs, then sweep.
 
-    The sweep runs after the drain so a batch enqueued this tick is picked up
-    on the next — keeping each tick short and each job claim fair across
-    workers. Returns how many jobs were processed. Sweep failures are logged,
-    not fatal: a broken sweep must not stop document jobs from draining.
+    The batch is bounded rather than drained to empty, so maintenance keeps
+    its turn no matter how much work is queued. The sweep runs after the batch
+    so a batch enqueued this tick is picked up on the next — keeping each tick
+    short and each job claim fair across workers. Returns how many jobs were
+    processed. Sweep failures are logged, not fatal: a broken sweep must not
+    stop document jobs from draining.
     """
     # Imported here: chat.py registers its handler via this module, so a
     # module-level import would be circular.
     from pipeline.chat import sweep_chat_compiles
 
     processed = 0
-    while run_once():
+    # 🔴 BOUNDED. This was `while run_once()`, which drains the queue to
+    # EMPTY before anything below runs — so a team ingesting steadily meant
+    # the chat sweep, the disk cap and the sandbox reconciler never ran at
+    # all. Maintenance that only happens when the system is idle is
+    # maintenance that never happens on a busy system.
+    for _ in range(MAX_DRAIN_BATCH):
+        # Shutdown means finish what is in hand, not start more.
+        if _stopping.is_set() and processed:
+            break
+        if not run_once():
+            break
         processed += 1
-    try:
-        swept = sweep_chat_compiles()
-        if swept:
-            logger.info("chat sweep enqueued %d compile job(s)", len(swept))
-    except Exception:  # noqa: BLE001 - sweep is best-effort by design
-        logger.exception("chat sweep failed; queue drain unaffected")
+    if _due("chat", CHAT_SWEEP_SECONDS):
+        try:
+            swept = sweep_chat_compiles()
+            if swept:
+                logger.info("chat sweep enqueued %d compile job(s)", len(swept))
+        except Exception:  # noqa: BLE001 - sweep is best-effort by design
+            logger.exception("chat sweep failed; queue drain unaffected")
 
     # Same contract: best-effort, never fatal. A reconciler that can stop the
     # queue draining is a reconciler that turns a disk problem into an outage.
@@ -143,33 +269,35 @@ def tick() -> int:
         reconcile as reconcile_processes,
     )
 
-    try:
-        sweep_stale_checkouts()
-        sweep_environments()
-        enforce_env_disk_cap()
-        sweep_orphan_workspaces()
-        enforce_disk_cap()
-    except Exception:  # noqa: BLE001
-        logger.exception("workspace sweep failed; queue drain unaffected")
+    if _due("workspace", WORKSPACE_SWEEP_SECONDS):
+        try:
+            sweep_stale_checkouts()
+            sweep_environments()
+            enforce_env_disk_cap()
+            sweep_orphan_workspaces()
+            enforce_disk_cap()
+        except Exception:  # noqa: BLE001
+            logger.exception("workspace sweep failed; queue drain unaffected")
 
-    try:
-        # Reconcile FIRST. A server that crashed on its own leaves the row
-        # saying `running` forever, and the thread keeps offering a preview
-        # link to nothing. Reaping before reconciling would expire rows that
-        # had already exited and report work that was never done.
-        changed = reconcile_processes()
-        if changed:
-            logger.info("reconciled %d sandbox process(es) with the daemon", changed)
-        reaped = reap_processes()
-        if reaped:
-            logger.info("reaped %d sandbox process(es) past a lifetime", reaped)
-        # Containers whose owning thread was deleted. The evidence outlives the
-        # row on purpose (20260907100000); this is what acts on it.
-        reclaimed = drain_cleanup()
-        if reclaimed:
-            logger.info("reclaimed %d orphaned container(s)", reclaimed)
-    except Exception:  # noqa: BLE001
-        logger.exception("process reconciliation failed; queue drain unaffected")
+    if _due("process", PROCESS_SWEEP_SECONDS):
+        try:
+            # Reconcile FIRST. A server that crashed on its own leaves the row
+            # saying `running` forever, and the thread keeps offering a preview
+            # link to nothing. Reaping before reconciling would expire rows that
+            # had already exited and report work that was never done.
+            changed = reconcile_processes()
+            if changed:
+                logger.info("reconciled %d sandbox process(es) with the daemon", changed)
+            reaped = reap_processes()
+            if reaped:
+                logger.info("reaped %d sandbox process(es) past a lifetime", reaped)
+            # Containers whose owning thread was deleted. The evidence outlives
+            # the row on purpose (20260907100000); this is what acts on it.
+            reclaimed = drain_cleanup()
+            if reclaimed:
+                logger.info("reclaimed %d orphaned container(s)", reclaimed)
+        except Exception:  # noqa: BLE001
+            logger.exception("process reconciliation failed; queue drain unaffected")
     return processed
 
 

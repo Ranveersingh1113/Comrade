@@ -15,6 +15,7 @@ from agent.run_queue import (
     renew_lease,
 )
 from agent.runtime import run_turn_sync
+from shared.config import settings
 from shared.db import Role, team_session
 
 logger = logging.getLogger(__name__)
@@ -97,15 +98,54 @@ def run_once(worker_id: str | None = None) -> bool:
     return True
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    worker_id = _worker_id()
-    _drain_on_signal()
-    logger.info("agent worker up: %s", worker_id)
+def _loop(worker_id: str) -> None:
+    """One claim slot, for the life of the process.
+
+    Wrapped so a slot that hits something unexpected comes back rather than
+    disappearing: a thread that returns here is capacity the deployment
+    silently no longer has, and nothing would say so.
+    """
     while not _stopping.is_set():
-        if not run_once(worker_id):
+        try:
+            if not run_once(worker_id):
+                _stopping.wait(POLL_SECONDS)
+        except Exception:  # noqa: BLE001 - a slot must outlive its surprises
+            logger.exception("worker slot %s failed; continuing", worker_id)
             _stopping.wait(POLL_SECONDS)
-    logger.info("agent worker drained: %s", worker_id)
+
+
+def main() -> None:
+    """Run a bounded number of turns at once.
+
+    🔴 This was a single loop running one turn to completion before claiming
+    the next, so a long turn anywhere in the deployment made every other team
+    wait behind it. Nothing in the queue required that: the claim already
+    guarantees one active run per THREAD, which is the ordering guarantee that
+    matters, and a per-team ceiling (claim_next_agent_run) stops one team
+    taking every slot now that there is more than one.
+
+    Threads rather than an async rework: each turn is a blocking model call
+    with blocking DB work around it, the leasing is already per-run, and every
+    slot needs its own identity — the lease fence is by worker id, so two slots
+    in one process must not be mistaken for each other.
+    """
+    logging.basicConfig(level=logging.INFO)
+    base = _worker_id()
+    _drain_on_signal()
+    slots = max(settings.comrade_agent_concurrency, 1)
+    logger.info("agent worker up: %s (%d slot(s))", base, slots)
+    threads = [
+        threading.Thread(target=_loop, args=(f"{base}#{i}",), name=f"turn-{i}")
+        for i in range(slots)
+    ]
+    for thread in threads:
+        thread.start()
+    # Joined rather than left daemon: shutdown means "stop claiming, finish
+    # what is in hand", and a process that exits while a slot is mid-turn
+    # abandons a run that then waits out its whole lease before recovery.
+    for thread in threads:
+        thread.join()
+    logger.info("agent worker drained: %s", base)
 
 
 if __name__ == "__main__":

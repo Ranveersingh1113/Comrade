@@ -112,6 +112,7 @@ class ChokepointPlugin(BasePlugin):
         try:
             result = claim_effect(
                 tool_context.state["team_id"], run_id, tool.name, tool_args,
+                worker_id=tool_context.state.get("worker_id"),
             )
         except EffectUncertain as exc:
             return {"error": "effect_interrupted", "reason": str(exc)}

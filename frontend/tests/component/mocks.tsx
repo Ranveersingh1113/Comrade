@@ -27,6 +27,10 @@ export const supaState = {
    * purpose; correctness of filtering belongs to the integration layer. */
   tables: {} as Record<string, unknown[]>,
   inserts: [] as WriteRecord[],
+  /** Make the next select fail once, for testing what a screen keeps when a
+   *  refresh does not arrive. Cleared as it fires, so one failure is one
+   *  failure rather than a mode the test has to remember to leave. */
+  failNextSelect: null as string | null,
   updates: [] as WriteRecord[],
   deletes: [] as WriteRecord[],
   /** set to make the next insert into a table fail */
@@ -39,6 +43,7 @@ export function resetSupa(): void {
   supaState.updates = [];
   supaState.deletes = [];
   supaState.insertErrors = {};
+  supaState.failNextSelect = null;
 }
 
 function makeQuery(table: string) {
@@ -98,8 +103,18 @@ function makeQuery(table: string) {
       });
       return d;
     },
-    then: (resolve: (v: { data: unknown[]; error: null; count: number }) => unknown) =>
-      Promise.resolve({ data: rows(), error: null, count: rows().length }).then(resolve),
+    then: (resolve: (v: { data: unknown[] | null; error: { message: string } | null; count: number }) => unknown) => {
+      const failure = supaState.failNextSelect;
+      if (failure) {
+        supaState.failNextSelect = null;
+        return Promise.resolve(
+          { data: null, error: { message: failure }, count: 0 },
+        ).then(resolve);
+      }
+      return Promise.resolve(
+        { data: rows(), error: null, count: rows().length },
+      ).then(resolve);
+    },
   });
   return q;
 }

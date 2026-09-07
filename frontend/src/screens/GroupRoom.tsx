@@ -19,6 +19,7 @@ import { MemoryDiffCard } from '../components/MemoryDiffCard';
 import { ComposerMode, type ComposerModeValue } from '../components/ComposerMode';
 import { ConsentCard } from '../components/ConsentCard';
 import { PreviewBar } from '../components/PreviewBar';
+import { ThreadRoster } from '../components/ThreadRoster';
 import { AgentActivity } from '../components/AgentActivity';
 import type { AgentStep } from '../lib/agentApi';
 
@@ -45,10 +46,14 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
   const [activity, setActivity] = useState<AgentStep[]>([]);
   const [agentNote, setAgentNote] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // A work thread is mostly Comrade's, so it opens on Comrade — but the
+  // switch stays, because the people in it still need to talk to each other
+  // about the work. A remembered choice wins over both.
+  const defaultMode: ComposerModeValue = thread.kind === 'work' ? 'agent' : 'team';
   const [composerMode, setComposerMode] = useState<ComposerModeValue>(() => {
     if (!allowTeamMessages) return 'agent';
     return (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
-      ?? 'team';
+      ?? defaultMode;
   });
   useEffect(() => {
     if (!allowTeamMessages) {
@@ -57,9 +62,9 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
     }
     setComposerMode(
       (localStorage.getItem(`comrade.composerMode.${myUserId}.${thread.id}`) as ComposerModeValue | null)
-        ?? 'team',
+        ?? defaultMode,
     );
-  }, [myUserId, thread, allowTeamMessages]);
+  }, [myUserId, thread, allowTeamMessages, defaultMode]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
   const chatRef = useRef<HTMLDivElement>(null);
@@ -670,8 +675,18 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
               </button>
             )}
             <PreviewBar teamId={teamId} threadId={thread.id} />
+            {/* Only for a thread whose audience is a choice somebody made. A
+                team-visible thread's roster is "the team", and a control for
+                that would do nothing. In the room rather than a side panel,
+                because the room has three layouts and two of them have no
+                side panel at all. */}
+            {thread.visibility === 'restricted' && (
+              <div style={{ padding: '0 28px 12px' }}>
+                <ThreadRoster thread={thread} />
+              </div>
+            )}
             <div className="composer">
-              {allowTeamMessages && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode="team" onChange={setComposerMode} />}
+              {allowTeamMessages && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode={defaultMode} onChange={setComposerMode} />}
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}

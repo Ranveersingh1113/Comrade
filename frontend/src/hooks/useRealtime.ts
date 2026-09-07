@@ -31,7 +31,8 @@ export interface RealtimeState {
 export function useTeamRealtime(
   // Only tables in the supabase_realtime publication belong here — a
   // subscription to one that is absent compiles and delivers nothing.
-  table: 'messages' | 'tasks' | 'consent_queue' | 'sandbox_processes',
+  table: 'messages' | 'tasks' | 'consent_queue' | 'sandbox_processes'
+    | 'threads' | 'thread_participants',
   teamId: string,
   onChange: () => void,
   filter = `team_id=eq.${teamId}`,

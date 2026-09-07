@@ -1,43 +1,111 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
-import { useThreads } from '../hooks/useThreads';
+import { audienceOf, useThreads } from '../hooks/useThreads';
 import { useTeam } from '../state/TeamContext';
 import { GroupRoom } from './GroupRoom';
 
 export function Threads() {
   const { threadId } = useParams<{ threadId: string }>();
   const navigate = useNavigate();
-  const { team } = useTeam();
-  const { threads, error, createPublicThread } = useThreads();
+  const { team, roster, myUserId } = useTeam();
+  const { threads, error, counts, createThread } = useThreads();
   const [creating, setCreating] = useState(false);
+  const [composing, setComposing] = useState(false);
+  const [chosen, setChosen] = useState<string[]>([]);
   const teamId = team?.id ?? '';
+
+  const open = (id: string) => navigate(`/t/${teamId}/threads/${id}`);
+
+  const createPublic = async () => {
+    if (creating) return;
+    setCreating(true);
+    try {
+      open((await createThread({ visibility: 'team' })).id);
+    } finally {
+      setCreating(false);
+    }
+  };
 
   const create = async () => {
     if (creating) return;
     setCreating(true);
     try {
-      const thread = await createPublicThread();
-      navigate(`/t/${teamId}/threads/${thread.id}`);
+      const thread = await createThread({ visibility: 'restricted', members: chosen });
+      setComposing(false);
+      setChosen([]);
+      open(thread.id);
     } finally {
       setCreating(false);
     }
   };
 
   const active = threads.find((thread) => thread.id === threadId);
-  const isCanonicalGroupRoom = active?.title === 'General'
-    && active.visibility === 'team'
-    && active.kind === 'discussion';
-  if (threadId && active) return <GroupRoom key={active.id} thread={active} allowTeamMessages={isCanonicalGroupRoom} />;
+  if (threadId && active) {
+    const participants = counts.get(active.id) ?? 0;
+    // 🔴 This was `active.title === 'General'`. Every other public thread was
+    // Comrade-only, so a team could open a thread everyone could see and find
+    // they could not talk to each other in it — and renaming General silently
+    // removed team chat from the one room that had it. What decides is who can
+    // READ the thread: everyone, or the people in it.
+    const allowTeamMessages = active.visibility === 'team' || participants > 1;
+    return (
+      <GroupRoom
+        key={active.id}
+        thread={active}
+        allowTeamMessages={allowTeamMessages}
+      />
+    );
+  }
 
   return <main className="workspace-page threads-page" style={{ flex: 1, padding: '28px', overflowY: 'auto' }}>
     <header className="workspace-heading" style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
       <div><div className="display" style={{ fontSize: 30 }}>Threads</div><div style={{ color: 'var(--muted)', fontSize: 12 }}>Team conversations and focused work</div></div>
-      <button className="btn-primary" style={{ marginLeft: 'auto' }} disabled={creating} onClick={() => void create()}>New thread</button>
+      {/* Two buttons rather than one button and a mode. Creating a thread
+          everyone can see is the common case and stays one click; choosing who
+          is in one is the rarer case and is worth a step. */}
+      <button className="btn-secondary" style={{ marginLeft: 'auto' }} disabled={creating} onClick={() => setComposing(true)}>New private thread</button>
+      <button className="btn-primary" disabled={creating} onClick={() => void createPublic()}>New thread</button>
     </header>
     {error && <p style={{ color: 'var(--terracotta)' }}>{error}</p>}
+
+    {composing && (
+      <section className="card" data-new-thread style={{ marginTop: 18, padding: 16, display: 'grid', gap: 12 }}>
+        <div className="micro-label">Who is in this thread</div>
+        {(
+          <div style={{ display: 'grid', gap: 6 }}>
+            {roster.filter((m) => m.membership.user_id !== myUserId).length === 0 && (
+              <span style={{ color: 'var(--faint)', fontSize: 12 }}>
+                Nobody else on this team yet — it will be private to you.
+              </span>
+            )}
+            {roster
+              .filter((m) => m.membership.user_id !== myUserId)
+              .map((m) => (
+                <label key={m.membership.user_id} style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={chosen.includes(m.membership.user_id)}
+                    onChange={(e) => setChosen((c) => (
+                      e.target.checked
+                        ? [...c, m.membership.user_id]
+                        : c.filter((id) => id !== m.membership.user_id)
+                    ))}
+                  />
+                  {m.profile.display_name}
+                </label>
+              ))}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn-primary" disabled={creating} onClick={() => void create()}>Create</button>
+          <button className="btn-ghost" onClick={() => setComposing(false)}>Cancel</button>
+        </div>
+      </section>
+    )}
+
     <div className="thread-list" style={{ marginTop: 22, display: 'grid', gap: 8 }}>
-      {threads.map((thread) => <Link key={thread.id} to={`../threads/${thread.id}`} style={{ color: 'inherit', textDecoration: 'none' }}><article className="card" style={{ padding: 14 }}><b>{thread.title}</b><span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>{thread.visibility === 'restricted' ? 'Selected members' : 'Team'} · {thread.kind}</span></article></Link>)}
+      {threads.map((thread) => <Link key={thread.id} to={`../threads/${thread.id}`} style={{ color: 'inherit', textDecoration: 'none' }}><article className="card" style={{ padding: 14 }}><b>{thread.title}</b><span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>{audienceOf(thread, counts.get(thread.id) ?? 0)} · {thread.kind}</span></article></Link>)}
     </div>
   </main>;
 }

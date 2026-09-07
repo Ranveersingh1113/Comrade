@@ -54,8 +54,12 @@ test('non-group threads are Comrade-only and send through the agent', async () =
   supaState.tables.threads = [thread];
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>);
+  // T14: a team-visible WORK thread opens on Comrade and keeps the switch —
+  // the people in it still need to talk to each other about the work. Only a
+  // thread nobody else can read is Comrade-only.
   expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Comrade mode' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Comrade mode' }))
+    .toHaveAttribute('aria-pressed', 'true');
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'check the release');
   await user.click(screen.getByRole('button', { name: 'SEND' }));
   await waitFor(() => expect(body).toMatchObject({ team_id: 'team-1', text: 'check the release', thread_id: 'thread-1' }));
@@ -82,10 +86,19 @@ test('shows a thread consent card inline with its messages', async () => {
     .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 });
 
-test('non-group thread routes remain Comrade-only despite saved team preferences', async () => {
+test('a thread nobody else can read stays Comrade-only despite saved team preferences', async () => {
+  // T14 narrowed what "Comrade-only" means. It is no longer "not the General
+  // thread" — a team-visible thread lets the team talk in it — it is "nobody
+  // else can read this", which is a restricted thread with one person in it.
+  localStorage.setItem('comrade.composerMode.u1.thread-2', 'team');
   supaState.tables.threads = [
     thread,
-    { ...thread, id: 'thread-2', title: 'Planning', kind: 'discussion', work_state: null },
+    { ...thread, id: 'thread-2', title: 'Planning', kind: 'discussion',
+      work_state: null, visibility: 'restricted' },
+  ];
+  supaState.tables.thread_participants = [
+    { thread_id: 'thread-2', team_id: 'team-1', user_id: 'u1', added_by: 'u1',
+      joined_at: '2026-09-04T00:00:00Z' },
   ];
   const user = userEvent.setup();
   render(<MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<ThreadRoute />} /></Routes></MemoryRouter>);
@@ -116,10 +129,14 @@ test('changing member identity resets the mounted thread composer and its send p
   const user = userEvent.setup();
   const app = () => <MemoryRouter initialEntries={['/t/team-1/threads/thread-1']}><Routes><Route path="/t/:teamId/threads/:threadId" element={<Threads />} /></Routes></MemoryRouter>;
   const { rerender } = render(app());
-  expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
+  // u1 saved 'team' and the thread now allows it (T14: a team-visible work
+  // thread keeps the switch), so u1 gets the team composer...
+  expect(await screen.findByPlaceholderText(/Message the team/)).toBeInTheDocument();
 
   teamState.myUserId = 'u2';
   rerender(app());
+  // ...and u2, who saved 'agent', gets Comrade. That the composer follows the
+  // VIEWER is the thing this test exists for.
   expect(await screen.findByPlaceholderText('Ask Comrade…')).toBeInTheDocument();
   await user.type(screen.getByPlaceholderText('Ask Comrade…'), 'review this');
   await user.click(screen.getByRole('button', { name: 'SEND' }));

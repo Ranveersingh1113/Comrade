@@ -580,6 +580,83 @@ coalescing do what they say. The numbers that would justify the constants
 faked channel, not a real Supabase socket, so reconnect behaviour is proven
 against the contract rather than against the service.
 
+### T14 — Finish thread visibility and participant management UX
+
+**Changed:** `supabase/migrations/20260907150000_thread_participation.sql`,
+`frontend/src/hooks/useThreads.ts`, `frontend/src/hooks/useRealtime.ts`,
+`frontend/src/screens/Threads.tsx`, `frontend/src/screens/GroupRoom.tsx`,
+`frontend/src/components/ThreadRoster.tsx` (new),
+`tests/test_thread_participation.py`,
+`frontend/tests/component/threadVisibility.test.tsx`,
+`frontend/tests/component/mocks.tsx`, plus the thread tests that encoded the
+old rule.
+
+**Regression 1 — team discussion was gated on the thread being TITLED
+"General".** `active?.title === 'General' && ...` decided whether a room had a
+team composer, so every other public thread was Comrade-only: a team could
+open a thread everyone could see and find they could not talk to each other in
+it, and renaming General silently removed team chat from the one room that had
+it. What decides now is who can READ the thread — everyone, or the people in
+it.
+
+**Regression 2 — removals left no trace.** `thread_participants` records
+`added_by` and `joined_at`, so an addition was audited. A removal deleted the
+row and took the only evidence with it — and removal is the consequential
+half, revoking a person's access to the thread's whole history, its runs, its
+approvals and its previews.
+
+**Regression 3 — neither threads nor rosters were published for realtime.** A
+teammate creating a thread, renaming one, or adding somebody to one was
+invisible until a reload; the list refetched on window focus and nowhere else.
+
+**Regression 4 — everything restricted was labelled "Selected members",**
+including a thread with exactly one person in it. "Selected members" describes
+a small group; a thread nobody else is in is Private, and that difference is
+the whole question somebody is asking when they scan the list.
+
+**Regression 5 — a restricted thread's membership was set at creation and
+never again.** No way to see who else could read what you wrote, no way to add
+or remove anyone, and nothing warning that adding a person hands them the
+thread's entire history rather than starting them at today.
+
+**Design:** two creation buttons rather than one button and a mode — a thread
+everyone can see is the common case and stays ONE CLICK; choosing who is in
+one is rarer and earns a step. The roster lives in the room rather than a side
+panel, because the room has three layouts and two of them have no side panel.
+The audit table has no foreign key to threads (the evidence outlives the row,
+as with `sandbox_cleanup`) but does have one to teams, so a tenant erasing
+itself takes its audit with it.
+
+**Also:** `ComposerMode` kept its OWN copy of the mode, seeded from a
+hardcoded `defaultMode="team"`, while GroupRoom kept another. Two sources of
+truth that agreed only while every thread had the same default — the moment
+work threads defaulted to Agent, the composer said Comrade and the toggle said
+Team.
+**Also:** the delete trigger is guarded on the team still existing. Deleting a
+team cascades to its participants, and the trigger would otherwise try to
+attach an audit row to the team being removed — a foreign key violation that
+made deleting a team impossible. Caught by the first test run.
+**Also:** the removed person cannot read the record of their own removal.
+That follows the thread's own rule rather than being an exception to it.
+**Also:** `useThreads` already preserved its list on a failed refresh; a test
+now pins it, via a one-shot select failure added to the supabase mock.
+
+**Passing:** 9 participation tests, 11 thread-visibility tests; 203 frontend
+tests; build ✅; lint ✅.
+
+**Migration/rollback:** additive. A new table, a trigger, and two tables added
+to the realtime publication — nothing existing changes shape.
+
+**Ceiling:** 🔴 `tsc --noEmit` reported the roster panel as clean while
+`npm run build` found two `Cannot find name 'thread'` errors in it: I had put
+it in a component that has no such prop. That is exactly the gap T01 changed
+the gate for, and I walked into it by typechecking with the weaker command.
+Use `npm run build`.
+🔴 No two-browser journey: invite, removal and revocation are proven at the
+RLS and component level, not by two real sessions watching each other. 🔴
+Owner management is display-only — the owner is shown and cannot be removed,
+but ownership cannot be transferred.
+
 ---
 
 ## Standing ceilings

@@ -1423,6 +1423,41 @@ because nothing reads logs yet. 🔴 `head_sha` is recorded from what
 `open_pull_request` returns; if that is absent the first check result cannot
 be judged stale.
 
+## Phase E exit gate
+
+**1212 backend tests, 6 skipped, 0 failed. 210 frontend tests. Build green.**
+T22 through T25.
+
+The pattern here is different from Phase C's. Those were failures of ACCOUNT —
+the system was right and what it said about itself was wrong. These are
+failures of CONNECTION: two things that should have been one, or two things
+that never met.
+
+- The board and the thread were two answers to "is this done" (T22).
+- A check and the change it checked were bound by a counter that could not
+  tell them apart (T23).
+- A file and the audience it was meant for were never related at all (T24).
+- A failing build and the thread that broke it had no way to reach each other
+  (T25).
+
+Three of the four came with a leak that appeared the moment the connection
+did: linking tasks to threads exposed restricted work on the board, attaching
+files to threads published them to the wiki, and correlating CI exposed
+restricted work again. Each was caught while writing the migration rather than
+after, because the pattern was by then familiar — a new relationship inherits
+the visibility of the WIDER side unless somebody narrows it.
+
+**What Phase F inherits:** the same evidence gap Phase D had, plus a new one.
+Four of these tasks end with "the data is right and no screen reads it". T22's
+board card, T24's attachment control, T25's CI panel — the models are built
+and the product cannot reach them. That is a real limit on calling any of this
+done.
+
+**A flake was found and fixed**, not worked around: `test_server_budget`
+seeded usage onto the previous hour's bucket for the first five minutes of
+every hour, so it failed on the clock. It had been mistaken for contention
+once already this session.
+
 ---
 
 ## Standing ceilings

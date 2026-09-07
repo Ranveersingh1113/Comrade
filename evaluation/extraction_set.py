@@ -25,7 +25,9 @@ mixed formatting, incidental noise, facts out of order. A clean bulleted source
 would measure the extractor's best case and tell us nothing about the one that
 matters.
 """
-from evaluation.extraction import Document, ExpectedFact as F
+from evaluation.extraction import (
+    Document, ExpectedFact as F, ForbiddenFact as FB,
+)
 
 PROJECT_BRIEF = Document(
     name="brief.md",
@@ -135,3 +137,70 @@ banner still says 2 hours, should be 90 minutes
 )
 
 DOCUMENTS = (PROJECT_BRIEF, STANDUP_CHAT, REPO_ACTIVITY)
+
+
+# ---------------------------------------------------------------------------
+# Requests to Comrade versus decisions the team made (T17)
+# ---------------------------------------------------------------------------
+#
+# 🔴 The set above labels only what must be FOUND, so a prompt that extracted
+# every sentence scored a perfect recall. These sources label the traps: each
+# one is a way a sentence can look like a decision without being one, and each
+# has a real decision beside it so the fix cannot be "extract less".
+#
+# The transcript format is the one the compiler produces (pipeline/chat.py):
+# a line written 'Name -> Comrade' was addressed to the assistant, and a
+# '--- Title ---' line names the conversation.
+
+ASKING_VERSUS_DECIDING = Document(
+    name="asking_versus_deciding",
+    kind="chat",
+    body="""--- Platform ---
+[0] Ann -> Comrade: investigate switching the database to Postgres
+[1] Bo: could we move to Postgres? it would help with the JSON columns
+[2] Ann: we have decided to switch to Postgres, Bo owns the migration
+[3] Bo -> Comrade: we are not supporting IE11 any more, note that
+""",
+    expected=(
+        F("The team decided to switch the database to Postgres",
+          ("postgres", ("decided", "decision", "switch"))),
+        F("Bo owns the Postgres migration", ("bo", "migration")),
+        # Addressed to Comrade AND a decision. Provenance is context for the
+        # judgement, not a veto on it.
+        F("The team is not supporting IE11", ("ie11",)),
+    ),
+    forbidden=(
+        FB("investigating Postgres is a request, not a decision",
+           ("investigate",)),
+        FB("'could we move' is an option under discussion",
+           ("could",)),
+    ),
+)
+
+TENTATIVE_AND_CORRECTED = Document(
+    name="tentative_and_corrected",
+    kind="chat",
+    body="""--- Release ---
+[0] Ann: maybe Priya can take the release notes, if she has time
+[1] Bo: the client said their launch is on the 3rd
+[2] Ann: the demo is on the 14th
+[3] Ann: sorry, correction — the demo is on the 21st
+[4] Priya: I'll take the release notes
+""",
+    expected=(
+        # ("21", "21st") because matching is whole-token: the extractor
+        # produced "The demo is on the 21st." and a bare "21" key scored it a
+        # miss. Same shape as the auth/authentication case above — the label
+        # was wrong, not the extraction, and an eval that reports a miss for a
+        # fact that WAS found is an eval people learn to ignore.
+        F("The demo is on the 21st", (("21", "21st"),)),
+        F("Priya owns the release notes", ("priya", "release notes")),
+    ),
+    forbidden=(
+        FB("the demo is not on the 14th — that was corrected", ("14",)),
+        FB("a tentative assignment is not an owner", ("maybe",)),
+        FB("the client's launch date is reported, not adopted", ("client",)),
+    ),
+)
+
+CHAT_SOURCES = (ASKING_VERSUS_DECIDING, TENTATIVE_AND_CORRECTED)

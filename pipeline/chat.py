@@ -58,9 +58,28 @@ CAPTURE_LAG_SECONDS = 5
 #: comparison rather than needing a second query shape.
 _MIN_UUID = "00000000-0000-0000-0000-000000000000"
 
+#: Was this line addressed to Comrade?
+#:
+#: 🔴 Nothing recorded it, so "@comrade investigate switching to Postgres" and
+#: "we are switching to Postgres" reached the model as the same kind of
+#: sentence — and a request to look into an option could be compiled into the
+#: wiki as a decision the team had taken.
+#:
+#: Two signals, because neither alone is enough. The run is authoritative when
+#: there is one; the mention catches the messages that never started a run at
+#: all — a busy room refuses some, and a refused turn is still a question.
+#: On the MESSAGE, not derived from agent_runs at read time: that table
+#: deliberately has no broad grant (findings §4.1 — it holds private prompts
+#: and tool results), and widening it so the compiler could ask one boolean
+#: question would trade a real privacy boundary for a convenience. The
+#: mention stays as a second signal, for messages written before the column
+#: existed and for anything that reaches the table another way.
+_TO_AGENT = " (m.to_agent or m.body ~* '@[[:space:]]*comrade')"
+
 _FETCH_COLUMNS = (
-    "select m.id, p.display_name, m.body, m.created_at, th.id, th.title"
-    " from public.messages m"
+    "select m.id, p.display_name, m.body, m.created_at, th.id, th.title,"
+    + _TO_AGENT
+    + " from public.messages m"
     " join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
     " join public.profiles p on p.id = m.sender_id"
     " where m.team_id = %s and th.visibility = 'team'"
@@ -71,7 +90,7 @@ _FETCH_COLUMNS = (
 def _row(r) -> dict:
     return {
         "id": str(r[0]), "sender": r[1], "text": r[2], "created_at": r[3],
-        "thread_id": str(r[4]), "thread_title": r[5],
+        "thread_id": str(r[4]), "thread_title": r[5], "to_agent": bool(r[6]),
     }
 
 
@@ -141,22 +160,35 @@ def fetch_chat_messages_by_id(conn, team_id: str, message_ids: list[str]) -> lis
     return [_row(r) for r in rows]
 
 
-def format_transcript(messages: list[dict]) -> str:
+def format_transcript(messages: list[dict], trigger: str = "scheduled") -> str:
     """Numbered transcript lines: '[i] Name: text'.
 
     The numbering is what extraction's source_index refers back to, so it stays
     global and in the order given. A thread header appears whenever the
     conversation changes, WITHOUT consuming an index — the reader needs to know
     these are separate conversations; the citation map does not change.
+
+    A line addressed to Comrade is written `Name -> Comrade`, because a request
+    to investigate an option and a decision to take it are different things and
+    the sentences look alike. That is CONTEXT for the judgement, not a veto on
+    it: a decision announced to Comrade is still a decision.
     """
     lines: list[str] = []
+    if trigger == "on_demand":
+        # A member pointed at this and asked for it to be kept. The codebase
+        # already calls that the highest-signal fact in the system; it had
+        # never actually reached the model.
+        lines.append(
+            "--- a member explicitly asked for this to be remembered ---"
+        )
     current: str | None = None
     for i, m in enumerate(messages):
         thread = m.get("thread_title")
         if thread and thread != current:
             current = thread
             lines.append(f"--- {thread} ---")
-        lines.append(f"[{i}] {m['sender']}: {m['text']}")
+        who = f"{m['sender']} -> Comrade" if m.get("to_agent") else m["sender"]
+        lines.append(f"[{i}] {who}: {m['text']}")
     return "\n".join(lines)
 
 
@@ -295,7 +327,7 @@ def compile_messages(
     # Grouped BEFORE the transcript is numbered, so source_index and the
     # citation map below refer to the same order the model was shown.
     messages = group_by_thread(messages)
-    transcript = format_transcript(messages)
+    transcript = format_transcript(messages, trigger=trigger)
     marked = spotlight(transcript)
     candidates = extract_candidates(marked, kind="chat") if messages else []
 

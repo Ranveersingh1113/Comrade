@@ -87,3 +87,56 @@ def test_the_extractor_produces_something_for_every_source(capsys):
         if not extract_candidates(spotlight(doc.body), kind=doc.kind)
     ]
     assert not empty, f"stage 1 returned no candidates at all for: {empty}"
+
+
+#: Precision against LABELLED TRAPS, not against everything unlabelled.
+#:
+#: 🔴 Until T17 the only stage-1 metric was recall, which is gameable in the
+#: worst direction for this system: a prompt that extracts every sentence
+#: scores 1.0, and every sentence it puts in the wiki is something the agent
+#: reads back as fact on every later turn. A request to investigate an option,
+#: compiled as a decision to take it, is a lie the team never told.
+#:
+#: One trap in five produced lines is the floor. Below that the prompt has
+#: stopped distinguishing asking from deciding.
+PRECISION_FLOOR = 0.80
+
+
+@pytest.mark.live
+def test_stage_one_does_not_turn_questions_into_decisions(capsys):
+    from evaluation.extraction import score
+    from evaluation.extraction_set import CHAT_SOURCES
+    from pipeline.parsers import spotlight
+
+    produced_total = 0
+    false_positives: list[str] = []
+    missed: list[str] = []
+    for doc in CHAT_SOURCES:
+        produced = [
+            c.text for c in extract_candidates(spotlight(doc.body), kind=doc.kind)
+        ]
+        result = score(produced, list(doc.expected), list(doc.forbidden))
+        produced_total += len(produced)
+        false_positives.extend(result["false_positives"])
+        missed.extend(result["missed"])
+        with capsys.disabled():
+            print(
+                f"\n{doc.name}: recall {result['recall']:.0%},"
+                f" precision {result['precision']:.0%}"
+                f"\n  missed: {result['missed']}"
+                f"\n  false positives: {result['false_positives']}"
+                f"\n  unlabelled extras: {result['extra']}"
+            )
+
+    precision = (
+        1.0 if not produced_total
+        else 1 - len(false_positives) / produced_total
+    )
+    assert precision >= PRECISION_FLOOR, (
+        f"stage-1 precision {precision:.0%} is below the"
+        f" {PRECISION_FLOOR:.0%} floor — these are things the team never"
+        f" agreed, written into the wiki as fact: {false_positives}"
+    )
+    # Recall is asserted separately above; here it only has to not collapse,
+    # because "extract nothing" is the trivial way to score perfect precision.
+    assert len(missed) <= 2, f"precision was bought by dropping facts: {missed}"

@@ -819,6 +819,85 @@ than measured against how long a transaction actually stays open here. 🔴 No
 test of a crash between apply and job completion — the plan's last check —
 because that needs a killed worker rather than a raised exception.
 
+### T17 — Separate requests to Comrade from team decisions
+
+**Changed:** `supabase/migrations/20260907170000_message_to_agent.sql`,
+`pipeline/chat.py`, `pipeline/compiler.py`, `evaluation/extraction.py`,
+`evaluation/extraction_set.py`, `tests/test_extraction_provenance.py`,
+`tests/test_extraction_recall_live.py`.
+
+**Regression 1 — the transcript carried no provenance.** It was
+`[3] Name: message` and nothing else, so a line addressed to the agent —
+"@comrade investigate switching to Postgres" — was indistinguishable from one
+where the team settled something — "we are switching to Postgres". A request
+to look INTO an option could be compiled into the wiki as a decision the team
+had TAKEN, and the wiki is what the agent reads back as fact on every later
+turn, so the error compounds.
+
+**Regression 2 — the prompt did not distinguish asking from deciding.** It
+excluded questions and banter, but "investigate switching the database" is
+neither a question nor banter: it is a request, and it looks exactly like a
+decision. Proposals, tentative assignments, reported statements and corrected
+values all had the same problem.
+
+**Regression 3 — the metric measured recall alone**, which is gameable in the
+worst direction for this system: a prompt that extracts every sentence scores
+1.0, and every sentence it writes into the wiki is something the agent reads
+back as fact. The module's own docstring had flagged it — "If extras ever need
+judging, that is a precision metric and a different labelling job."
+
+**Regression 4 — explicit remember intent never reached the model.** The
+codebase calls a fact a human pointed at "the highest-signal fact in the
+system"; the compile knew the trigger and the transcript did not say so.
+
+**Design:** agent-direction is recorded ON THE MESSAGE rather than derived from
+`agent_runs` at read time. The first implementation did derive it and failed
+immediately with `InsufficientPrivilege` — that table deliberately has no broad
+grant (findings §4.1: private prompts and tool results), and widening it so the
+memory compiler could ask one boolean question would have traded a real
+privacy boundary for a convenience. Precision is scored against LABELLED TRAPS
+rather than every unlabelled extra, because the labeller lists what must be
+found and what must not be, never everything findable — penalising extras
+punishes thoroughness, and thoroughness is the behaviour this system needs
+most.
+
+**Also:** the prompt now says explicitly that being addressed to Comrade does
+NOT disqualify a decision. The obvious fix — "ignore anything aimed at the
+agent" — would lose "Comrade, we have decided to switch to Postgres,
+implement it", which is a decision and a common way to say one.
+**Also:** the live precision test also asserts recall did not collapse, because
+extracting nothing is the trivial way to score perfect precision.
+**Also:** the mention pattern is kept beside the column as a second signal, for
+messages written before the column existed.
+
+**Passing:** 8 provenance and scorer tests; 1114 backend tests, 6 skipped, 0
+failed.
+
+**Migration/rollback:** additive — one boolean column defaulting false, and the
+enqueue RPC replaced in place. Rows written before it read as not-agent-
+directed, which the mention pattern still catches for the common case.
+
+**Measured, not asserted.** The live evaluation was run against the real
+model: both chat sources scored **recall 100%, precision 100%, zero false
+positives**. It correctly kept "investigate switching the database" and "could
+we move to Postgres" out of memory while extracting the decision, its owner,
+and an IE11 negation that was addressed to Comrade — and dropped the corrected
+date, the tentative assignment and the client's reported date. Overall stage-1
+recall across the older set: 19/20 (95%), above its 80% floor.
+
+The first live run reported the 21st as MISSED, and the label was wrong, not
+the extraction: matching is whole-token, the extractor produced "the 21st", and
+a bare `21` key cannot match it. Same shape as the auth/authentication case the
+module already documents. An eval that reports a miss for a fact that was found
+is an eval people learn to ignore, so the key is now `("21", "21st")`.
+
+**Ceiling:** 🔴 Two labelled chat sources is a small set: it will notice a
+regression, not characterise one. 🔴 One run is not a distribution — the plan
+asks for REPEATED live evaluation, and a single 100% says the prompt handles
+these six traps once, not that it is stable. 🔴 No assertion that private
+threads stay out of promotion; that boundary is the fetch's
+`visibility='team'` and is unchanged, but the plan asks for it to be pinned.
+
 ---
 
 ## Standing ceilings

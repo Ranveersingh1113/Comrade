@@ -64,6 +64,9 @@ class Document:
     kind: str  # 'document' | 'chat' | 'github' — picks the extraction prompt
     body: str
     expected: tuple[ExpectedFact, ...] = field(default_factory=tuple)
+    #: Lines that must NOT come back — the ways a sentence can look like a
+    #: decision without being one.
+    forbidden: tuple = field(default_factory=tuple)
 
 
 def _normalise(s: str) -> str:
@@ -160,3 +163,62 @@ def report(results: dict[str, dict]) -> str:
     overall = total_found / total_expected if total_expected else 0.0
     lines.append(f"OVERALL stage-1 recall: {total_found}/{total_expected} ({overall:.0%})")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ForbiddenFact:
+    """A thing the extractor must NOT produce.
+
+    🔴 The metric above measures recall alone, and says so: "If extras ever
+    need judging, that is a precision metric and a different labelling job."
+    This is that job. Recall alone is gameable in the worst direction for this
+    system — a prompt that extracts every sentence scores 1.0, and every
+    sentence in the wiki is something the agent reads back as fact.
+
+    Labelled the same way, and for the same reason: the person writing the
+    label knows which words make the produced line the WRONG fact.
+    """
+    text: str
+    keys: tuple[str | tuple[str, ...], ...]
+
+
+def _matches(normalised: str, keys) -> bool:
+    forms = tuple(
+        tuple(_normalise(f) for f in (k if isinstance(k, tuple) else (k,)))
+        for k in keys
+    )
+    return all(any(_contains(normalised, f) for f in alts) for alts in forms)
+
+
+def score(
+    produced: list[str],
+    expected: list[ExpectedFact],
+    forbidden: list[ForbiddenFact] | None = None,
+) -> dict:
+    """Recall against what must be found, precision against labelled traps.
+
+    Precision here is deliberately NOT "produced facts that appear in the
+    expected list". The labeller lists what must be found and what must not be,
+    never everything findable, so counting every unlabelled extra as an error
+    would punish an extractor for being thorough — and thoroughness is the
+    behaviour this system needs most.
+
+    So a false positive is a produced line matching a FORBIDDEN label: a
+    question compiled as a decision, a proposal compiled as a choice. Those are
+    the errors that put a thing in the wiki the team never agreed.
+    """
+    base = recall(produced, expected)
+    traps = list(forbidden or ())
+    normalised = [(p, _normalise(p)) for p in produced]
+    false_positives = [
+        p for p, np in normalised
+        if any(_matches(np, trap.keys) for trap in traps)
+    ]
+    base["false_positives"] = false_positives
+    base["precision"] = (
+        1.0 if not produced else 1 - len(false_positives) / len(produced)
+    )
+    # The extras list stays, and stays unscored: it is the place a reader looks
+    # to decide whether a new trap needs labelling.
+    base["extra"] = [p for p in base["extra"] if p not in false_positives]
+    return base

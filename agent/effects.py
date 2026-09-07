@@ -16,6 +16,21 @@ class RunInactive(RuntimeError):
     """The run was cancelled or otherwise stopped before the next effect."""
 
 
+def run_is_active(team_id: str, run_id: str) -> bool:
+    """Is this run still the one the worker should be spending money on?
+
+    Cancellation had exactly one observer before: `claim_effect`, which
+    refused a WRITE on a stopped run. Read-only tools kept running and the
+    model kept being called, so "stop" meant "stop eventually" — the turn
+    carried on to its natural end, billing a team for work nobody wanted.
+    """
+    with team_session(Role.AGENT, team_id) as conn:
+        return conn.execute(
+            "select 1 from public.agent_runs where id=%s and status='running'",
+            (run_id,),
+        ).fetchone() is not None
+
+
 def _key(tool: str, args: dict[str, Any]) -> str:
     value = json.dumps(args, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(f"{tool}:{value}".encode()).hexdigest()

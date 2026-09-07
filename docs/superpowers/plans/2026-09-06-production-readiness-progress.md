@@ -317,6 +317,102 @@ genuine accepted-then-dropped request. Both need a real deployment to prove.
 🔴 Reconstruct-after-refresh follows `queued`/`running` runs only; a run
 already waiting on a decision surfaces through its consent card instead.
 
+### T11 — Expose cancellation, steering, and permission continuation
+
+**Changed:** `supabase/migrations/20260907120000_permission_continuation.sql`,
+`shared/agent_runs.py`, `shared/consent.py`, `agent/run_queue.py`,
+`agent/effects.py`, `agent/runtime.py`, `agent/history.py`,
+`agent/permission_plugin.py`, `agent/sandbox.py`, `agent/repo_tools.py`,
+`server/app.py`, `frontend/src/lib/agentApi.ts`,
+`frontend/src/screens/GroupRoom.tsx`, `tests/test_permission_continuation.py`,
+`tests/test_run_cancellation.py`, `frontend/tests/component/turnCancel.test.tsx`,
+plus the steering and resume tests whose doubles held the old contracts.
+
+**Regression 1 — a run waiting on a person kept its worker lease.** That lease
+answers one question, "is the process holding this run still alive", and is
+measured in minutes so a dead worker is noticed quickly. A member deciding
+whether to approve an action takes minutes to days. So
+`recover_expired_agent_runs` found the parked run, called it abandoned and
+requeued it; the re-run proposed the same action, hit the same pending card and
+parked again — three cycles, then `failed: worker lease expired`, with the card
+still sitting there and the member having done nothing wrong. Approving it
+afterwards executed the action against a run already declared dead, and
+`_requeue_permission_run` (which matches only `waiting_for_permission`) resumed
+nothing. Parking now releases the lease; the backstop is the card's own expiry,
+which is the clock that measures the thing actually being waited on.
+
+**Regression 2 — rejection resumed nothing.** Approve and edit-and-approve both
+requeued the waiting run. Reject wrote `resolution_reason` and stopped, so the
+run stayed parked. That column exists so the agent can read WHY on its next
+turn rather than just THAT; there was no next turn.
+
+**Regression 3 — there was no way to stop a turn.** `cancel_run` sat in the
+queue module with nothing reaching it: no endpoint, no button. A member who
+asked the wrong question, or watched a turn head somewhere expensive, could
+only wait it out.
+
+**Regression 4 — steering had no sender attribution.** It arrived as "New
+participant message", so in a room where anyone can redirect the work, a
+teammate's instruction was indistinguishable from the requester's own. The
+run's identity and any approval it holds stay with the ORIGINAL requester
+either way, which is exactly why the difference has to be visible in the text
+rather than implied by it. Attributed on the rule `recent_turns` already used:
+a thread with one participant has nobody to tell apart.
+
+**Design:** cancellation is authorised by two different questions. Thread
+access says the run is yours to SEE; requester ownership says it is yours to
+STOP, and that half is enforced inside the UPDATE rather than read first and
+written after, because a check in another transaction can be raced. The
+browser does not draw the button for a run it did not request either — not as
+the control, but so nobody is invited to try.
+
+**Also:** `_finish` called `finish_run` first, and `finish_run` refuses a run
+that has left `running` — on purpose, so a worker's late "failed" cannot
+overwrite the answer a member gave. But it RAISED, so `finalize_usage` never
+ran: the estimate stayed on the team's hourly bucket, charging them for the
+turn they stopped. The status is not the worker's to write; the money still is.
+**Also:** cancelling used to stop the LOOP and nothing else. The bounded runner
+now polls a `stop` callable about once a second, so a stop reaches a container
+that is ALREADY running instead of leaving a test suite to hold a host CPU for
+the rest of its ten-minute timeout — the runaway-container problem T07 exists
+to prevent, arriving through the one door it had left open. `cancelled` is
+reported separately from `timed_out`: "you stopped this" and "your command ran
+too long" are different things to tell somebody.
+**Also:** resolving a consent card resumed the run on the server and the room
+rejoined nothing, so the member answered and then watched a thread where
+nothing happened. All three resolutions now re-follow the same run.
+
+**Already correct, verified rather than rewritten:** reusable grants are
+rechecked on every proposal (`_approve_with_thread_grant` runs inside
+`propose_action` and tests scope, expiry, revocation, risk ceiling and
+requester-only resolution), publication and departure stay allow-once
+(`_REUSABLE_GRANT_RISK` covers only reversible member-scoped task work), and an
+uncertain external effect is reconciled rather than repeated
+(`claim_effect` raises `EffectUncertain`). Existing coverage:
+`test_revoked_thread_grant_returns_to_allow_once`,
+`test_thread_grant_rejects_other_resources_requesters_and_expiry`,
+`test_high_risk_actions_cannot_create_thread_grants`,
+`test_completed_effect_returns_its_saved_result_after_worker_restart`.
+
+**Passing:** 10 cancellation tests, 7 permission-continuation tests, 3 new
+steering tests, 3 new frontend tests; 1052 backend tests, 6 skipped, 0 failed;
+187 frontend tests; build ✅; lint ✅ (warnings only).
+
+**Migration/rollback:** widening only. `consent_queue.status` gains `expired`
+(an unanswered card is not `cancelled` — nobody decided anything, and calling
+it that puts a decision in someone's mouth), and
+`recover_expired_agent_runs` is replaced in place. Old code against the new
+schema is fine; the run-ending sweep is deliberately narrow — a run is failed
+only when one of its cards actually expired and none is still answerable, so it
+cannot race the gap between approving a card and requeueing its run.
+
+**Ceiling:** 🔴 an in-flight MODEL call cannot be taken back; cancellation is
+observed between steps, so a stop during a long generation lands after that
+call returns. 🔴 The container kill is proven against a real subprocess but not
+against a real Docker daemon. 🔴 Reconnect-after-refresh follows `queued` and
+`running` runs; a run already parked on a decision surfaces through its consent
+card instead.
+
 ---
 
 ## Standing ceilings
@@ -329,3 +425,9 @@ already waiting on a decision surfaces through its consent card instead.
    `git add -A`. Preserved, but committed on this branch rather than left in
    their working tree.
 3. `npm run lint` passes with warnings.
+4. **The backend suite owns the database while it runs.** `seeded` deletes and
+   re-seeds the fixture team per test, so a second pytest process against the
+   same Postgres wrecks whichever tests overlap. Two "failures" during T11 were
+   exactly this — a file run started while the full suite was still going — and
+   they did not reproduce once the suite had the database to itself. Read a
+   failure from a run that had exclusive access before believing it.

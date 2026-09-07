@@ -40,6 +40,7 @@ import threading
 import types
 import logging
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -181,8 +182,14 @@ def _drain(stream, into: "BoundedOutput", on_limit) -> None:
             stream.close()
 
 
+#: How often a running command is asked whether anyone still wants it. Short
+#: enough that a stop feels immediate, long enough that the check costs nothing.
+STOP_POLL_SECONDS = 1
+
+
 def run_bounded(
     argv: list[str], *, timeout: int, container: str, limit: int,
+    stop=None,
 ) -> dict:
     """Run a container, draining both streams concurrently under a byte budget.
 
@@ -208,20 +215,43 @@ def run_bounded(
     ]
     for thread in threads:
         thread.start()
-    try:
-        proc.wait(timeout=timeout)
-        timed_out = False
-    except subprocess.TimeoutExpired:
+    # 🔴 Polled rather than waited on in one go, so a STOP can reach work that
+    # is already running. Cancelling a turn used to stop the loop and nothing
+    # else: a test suite already going kept a host CPU for the rest of its
+    # timeout — ten minutes of work for a turn nobody was waiting on — which is
+    # the runaway-container problem this runner exists to prevent, arriving
+    # through the one door it had left open.
+    deadline = time.monotonic() + timeout
+    timed_out = False
+    cancelled = False
+    while True:
+        try:
+            proc.wait(timeout=STOP_POLL_SECONDS)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if stop is not None and stop():
+            cancelled = True
+        elif time.monotonic() >= deadline:
+            timed_out = True
+        else:
+            continue
+        # Kill the CONTAINER by name, not the docker client: killing the
+        # client leaves the container running, which is how two of them
+        # survived a test run here and spun host CPUs for a quarter of an hour.
         _kill(container)
         proc.kill()
-        timed_out = True
+        break
     for thread in threads:
         thread.join(timeout=5)
 
     return {
-        "exit_code": None if timed_out else proc.returncode,
+        "exit_code": None if timed_out or cancelled else proc.returncode,
         "stdout": out.text(), "stderr": err.text(),
         "timed_out": timed_out,
+        # Distinct from timed_out on purpose. "Your command ran too long" and
+        # "you stopped this" are different things to tell somebody.
+        "cancelled": cancelled,
         "output_limited": out.truncated or err.truncated,
     }
 
@@ -387,6 +417,7 @@ def run_contained(
     timeout: int = TIMEOUT_SECONDS,
     network: bool = False,
     deps: str | None = None,
+    stop=None,
 ) -> dict:
     """Run `argv` against the checkout at `root`, inside a container.
 
@@ -433,6 +464,7 @@ def run_contained(
     try:
         result = run_bounded(
             docker, timeout=timeout, container=name, limit=MAX_OUTPUT_BYTES,
+            stop=stop,
         )
     except FileNotFoundError as exc:
         raise SandboxError(

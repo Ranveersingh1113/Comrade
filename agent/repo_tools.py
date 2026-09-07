@@ -36,6 +36,7 @@ from google.adk.tools import ToolContext
 from agent.capability import (
     ArgPolicy, CapabilityError, check_command, check_path,
 )
+from agent.effects import run_is_active
 from agent.sandbox import SandboxError, run_contained
 from pipeline.parsers import spotlight
 from shared.db import user_session
@@ -600,9 +601,19 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
         except (KeyError, WorkspaceError) as exc:
             logger.debug("could not resolve the environment: %s", exc)
 
+    # A way for the container to find out nobody is waiting for it any more.
+    # Polled about once a second while the command runs — one indexed lookup —
+    # so stopping a turn reaches work that has ALREADY started rather than
+    # only the step after it.
+    run_id = state.get("agent_run_id")
+    stop = (
+        (lambda: not run_is_active(str(team_id), str(run_id)))
+        if team_id and run_id else None
+    )
+
     try:
         argv = shlex.split(checked)
-        result = run_contained(argv, root=root, deps=deps)
+        result = run_contained(argv, root=root, deps=deps, stop=stop)
     except SandboxError as exc:
         return {"error": str(exc), "environment": environment}
 

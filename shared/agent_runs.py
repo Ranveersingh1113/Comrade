@@ -153,9 +153,20 @@ def finish_run(
 
 
 def pause_for_permission(team_id: str, run_id: str, worker_id: str | None) -> None:
+    """Park a run on a human decision, and let go of the worker lease.
+
+    🔴 The lease used to stay. It answers one question — is the process holding
+    this run still alive — and it is measured in minutes so a dead worker is
+    noticed quickly. A person deciding whether to approve an action takes
+    minutes to days, so recovery found the parked run, called it abandoned and
+    requeued it; three cycles later the turn was `failed: worker lease expired`
+    with the card still sitting there pending. Nobody is holding this run, so
+    it holds no lease, and the backstop becomes the card's own expiry.
+    """
     with team_session(Role.AGENT, team_id) as conn:
         cur = conn.execute(
-            "update public.agent_runs set status='waiting_for_permission' where id=%s"
+            "update public.agent_runs set status='waiting_for_permission',"
+            " worker_id=null, lease_expires_at=null where id=%s"
             " and (%s::text is null or worker_id=%s) and status='running'",
             (run_id, worker_id, worker_id),
         )

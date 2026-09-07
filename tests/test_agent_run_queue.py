@@ -104,6 +104,8 @@ def test_final_expired_lease_fails_instead_of_retrying(seeded):
 def test_cancellation_prevents_claiming_or_more_work(seeded):
     run_id = enqueue_turn(TEAM_A, A1, _thread_id(), "stop")
 
-    assert cancel_run(TEAM_A, run_id)
+    # requester_id is required, not defaulted: ownership is enforced in the
+    # same statement as the write, so there is no fail-open shape to pass.
+    assert cancel_run(TEAM_A, run_id, requester_id=A1)
     assert claim_next_run("worker") is None
     assert get_run(TEAM_A, run_id)["status"] == "cancelled"

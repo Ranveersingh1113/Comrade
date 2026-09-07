@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
-  startTurn, followRun, ACTIVE_RUN_STATUSES, agentErrorText, getThreadRuns,
-  rememberMessage, suppressObservation,
+  startTurn, followRun, cancelRun, ACTIVE_RUN_STATUSES, agentErrorText,
+  getThreadRuns, rememberMessage, suppressObservation,
 } from '../lib/agentApi';
 import type { StreamFrame } from '../lib/agentApi';
 import { activityLabel } from '../lib/toolActivity';
@@ -79,6 +79,11 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
    *  safe: the server recognises it and returns the run already accepted
    *  instead of posting the question a second time. */
   const attemptRef = useRef<{ text: string; id: string } | null>(null);
+  /** The run being watched, and whether this member is the one who asked for
+   *  it. Seeing a teammate's turn is not standing for them, so only its
+   *  requester is offered the stop. */
+  const [activeRun, setActiveRun] = useState<{ id: string; mine: boolean } | null>(null);
+  const [stopping, setStopping] = useState(false);
 
   const attemptId = (text: string) => {
     if (attemptRef.current?.text === text) return attemptRef.current.id;
@@ -128,10 +133,11 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
    *  watch for good. The indicator stopped, no reply appeared, and the member
    *  could not tell a finished turn from an abandoned one, while the run
    *  itself carried on perfectly well, leased and durable, answering nobody. */
-  const follow = useCallback(async (runId: string, fromSeq = -1) => {
+  const follow = useCallback(async (runId: string, mine = true, fromSeq = -1) => {
     followRef.current?.abort();
     const control = new AbortController();
     followRef.current = control;
+    setActiveRun({ id: runId, mine });
     setAiTyping(true);
     let cursor = fromSeq;
     // Bounded. A server that keeps cutting the stream is a thing to report,
@@ -156,11 +162,27 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
     }
     if (control.signal.aborted) return;
     followRef.current = null;
+    setActiveRun(null);
+    setStopping(false);
     setAiTyping(false);
     setPending('');
     setStep('');
     await refresh();
   }, [teamId, handleFrame, refresh]);
+
+  const stop = useCallback(async () => {
+    if (!activeRun || !teamId) return;
+    setStopping(true);
+    try {
+      await cancelRun(teamId, activeRun.id);
+      // Nothing else to do here. The run row changes, and the stream this
+      // room is already following reports the final state on its next poll —
+      // one source of truth for how a turn ended rather than two.
+    } catch (e) {
+      setStopping(false);
+      setSendError(agentErrorText(e));
+    }
+  }, [activeRun, teamId]);
 
   // Dropping the subscription is the ONLY thing leaving a thread does.
   useEffect(() => () => followRef.current?.abort(), [thread.id]);
@@ -178,11 +200,14 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       // kept. A refresh mid-turn used to land on a silent room; it now
       // rejoins the run that is still going.
       const live = runs.find((run) => ACTIVE_RUN_STATUSES.has(run.status ?? ''));
-      if (live) void follow(live.id);
+      if (live) void follow(live.id, live.requester_id === myUserId);
     }).catch(() => {
       // A historical activity read must not break a new live conversation.
     });
-  }, [teamId, thread.id, follow]);
+    // myUserId is a dependency because it decides OWNERSHIP: the same run is
+    // stoppable by one viewer and not another, and this room re-renders under
+    // a different member without remounting.
+  }, [teamId, thread.id, follow, myUserId]);
 
   const refreshConsents = useCallback(async () => {
     if (!teamId) return;
@@ -302,7 +327,7 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       }
       // Accepted. The next send is a new attempt, even with identical text.
       attemptRef.current = null;
-      await follow(accepted.run_id);
+      await follow(accepted.run_id, true);
     } else {
       const { error: err } = await supabase.from('messages').insert({
         team_id: teamId,
@@ -463,7 +488,20 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
             )}
             {timeline.map((entry) => entry.kind === 'consent' ? (
               <div key={entry.item.id} style={{ padding: '0 28px' }}>
-                <ConsentCard item={entry.item} onResolved={refreshConsents} viewerId={myUserId} />
+                <ConsentCard
+                  item={entry.item}
+                  onResolved={() => {
+                    void refreshConsents();
+                    // Approve, edit or reject — all three resume the same
+                    // logical run, and until this the room did not rejoin it.
+                    // The member answered and then watched nothing happen.
+                    if (entry.item.agent_run_id) {
+                      void follow(entry.item.agent_run_id,
+                        entry.item.requesting_member_id === myUserId);
+                    }
+                  }}
+                  viewerId={myUserId}
+                />
               </div>
             ) : (
               <MessageRow
@@ -484,7 +522,9 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
             <AgentActivity steps={activity} />
             {aiTyping && (
               <div
+                data-agent-typing
                 style={{
+                  position: 'relative',
                   display: 'flex',
                   gap: 14,
                   padding: '10px 28px',
@@ -492,6 +532,23 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
                 }}
               >
                 <AiOrb size={36} breathing />
+                {activeRun?.mine && (
+                  <button
+                    type="button"
+                    onClick={() => void stop()}
+                    disabled={stopping}
+                    className="mono"
+                    style={{
+                      position: 'absolute', right: 28,
+                      border: '1px solid var(--border-soft)', borderRadius: 6,
+                      background: 'transparent', color: 'var(--muted)',
+                      fontSize: 10, letterSpacing: '0.08em', padding: '4px 9px',
+                      cursor: stopping ? 'default' : 'pointer',
+                    }}
+                  >
+                    {stopping ? 'STOPPING' : 'STOP'}
+                  </button>
+                )}
                 {pending ? (
                   <div
                     style={{

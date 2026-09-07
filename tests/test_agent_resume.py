@@ -67,7 +67,7 @@ def test_cancelled_run_cannot_begin_another_effect(seeded):
     run_id = enqueue_turn(TEAM_A, A1, _thread_id(), "create the task")
     run = claim_next_run("worker-one")
     assert run is not None and run.id == run_id
-    assert cancel_run(TEAM_A, run.id)
+    assert cancel_run(TEAM_A, run.id, requester_id=A1)
 
     with pytest.raises(RunInactive):
         claim_effect(TEAM_A, run.id, "team_propose_task", {"title": "Review migration"})

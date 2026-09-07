@@ -172,6 +172,8 @@ export type AgentStep = Pick<StreamFrame, 'seq' | 'type' | 'tool' | 'args' | 're
 export interface AgentRun {
   id: string;
   status?: string;
+  /** Who asked for this turn. Only they may stop it. */
+  requester_id?: string | null;
   steps: AgentStep[];
 }
 
@@ -205,6 +207,20 @@ export function startTurn(
     team_id: teamId, text, thread_id: threadId,
     client_request_id: clientRequestId,
   });
+}
+
+/**
+ * Stop a turn.
+ *
+ * There was no way to before this: a member who asked the wrong question, or
+ * watched a turn head somewhere expensive, could only wait it out. The server
+ * requires that the caller be the member who ASKED for the run — seeing a
+ * teammate's turn is not standing for them.
+ */
+export function cancelRun(teamId: string, runId: string) {
+  return request<{ status: string; already_finished: boolean }>(
+    `/agent/runs/${encodeURIComponent(runId)}/cancel`, { team_id: teamId },
+  );
 }
 
 /**

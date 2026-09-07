@@ -73,8 +73,21 @@ def recent_turns(
 
 def steering_messages(
     team_id: str, requester_id: str, thread_id: str, run_id: str, seen: list[str],
-) -> list[tuple[str, str]]:
-    """Participant messages added after a run started and not yet shown to it."""
+) -> list[tuple[str, str | None, str]]:
+    """Participant messages added after a run started and not yet shown to it.
+
+    Returns (message id, sender name or None, body).
+
+    🔴 The name is new. Steering used to arrive as "New participant message",
+    unattributed, so in a room where anyone can redirect the work a teammate's
+    instruction was indistinguishable from the requester's own. The model could
+    not weigh who was asking — and the run's identity and approval ownership
+    stay with the ORIGINAL requester regardless, which is precisely why the
+    difference has to be visible in the text rather than implied by it.
+
+    Attributed on the same rule `recent_turns` uses: a thread with one
+    participant has nobody to tell apart.
+    """
     # `agent_runs` intentionally has no authenticated grant: it contains private
     # prompts and tool results. Read only this run's boundary metadata as the
     # team-scoped worker, then still read message bodies as the requester.
@@ -89,7 +102,12 @@ def steering_messages(
     input_message_id, started_at = run
     with user_session(requester_id) as conn:
         rows = conn.execute(
-            "select m.id, m.body from public.messages m"
+            "select m.id, m.body, p.display_name, t.visibility,"
+            " (select count(*) > 1 from public.thread_participants tp"
+            "  where tp.thread_id = t.id)"
+            " from public.messages m"
+            " join public.threads t on t.id = m.thread_id and t.team_id = m.team_id"
+            " left join public.profiles p on p.id = m.sender_id"
             " where m.team_id=%s and m.thread_id=%s and m.sender_kind='user'"
             " and m.id is distinct from %s::uuid"
             " and m.created_at >= %s"
@@ -97,4 +115,11 @@ def steering_messages(
             " order by m.created_at, m.id",
             (team_id, thread_id, input_message_id, started_at, seen),
         ).fetchall()
-    return [(str(message_id), body) for message_id, body in rows]
+    return [
+        (
+            str(message_id),
+            name if name and (visibility == "team" or shared) else None,
+            body,
+        )
+        for message_id, body, name, visibility, shared in rows
+    ]

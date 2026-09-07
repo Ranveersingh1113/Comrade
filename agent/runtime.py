@@ -20,7 +20,7 @@ from google.genai import types
 from starlette.concurrency import run_in_threadpool
 
 from agent.agent import APP_NAME, app
-from agent.effects import completed_effects
+from agent.effects import completed_effects, run_is_active
 from agent.history import recent_turns
 from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
@@ -72,11 +72,20 @@ def _finish(
     """finish_run with positional arguments — run_in_threadpool forwards no
     keywords, and the usage parameters are keyword-only so a caller cannot
     silently swap the two token counts."""
-    finish_run(
-        team_id, run_id, status,
-        input_tokens=used_input, output_tokens=used_output, worker_id=worker_id,
-        last_error=last_error,
-    )
+    try:
+        finish_run(
+            team_id, run_id, status,
+            input_tokens=used_input, output_tokens=used_output, worker_id=worker_id,
+            last_error=last_error,
+        )
+    except LookupError:
+        # 🔴 The run already left `running` — it was cancelled, or recovery
+        # took it. `finish_run` refuses that on purpose, so a worker's late
+        # "failed" cannot overwrite the answer a member gave. But it RAISED,
+        # and the settlement below never ran: the estimate stayed on the
+        # team's bucket for the rest of the hour, charging them for the turn
+        # they stopped. The status is not ours to write; the money still is.
+        logger.info("run %s already finished elsewhere; settling usage", run_id)
     # Reconcile the estimate the turn reserved against what it actually cost.
     # HERE rather than on the success path, because a turn that failed still
     # paid for the prompt it was handed — and a turn that cost less than its
@@ -311,6 +320,19 @@ async def stream_turn(
                         max_llm_calls=settings.agent_max_llm_calls
                     ),
                 ):
+                    # Between steps is where a stop becomes real. An in-flight
+                    # model call cannot be taken back, but everything after it
+                    # can, and this is the boundary the loop actually passes
+                    # through — before the next tool and before the next call.
+                    if run_id and not await run_in_threadpool(
+                        run_is_active, team_id, run_id
+                    ):
+                        await run_in_threadpool(
+                            _finish, team_id, run_id, "cancelled",
+                            used_input, used_output, worker_id,
+                        )
+                        yield {"type": "cancelled", "run_id": run_id}
+                        return
                     prompt_tokens, generated_tokens = _usage_from_event(event)
                     used_input += prompt_tokens
                     used_output += generated_tokens

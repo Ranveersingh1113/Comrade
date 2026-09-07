@@ -369,10 +369,17 @@ def reject_consent(
         row = conn.execute(
             "update public.consent_queue set status='rejected', resolved_at=now(),"
             " resolution_reason=%s where id=%s and team_id=%s"
-            " and status='pending' returning id",
+            " and status='pending' returning id, agent_run_id",
             (reason, consent_id, team_id),
         ).fetchone()
-    return {"status": "rejected" if row is not None else "not_found"}
+    if row is None:
+        return {"status": "not_found"}
+    # 🔴 This was missing. Approve and edit-and-approve both resumed the
+    # waiting run; reject wrote its reason and stopped, so the run stayed
+    # parked and there was never a next turn to read the reason on. "No" is an
+    # answer, and the model has to be running to receive it.
+    _requeue_permission_run(team_id, str(row[1]) if row[1] else None)
+    return {"status": "rejected"}
 
 
 def edit_and_approve(

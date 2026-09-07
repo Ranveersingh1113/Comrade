@@ -84,14 +84,30 @@ def renew_lease(run_id: str, worker_id: str) -> bool:
         ).fetchone()[0])
 
 
-def cancel_run(team_id: str, run_id: str) -> bool:
-    """Cancellation is terminal, so a worker cannot later claim this run."""
+#: Why a stopped turn stopped. The member reads the RUN ROW, not the
+#: generator, so a cancelled run with no reason reaches them as a blank halt.
+CANCEL_REASON = "stopped by the member who asked for it"
+
+
+def cancel_run(team_id: str, run_id: str, *, requester_id: str | None) -> bool:
+    """Cancellation is terminal, so a worker cannot later claim this run.
+
+    `requester_id` is not optional by accident: ownership is enforced in this
+    one statement rather than by reading the run and then writing it, because
+    a check in a different transaction from the write is a check that can be
+    raced. Pass None only for cancellation with no requester behind it —
+    maintenance, not a person.
+    """
+    owned = "" if requester_id is None else " and requester_id=%s"
+    params: tuple = (run_id,) if requester_id is None else (run_id, requester_id)
     with team_session(Role.AGENT, team_id) as conn:
         cur = conn.execute(
                 "update public.agent_runs set status='cancelled', finished_at=now(),"
-                " lease_expires_at=null where id=%s and status in ('queued','running',"
+                " lease_expires_at=null, worker_id=null,"
+                " last_error=coalesce(last_error, %s)"
+                " where id=%s" + owned + " and status in ('queued','running',"
                 " 'waiting_for_permission','waiting_for_user')",
-                (run_id,),
+                (CANCEL_REASON,) + params,
             )
     return cur.rowcount == 1
 

@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.background import BackgroundTask
 
 from agent import processes
-from agent.run_queue import enqueue_turn, get_run
+from agent.run_queue import cancel_run, enqueue_turn, get_run
 from pipeline.compiler import enqueue_document
 from pipeline.chat import enqueue_remember
 from pipeline.repo_sync import enqueue_sync
@@ -54,7 +54,7 @@ from shared.consent import (
 from shared.db import Role, connect, team_session, user_session
 from shared.agent_runs import get_thread_runs
 from shared.usage import (
-    BudgetExceeded, record_reservation, release_turn, reserve_turn,
+    BudgetExceeded, finalize_usage, record_reservation, release_turn, reserve_turn,
 )
 
 logger = logging.getLogger(__name__)
@@ -393,6 +393,39 @@ async def agent_run_stream(
         _run_frames(team_id, run_id, after_seq=after_seq),
         media_type="application/x-ndjson",
     )
+
+
+@app.post("/agent/runs/{run_id}/cancel")
+def agent_run_cancel(run_id: str, req: TeamScoped, user_id: CurrentUserId) -> dict:
+    """Stop a turn.
+
+    🔴 There was no way to. `cancel_run` sat in the queue module with nothing
+    reaching it, so a member who asked the wrong question, or watched a turn
+    head somewhere expensive, could only wait it out.
+
+    Two checks, and they are different questions. Thread access says the run is
+    yours to SEE — RLS-equivalent, the same check every other run read makes.
+    Requester ownership says it is yours to STOP: a teammate watching your turn
+    must not be able to speak for you and end it. The ownership half is
+    enforced inside the UPDATE rather than read first and written after,
+    because a check in a different transaction from the write can be raced.
+    """
+    require_membership(user_id, req.team_id)
+    run = get_run(req.team_id, run_id)
+    if run is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
+    _resolve_thread(user_id, req.team_id, run["thread_id"])
+    if run["requester_id"] != user_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "only the member who asked for this turn can stop it",
+        )
+    stopped = cancel_run(req.team_id, run_id, requester_id=user_id)
+    if stopped and run["status"] == "queued":
+        # It never reached the model, so it must not count against the hour.
+        # A running turn settles on its own way out, with the real number.
+        finalize_usage(req.team_id, run_id, 0)
+    return {"status": "cancelled", "already_finished": not stopped}
 
 
 @app.get("/threads/{thread_id}/agent-runs")

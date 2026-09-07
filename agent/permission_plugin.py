@@ -48,10 +48,15 @@ class ChokepointPlugin(BasePlugin):
         )
         if not messages:
             return None
-        for message_id, body in messages:
+        for message_id, sender, body in messages:
+            # Named where the thread has more than one voice in it. The name is
+            # NOT authority — the run still belongs to whoever started it, and
+            # an approval it already holds is not transferable — but the model
+            # cannot reason about a redirect without knowing whose it is.
+            who = f"from {spotlight(sender)}" if sender else "from a participant"
             llm_request.contents.append(types.Content(
                 role="user",
-                parts=[types.Part(text=f"New participant message: {spotlight(body)}")],
+                parts=[types.Part(text=f"New message {who}: {spotlight(body)}")],
             ))
             seen.append(message_id)
         state["steering_message_ids"] = seen

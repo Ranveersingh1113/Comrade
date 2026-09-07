@@ -51,7 +51,7 @@ def test_steering_reads_run_metadata_without_granting_users_agent_runs(seeded):
 
     messages = steering_messages(TEAM_A, A1, thread_id, active.id, [])
 
-    assert [body for _, body in messages] == ["also check the migration"]
+    assert [body for _, _, body in messages] == ["also check the migration"]
 
 
 def test_steering_is_injected_before_the_next_model_call(monkeypatch):
@@ -60,7 +60,7 @@ def test_steering_is_injected_before_the_next_model_call(monkeypatch):
 
     monkeypatch.setattr(
         "agent.permission_plugin.steering_messages",
-        lambda *args: [] if args[-1] else [("message-2", "also check the migration")],
+        lambda *args: [] if args[-1] else [("message-2", None, "also check the migration")],
     )
     request = SimpleNamespace(contents=[])
     context = SimpleNamespace(state={
@@ -78,4 +78,74 @@ def test_steering_is_injected_before_the_next_model_call(monkeypatch):
 
     assert context.state["steering_message_ids"] == ["message-2"]
     assert len(request.contents) == 1
-    assert request.contents[0].parts[0].text == "New participant message: also^check^the^migration"
+    assert request.contents[0].parts[0].text == (
+        "New message from a participant: also^check^the^migration"
+    )
+
+
+def test_a_steering_message_says_who_sent_it(seeded):
+    """🔴 It did not. Steering arrived as "New participant message: ...", so in
+    a room where anyone can steer, a teammate redirecting the work was
+    indistinguishable from the member who asked for it. The model could not
+    weigh who was asking, and the run's identity and approval ownership stay
+    with the original requester either way — which is exactly why the
+    difference has to be visible in the text."""
+    from agent.history import steering_messages
+    from tests._seed import A2
+
+    thread_id = _thread_id()
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "start the release check")
+    active = claim_next_run("worker-one")
+    assert active is not None and active.id == run_id
+    enqueue_turn(TEAM_A, A2, thread_id, "use the staging branch")
+
+    messages = steering_messages(TEAM_A, A1, thread_id, active.id, [])
+
+    assert len(messages) == 1
+    _, sender, body = messages[0]
+    assert body == "use the staging branch"
+    assert sender, "a team thread attributes its messages"
+
+
+def test_steering_in_a_private_thread_is_not_attributed(seeded):
+    """The same rule recent_turns already applies: a one-participant thread has
+    nobody to distinguish, and naming them adds nothing the model can use."""
+    from agent.history import steering_messages
+
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        row = conn.execute(
+            "select t.id from public.threads t join public.thread_participants p"
+            " on p.thread_id=t.id where t.team_id=%s and t.visibility='restricted'"
+            " and p.user_id=%s",
+            (TEAM_A, A1),
+        ).fetchone()
+    thread_id = str(row[0])
+    run_id = enqueue_turn(TEAM_A, A1, thread_id, "draft my update")
+    active = claim_next_run("worker-one")
+    assert active is not None and active.id == run_id
+    enqueue_turn(TEAM_A, A1, thread_id, "shorter")
+
+    messages = steering_messages(TEAM_A, A1, thread_id, active.id, [])
+
+    assert [sender for _, sender, _ in messages] == [None]
+
+
+def test_the_injected_text_names_the_sender(monkeypatch):
+    from agent.permission_plugin import ChokepointPlugin
+
+    monkeypatch.setattr(
+        "agent.permission_plugin.steering_messages",
+        lambda *args: [] if args[-1] else [("m-2", "Priya", "use staging")],
+    )
+    request = SimpleNamespace(contents=[])
+    context = SimpleNamespace(state={
+        "agent_run_id": "run-1", "team_id": TEAM_A, "requester_id": A1,
+        "thread_id": "thread-1", "steering_message_ids": [],
+    })
+
+    import asyncio
+    asyncio.run(ChokepointPlugin().before_model_callback(
+        callback_context=context, llm_request=request,
+    ))
+
+    assert request.contents[0].parts[0].text.startswith("New message from Priya:")

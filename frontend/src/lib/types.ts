@@ -187,6 +187,10 @@ export interface Task {
   created_by_kind: 'user' | 'ai';
   created_by_id: string | null;
   confirmed_at: string | null;
+  /** The work thread where this task is being carried out, if there is one.
+   *  A task needs no thread (ordinary human work) and a work thread needs no
+   *  task, so both sides are optional. */
+  thread_id: string | null;
   created_at: string;
   updated_at: string;
 }

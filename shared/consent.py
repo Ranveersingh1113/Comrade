@@ -74,6 +74,16 @@ def _grantable(tool_name: str, thread_id: str | None, args: dict) -> tuple[str, 
     resource = _permission_resource(tool_name, args)
     if not thread_id or risk is None or resource is None:
         raise ConsentError(f"{tool_name} may only be allowed once")
+    # 🔴 CLOSING WORK WAS GRANTABLE. `task_update` is reusable for a thread, and
+    # the grant covered any later update — including status='done'. One "allow
+    # for this thread" and the agent could close a team's work off the back of
+    # its own prose, which is the one task outcome a person has to actually
+    # decide. Marking something finished is not a routine edit.
+    if tool_name == "task_update" and args.get("status") == "done":
+        raise ConsentError(
+            "marking work done is a decision a person makes, and is asked"
+            " every time"
+        )
     return risk, resource
 
 
@@ -129,6 +139,20 @@ def propose_action(
             f"no executor registered for {tool_name} — refusing to queue a"
             " proposal that could never execute"
         )
+    # 🔴 The same reasoning, one step further. `task_update` may only set four
+    # columns — `status` is deliberately not among them, which is what makes
+    # "never auto-close work" true — but the check ran at EXECUTE time. So the
+    # agent could queue a card asking to close work, a member could approve
+    # it, and only then would it fail. Refusing at propose time means the
+    # agent is told immediately and nobody is asked to approve something that
+    # cannot happen.
+    if tool_name == "task_update":
+        bad = set(args) - {"task_id", *_TASK_UPDATE_COLUMNS}
+        if bad:
+            raise ConsentError(
+                f"task_update may only set {_TASK_UPDATE_COLUMNS}, got"
+                f" {sorted(bad)}"
+            )
 
     action_hash = compute_hash(tool_name, team_id, requester_id, args)
     final_tier = resolve_tier(tool_name, tier)
@@ -188,6 +212,11 @@ def _approve_with_thread_grant(
     resource = _permission_resource(tool_name, args)
     risk = _REUSABLE_GRANT_RISK.get(tool_name)
     if not thread_id or resource is None or risk is None:
+        return None
+    # The same rule on the CONSUMING side. A grant that already exists must
+    # not quietly close work either — the check belongs wherever a standing
+    # permission is turned into an action, not only where one is created.
+    if tool_name == "task_update" and args.get("status") == "done":
         return None
     with user_session(requester_id) as conn:
         row = conn.execute(

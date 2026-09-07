@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { daysUntil, firstNameOf, shortDate } from '../lib/format';
 import type { ContributionRow, Milestone } from '../lib/types';
@@ -213,6 +214,27 @@ export function Tasks() {
                         >
                           {p.label}
                         </span>
+                        {/* The work happens somewhere. Before this the board
+                            and the thread were two unconnected accounts of
+                            the same job, with no way to get from one to the
+                            other. */}
+                        {t.thread_id && (
+                          <Link
+                            to={`/t/${teamId}/threads/${t.thread_id}`}
+                            className="mono"
+                            style={{
+                              fontSize: 8.5,
+                              letterSpacing: '0.12em',
+                              color: 'var(--muted)',
+                              textDecoration: 'none',
+                              border: '1px solid var(--border-soft)',
+                              borderRadius: 2,
+                              padding: '2px 6px',
+                            }}
+                          >
+                            OPEN THREAD
+                          </Link>
+                        )}
                         {/* Only the assignee advances — mirrors the DB trigger. */}
                         {(() => {
                           const a = taskAffordance(t, myUserId, firstNameOf(profile.display_name));

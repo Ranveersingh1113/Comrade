@@ -1167,6 +1167,74 @@ deleted; the facts compiled from a deleted document stay in the wiki with
 citations pointing at something that is gone. 🔴 No orphan-upload cleanup, so
 a Storage object whose DB insert failed is never collected.
 
+# Phase E — Engineering workflow
+
+### T22 — Connect tasks, work threads, and optional plans
+
+**Changed:** `supabase/migrations/20260908090000_task_thread_link.sql`,
+`shared/consent.py`, `frontend/src/lib/types.ts`,
+`frontend/src/screens/Tasks.tsx`, `tests/test_task_thread_link.py`,
+`tests/test_task_tools.py`.
+
+**Regression 1 — tasks and work threads were unconnected.** `tasks.status` had
+one vocabulary (proposed/confirmed/in_progress/done) and `threads.work_state`
+had another (planned/active/waiting/review/done), with nothing joining them —
+so a team doing a piece of work in a thread AND tracking it as a task had two
+answers to "is this finished", which disagreed the moment either moved. There
+was no authoritative status; there were two.
+
+**Regression 2 — a leak the link would have created.** `au_tasks_select` was
+`is_team_member(team_id)`: every member saw every task. Linking a task to a
+RESTRICTED thread would have published its title, owner and deadline to people
+who cannot open that thread — exactly the "including counts/previews" the plan
+warns about. Caught while writing the migration, not after.
+
+**Regression 3 — the column restriction on `task_update` ran only at EXECUTE
+time.** The agent could queue a card asking to close work, a member could
+approve it, and only then would it fail — somebody approving something that
+cannot happen. Refused at propose time now, which is the rule `propose_action`
+already applied to a tool with no executor at all.
+
+**Design:** the TASK is the unit of work — it has an owner, a deadline, and a
+human who decides when it is finished — so its status is authoritative and a
+linked thread's `work_state` follows it by trigger. One writer, one truth: two
+columns both claiming to say whether work is finished will disagree, and the
+disagreement surfaces as a board that contradicts the thread it links to.
+
+**Checked rather than assumed, and the answer was better than the plan
+expected.** "Never auto-close work from plan completion or assistant prose" is
+ALREADY TRUE: `task_update`'s permitted columns are title, description,
+deadline and assignee, and `status` is deliberately not among them, so the
+agent has no path to close work at all. Pinned by a test. A second line was
+added at the grant layer for if that list ever grows — marking work done is the
+one task outcome a person has to decide, and one "allow for this thread"
+should not buy it.
+
+**Also:** three existing database guards pushed back while the tests were
+written, and all three were right — a task must START proposed, only the
+ASSIGNEE may move it out of proposed, and a permission grant must be created
+by its requester AND trace back to an executed consent. The tests were
+rewritten to go through the real paths rather than around any of them.
+**Also:** `test_a_task_update_touching_status_or_confirmed_at_is_rejected` went
+red, correctly: it proposed a bad key and waited for the EXECUTOR to refuse.
+Split into two tests for two entry points — the proposal, refused up front, and
+`edit_and_approve`, where a HUMAN injects the bad key into an already-pending
+card and only the executor can catch it.
+
+**Passing:** 12 task-thread tests; full suite below; 210 frontend tests; build ✅.
+
+**Migration/rollback:** additive — a nullable column, two narrowed policies and
+a trigger. Existing tasks have no thread and are unaffected, including their
+team-wide visibility.
+
+**Ceiling:** 🔴 THE BOARD CARD IS NOT BUILT. The plan asks a card to show
+owner, due date, current run, blockers, PR/CI, last activity and plan
+progress; what exists is the link and one affordance to follow it. 🔴 Nothing
+CREATES the link yet — no UI attaches a task to a thread, so the column is
+correct and unreachable from the product. 🔴 No historical migration of
+implicit links, because there were none to migrate: nothing had ever recorded
+one.
+
 ---
 
 ## Standing ceilings

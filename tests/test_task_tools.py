@@ -20,7 +20,9 @@ import pytest
 
 from agent.tools import fetch_task, now, propose_task_update, task_get, task_propose_update
 from shared.config import settings
-from shared.consent import ConsentError, execute_consent, propose_action, resolve_tier
+from shared.consent import (
+    ConsentError, edit_and_approve, execute_consent, propose_action, resolve_tier,
+)
 from tests._seed import A1, A2, B1, B2, TEAM_A, TEAM_B, as_user, count
 
 
@@ -313,31 +315,53 @@ def test_precheck_rejects_a_task_deleted_before_approval(seeded, admin):
     ("status", "confirmed"),
     ("confirmed_at", "2026-01-01T00:00:00Z"),
 ])
-def test_a_task_update_touching_status_or_confirmed_at_is_rejected(
+def test_a_task_update_touching_status_or_confirmed_at_is_rejected_at_proposal(
     seeded, admin, bad_key, bad_value
 ):
-    """task_propose_update's own signature has no status/confirmed_at
-    parameter -- but shared/consent.py must refuse one too, because a human
-    can still edit a pending proposal's args (edit_and_approve). The
-    rejection must be visible (raised), not a silent partial apply: if the
-    executor quietly dropped the bad key and applied the rest, the approved
-    card would show something different from what actually happened.
+    """T22 moved this check EARLIER as well as keeping it.
+
+    It used to run only in the executor, so the agent could queue a card
+    asking to close work, a member could approve it, and only then would it
+    fail — somebody approving something that cannot happen. `propose_action`
+    refuses it now, which is the same rule it already applied to a tool with
+    no executor at all.
     """
     tid = _make_task(admin)
     args = {"task_id": str(tid), "title": "Sneaked in", bad_key: bad_value}
-    result = propose_action(TEAM_A, A1, "task_update", args)
-    _approve(admin, result["consent_id"])
 
     with pytest.raises(ConsentError):
-        execute_consent(TEAM_A, result["consent_id"])
+        propose_action(TEAM_A, A1, "task_update", args)
 
-    # visible, not a silent no-op: the claim rolled back (never reached
-    # 'executed'), and NEITHER field changed -- not even the innocuous title
-    # that rode along with the disallowed key.
-    status, = admin.execute(
-        "select status from public.consent_queue where id=%s", (result["consent_id"],)
-    ).fetchone()
-    assert status == "approved"
+
+@pytest.mark.parametrize("bad_key,bad_value", [
+    ("status", "confirmed"),
+    ("confirmed_at", "2026-01-01T00:00:00Z"),
+])
+def test_a_task_update_edited_to_touch_status_is_still_rejected(
+    seeded, admin, bad_key, bad_value
+):
+    """The entry point the propose-time check cannot cover.
+
+    task_propose_update's own signature has no status/confirmed_at parameter,
+    and proposals carrying one are refused up front — but a HUMAN can still
+    edit a pending proposal's args through edit_and_approve. The executor has
+    to refuse it too, and visibly: if it quietly dropped the bad key and
+    applied the rest, the approved card would show something different from
+    what actually happened.
+    """
+    tid = _make_task(admin)
+    result = propose_action(
+        TEAM_A, A1, "task_update", {"task_id": str(tid), "title": "Sneaked in"},
+    )
+
+    with pytest.raises(ConsentError):
+        edit_and_approve(
+            TEAM_A, result["consent_id"], A1,
+            {"task_id": str(tid), "title": "Sneaked in", bad_key: bad_value},
+        )
+
+    # Visible, not a silent no-op: neither field changed, not even the
+    # innocuous title that rode along with the disallowed key.
     assert _task_row(admin, tid)[0] == "Original title"
 
 

@@ -22,9 +22,15 @@ def _post_group(cur, team_id, sender, body):
         "select id from public.threads where team_id=%s and title='General'",
         (team_id,),
     ).fetchone()[0]
+    # Backdated a minute. Capture deliberately stays CAPTURE_LAG_SECONDS behind
+    # the clock (T16) so a row committed after the watermark snapshot is not
+    # stepped over, which means a message written this instant is not eligible
+    # yet. Still far inside MAX_CAPTURE_AGE, so the age trigger stays out of
+    # these threshold tests.
     return str(cur.execute(
         "insert into public.messages (team_id, thread_id, sender_kind,"
-        " sender_id, body) values (%s,%s,'user',%s,%s) returning id",
+        " sender_id, body, created_at) values (%s,%s,'user',%s,%s,"
+        " now() - interval '1 minute') returning id",
         (team_id, thread_id, sender, body),
     ).fetchone()[0])
 
@@ -147,8 +153,9 @@ def test_fetch_includes_messages_from_any_team_visible_thread(seeded):
             (TEAM_A, A1),
         ).fetchone()[0]
         conn.execute(
-            "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
-            " values (%s,%s,'user',%s,'public thread decision')",
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body, created_at) values (%s,%s,'user',%s,"
+            "'public thread decision', now() - interval '1 minute')",
             (TEAM_A, thread_id, A2),
         )
     finally:
@@ -238,17 +245,20 @@ def test_sweep_enqueues_only_teams_past_threshold(seeded):
     finally:
         conn.close()
 
-    jobs = sweep_chat_compiles()
-    assert len(jobs) == 1
+    sweep_chat_compiles()
 
     conn = _admin()
     try:
         rows = conn.execute(
             "select team_id from public.jobs where job_type='compile_memory'"
-            " and status='pending'"
+            " and status='pending' and team_id = any(%s::uuid[])",
+            ([TEAM_A, TEAM_B],),
         ).fetchall()
     finally:
         conn.close()
+    # Scoped to the seeded teams: the sweep is global, and since T16 any team
+    # with old unswept messages is a candidate — including residue from other
+    # runs in a shared database.
     assert [str(r[0]) for r in rows] == [TEAM_A]
 
 
@@ -266,12 +276,14 @@ def test_sweep_is_idempotent_while_batch_pending(seeded):
 
     first = sweep_chat_compiles()
     second = sweep_chat_compiles()
-    assert len(first) == 1 and first == second  # same job, not a duplicate
+    assert first == second  # same jobs, not duplicates
 
     conn = _admin()
     try:
         n = conn.execute(
             "select count(*) from public.jobs where job_type='compile_memory'"
+            " and team_id=%s",
+            (TEAM_A,),
         ).fetchone()[0]
     finally:
         conn.close()
@@ -286,7 +298,19 @@ def test_sweep_quiet_when_no_new_messages(seeded):
         conn.execute("delete from public.jobs where job_type='compile_memory'")
     finally:
         conn.close()
-    assert sweep_chat_compiles() == []
+
+    sweep_chat_compiles()
+
+    conn = _admin()
+    try:
+        n = conn.execute(
+            "select count(*) from public.jobs where job_type='compile_memory'"
+            " and team_id=%s",
+            (TEAM_A,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert n == 0
 
 
 def test_the_sweep_ignores_a_team_below_the_threshold(seeded):

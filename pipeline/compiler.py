@@ -152,6 +152,21 @@ class _Consolidation(BaseModel):
     decisions: list[Decision]
 
 
+class ExtractionUnavailable(RuntimeError):
+    """The model's answer could not be read.
+
+    🔴 This did not exist, and `extract_candidates` ended
+    `return list(parsed.facts) if parsed else []`. `resp.parsed` is None when
+    the answer could not be parsed AT ALL, so a malformed response was
+    indistinguishable from "I read this and there was nothing in it" — and the
+    caller then wrote its compilation row and advanced the watermark,
+    discarding that stretch of conversation permanently.
+
+    A failure, so the job retries with backoff (T12) and the watermark stays
+    where it was.
+    """
+
+
 def extract_candidates(marked_text: str, kind: str = "document") -> list[Candidate]:
     """Stage 1: extract candidate facts from the (spotlighted) source alone.
 
@@ -170,7 +185,13 @@ def extract_candidates(marked_text: str, kind: str = "document") -> list[Candida
         ),
     )
     parsed = resp.parsed
-    return list(parsed.facts) if parsed else []
+    if parsed is None:
+        # NOT an empty result. `{"facts": []}` parses fine and returns [];
+        # None means the answer was unreadable, which is a thing to retry.
+        raise ExtractionUnavailable(
+            f"the model's {kind} extraction could not be read as JSON"
+        )
+    return list(parsed.facts)
 
 
 # How many facts stage 2 may be shown at once. §20.3.3 / §6.3-8: consolidation
@@ -438,6 +459,7 @@ def apply_compilation(
     sources: list[tuple[str, str] | None],
     trigger: str = "on_demand",
     chat_through=None,
+    chat_through_id=None,
     github_through=None,
 ) -> dict:
     """Write a compilation run: four verbs, bi-temporal supersession, citations,
@@ -453,8 +475,9 @@ def apply_compilation(
 
     comp_id = conn.execute(
         "insert into public.memory_compilations (team_id, trigger, status,"
-        " chat_through, github_through) values (%s,%s,'running',%s,%s) returning id",
-        (team_id, trigger, chat_through, github_through),
+        " chat_through, chat_through_id, github_through)"
+        " values (%s,%s,'running',%s,%s,%s) returning id",
+        (team_id, trigger, chat_through, chat_through_id, github_through),
     ).fetchone()[0]
 
     added = revised = removed = skipped = 0

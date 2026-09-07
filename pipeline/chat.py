@@ -25,13 +25,41 @@ from pipeline.compiler import (
 )
 from pipeline.parsers import spotlight
 from pipeline.wiki import all_active_pages
+import datetime
+
 from pipeline.worker import register
 from shared.db import Role, connect, team_session
 
 MIN_CHAT_MESSAGES = 5  # debounce: don't compile until this many new messages
 
+#: 🔴 Count was the ONLY trigger. A team that made one important decision and
+#: then went quiet never reached five messages, so the decision was never
+#: captured — and "we decided X" is exactly the kind of thing a team says once.
+#: Age is the second trigger, and it is a floor rather than a bypass: a
+#: conversation still being typed should not be compiled a sentence at a time.
+MAX_CAPTURE_AGE = datetime.timedelta(minutes=30)
+
+#: 🔴 A batch was every message past the watermark, unbounded, so a team coming
+#: back to a fortnight of backlog produced one enormous transcript in one
+#: enormous model call. Bounded by records AND by characters, because fifty
+#: pasted stack traces is not the same amount of work as fifty "ok"s.
+MAX_CHAT_BATCH = 60
+MAX_CHAT_BATCH_CHARS = 24_000
+
+#: How far behind now() capture stays.
+#:
+#: 🔴 A row committed AFTER the watermark snapshot but stamped BEFORE it sits
+#: below the watermark forever — a transaction that began earlier and committed
+#: later is invisible to the reader that already moved past its timestamp.
+#: Staying a little behind the clock lets in-flight writes land first.
+CAPTURE_LAG_SECONDS = 5
+
+#: The lowest possible uuid, so a null watermark id still forms a valid keyset
+#: comparison rather than needing a second query shape.
+_MIN_UUID = "00000000-0000-0000-0000-000000000000"
+
 _FETCH_COLUMNS = (
-    "select m.id, p.display_name, m.body, m.created_at"
+    "select m.id, p.display_name, m.body, m.created_at, th.id, th.title"
     " from public.messages m"
     " join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
     " join public.profiles p on p.id = m.sender_id"
@@ -40,17 +68,65 @@ _FETCH_COLUMNS = (
 )
 
 
-def fetch_new_chat_messages(conn, team_id: str, since) -> list[dict]:
-    """Group/human/undeleted messages newer than the watermark, oldest first."""
+def _row(r) -> dict:
+    return {
+        "id": str(r[0]), "sender": r[1], "text": r[2], "created_at": r[3],
+        "thread_id": str(r[4]), "thread_title": r[5],
+    }
+
+
+def fetch_new_chat_messages(
+    conn, team_id: str, since, since_id: str | None = None,
+    limit: int = MAX_CHAT_BATCH,
+) -> list[dict]:
+    """Group/human/undeleted messages past the watermark, oldest first.
+
+    The boundary is the KEYSET `(created_at, id)`, not `created_at` alone:
+    timestamps are not unique — two people answering at once, or one
+    transaction inserting several, share them routinely — and a bare `>` on the
+    timestamp skips whichever of a tied pair the watermark landed on, forever.
+    """
     rows = conn.execute(
-        _FETCH_COLUMNS + " and m.created_at > coalesce(%s, '-infinity'::timestamptz)"
-        " order by m.created_at",
-        (team_id, since),
+        _FETCH_COLUMNS
+        + " and (m.created_at, m.id) >"
+          " (coalesce(%s, '-infinity'::timestamptz), coalesce(%s, %s)::uuid)"
+        + f" and m.created_at <= now() - interval '{CAPTURE_LAG_SECONDS} seconds'"
+        + " order by m.created_at, m.id limit %s",
+        (team_id, since, since_id, _MIN_UUID, limit),
     ).fetchall()
-    return [
-        {"id": str(r[0]), "sender": r[1], "text": r[2], "created_at": r[3]}
-        for r in rows
-    ]
+    return [_row(r) for r in rows]
+
+
+def bound_batch(messages: list[dict], max_chars: int = MAX_CHAT_BATCH_CHARS) -> list[dict]:
+    """Trim a batch to what one model call should carry.
+
+    Never returns empty for a non-empty input: one message longer than the
+    whole budget still has to be compiled, or it blocks the watermark for good.
+    """
+    kept: list[dict] = []
+    used = 0
+    for message in messages:
+        size = len(message["text"] or "")
+        if kept and used + size > max_chars:
+            break
+        kept.append(message)
+        used += size
+    return kept
+
+
+def group_by_thread(messages: list[dict]) -> list[dict]:
+    """Same messages, one conversation at a time.
+
+    🔴 Every team-visible thread was ordered together by time, so two unrelated
+    conversations reached the model as one exchange — and a model asked to
+    extract decisions from that will happily invent the connection between
+    them. Threads appear in the order they first appear, so the batch boundary
+    is unchanged; only the presentation is grouped.
+    """
+    groups: dict[str, list[dict]] = {}
+    for message in messages:
+        groups.setdefault(message.get("thread_id") or "", []).append(message)
+    return [message for group in groups.values() for message in group]
 
 
 def fetch_chat_messages_by_id(conn, team_id: str, message_ids: list[str]) -> list[dict]:
@@ -59,21 +135,29 @@ def fetch_chat_messages_by_id(conn, team_id: str, message_ids: list[str]) -> lis
     if not message_ids:
         return []
     rows = conn.execute(
-        _FETCH_COLUMNS + " and m.id = any(%s::uuid[]) order by m.created_at",
+        _FETCH_COLUMNS + " and m.id = any(%s::uuid[]) order by m.created_at, m.id",
         (team_id, message_ids),
     ).fetchall()
-    return [
-        {"id": str(r[0]), "sender": r[1], "text": r[2], "created_at": r[3]}
-        for r in rows
-    ]
+    return [_row(r) for r in rows]
 
 
 def format_transcript(messages: list[dict]) -> str:
-    """Numbered transcript lines: '[i] Name: text' — the numbering is what
-    extraction's source_index refers back to."""
-    return "\n".join(
-        f"[{i}] {m['sender']}: {m['text']}" for i, m in enumerate(messages)
-    )
+    """Numbered transcript lines: '[i] Name: text'.
+
+    The numbering is what extraction's source_index refers back to, so it stays
+    global and in the order given. A thread header appears whenever the
+    conversation changes, WITHOUT consuming an index — the reader needs to know
+    these are separate conversations; the citation map does not change.
+    """
+    lines: list[str] = []
+    current: str | None = None
+    for i, m in enumerate(messages):
+        thread = m.get("thread_title")
+        if thread and thread != current:
+            current = thread
+            lines.append(f"--- {thread} ---")
+        lines.append(f"[{i}] {m['sender']}: {m['text']}")
+    return "\n".join(lines)
 
 
 def chat_watermark(conn, team_id: str):
@@ -85,23 +169,49 @@ def chat_watermark(conn, team_id: str):
     ).fetchone()[0]
 
 
+def chat_keyset(conn, team_id: str) -> tuple:
+    """The (timestamp, id) the next capture resumes from.
+
+    The id belongs to the row that WAS the boundary, so a tie at that timestamp
+    resumes after it rather than skipping its neighbours.
+    """
+    row = conn.execute(
+        "select chat_through, chat_through_id from public.memory_compilations"
+        " where team_id = %s and chat_through is not null and status = 'done'"
+        " order by chat_through desc, chat_through_id desc nulls last limit 1",
+        (team_id,),
+    ).fetchone()
+    return (row[0], str(row[1]) if row and row[1] else None) if row else (None, None)
+
+
 def enqueue_chat_compile(
     team_id: str, min_messages: int = MIN_CHAT_MESSAGES
 ) -> str | None:
-    """Debounced enqueue: if >= min_messages new group messages exist past the
-    watermark, queue a compile_memory job carrying their ids + new watermark.
-    Returns the job id, or None when below threshold."""
+    """Enqueue a bounded batch when there is enough to say, or it has waited
+    long enough. Returns the job id, or None when there is nothing to do yet."""
     with team_session(Role.PIPELINE, team_id) as conn:
-        since = chat_watermark(conn, team_id)
-        messages = fetch_new_chat_messages(conn, team_id, since)
-    if len(messages) < min_messages:
+        since, since_id = chat_keyset(conn, team_id)
+        messages = fetch_new_chat_messages(conn, team_id, since, since_id)
+    if not messages:
+        return None
+    aged = (
+        datetime.datetime.now(datetime.timezone.utc) - messages[0]["created_at"]
+        >= MAX_CAPTURE_AGE
+    )
+    if len(messages) < min_messages and not aged:
         return None
 
+    batch = bound_batch(messages)
+    last = batch[-1]
     payload = {
-        "message_ids": [m["id"] for m in messages],
-        "through": max(m["created_at"] for m in messages).isoformat(),
+        "message_ids": [m["id"] for m in batch],
+        "through": last["created_at"].isoformat(),
+        "through_id": last["id"],
     }
-    dedupe_key = f"chat:{payload['through']}"
+    # Keyed on the boundary ROW, not the timestamp: two batches can share a
+    # timestamp, and keying on it alone made the second one look like a
+    # duplicate of the first and vanish.
+    dedupe_key = f"chat:{payload['through']}:{last['id']}"
     with team_session(Role.PIPELINE, team_id) as conn:
         row = conn.execute(
             "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
@@ -150,7 +260,8 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
             # that depends on a joined row cannot become an index condition.
             "select t.id from public.teams t"
             " cross join lateral ("
-            "   select count(*) as n from public.messages m"
+            "   select count(*) as n, min(m.created_at) as oldest"
+            "     from public.messages m"
             "   join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
             "    where m.team_id = t.id and th.visibility='team'"
             "      and m.sender_kind='user' and m.deleted_scope is null"
@@ -159,8 +270,11 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
             "              from public.memory_compilations c"
             "             where c.team_id = t.id and c.chat_through is not null"
             "               and c.status='done'), '-infinity'::timestamptz)"
-            " ) s where s.n >= %s",
-            (min_messages,),
+            # The prefilter has to agree with the authoritative check in
+            # enqueue_chat_compile, or the sweep never calls it and the age
+            # rule is unreachable.
+            " ) s where s.n >= %s or s.oldest <= now() - %s::interval",
+            (min_messages, f"{int(MAX_CAPTURE_AGE.total_seconds())} seconds"),
         ).fetchall()
     jobs = []
     for (team_id,) in rows:
@@ -171,12 +285,16 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
 
 
 def compile_messages(
-    team_id: str, messages: list[dict], through, trigger: str = "scheduled"
+    team_id: str, messages: list[dict], through, trigger: str = "scheduled",
+    through_id: str | None = None,
 ) -> dict:
     """Two-stage compile of a chat batch: extract (chat prompt, per-line
     source_index) -> consolidate against the wiki -> apply with per-message
     citations. Always writes the compilation row, so the watermark advances
     even when the batch was pure chitchat (zero candidates)."""
+    # Grouped BEFORE the transcript is numbered, so source_index and the
+    # citation map below refer to the same order the model was shown.
+    messages = group_by_thread(messages)
     transcript = format_transcript(messages)
     marked = spotlight(transcript)
     candidates = extract_candidates(marked, kind="chat") if messages else []
@@ -201,7 +319,7 @@ def compile_messages(
     with team_session(Role.PIPELINE, team_id) as conn:
         return apply_compilation(
             conn, team_id, candidates, decisions, sources,
-            trigger=trigger, chat_through=through,
+            trigger=trigger, chat_through=through, chat_through_id=through_id,
         )
 
 
@@ -220,6 +338,7 @@ def handle_chat_compile_job(team_id: str, payload: dict) -> None:
     compile_messages(
         team_id, messages, payload.get("through"),
         trigger=payload.get("trigger", "scheduled"),
+        through_id=payload.get("through_id"),
     )
 
 

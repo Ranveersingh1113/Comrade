@@ -745,6 +745,80 @@ No load measurement, no two-browser journey, no real Storage read, no
 keyboard or screen-reader pass, no Linux Docker daemon. The code is argued
 for; a lot of it has never been watched working.
 
+# Phase D — Evidence and memory
+
+### T16 — Make capture timely, bounded, and recoverable
+
+**Changed:** `supabase/migrations/20260907160000_capture_watermark.sql`,
+`pipeline/chat.py`, `pipeline/compiler.py`,
+`tests/test_capture_reliability.py`, `tests/test_chat_memory.py`,
+`tests/_seed.py`.
+
+**Regression 1 — the trigger was message COUNT alone.** Five new group
+messages, or nothing. A team that made one important decision and then went
+quiet never reached the threshold, so the decision was never captured — and
+"we decided X" is exactly the kind of thing a team says once. Age is a second
+trigger now, and deliberately a floor rather than a bypass: a conversation
+still being typed should not be compiled a sentence at a time.
+
+**Regression 2 — batches were unbounded.** Every message past the watermark,
+so a team returning to a fortnight of backlog produced one enormous transcript
+in one enormous model call.
+
+**Regression 3 — the watermark was a bare `created_at > since`.** Two messages
+sharing a timestamp meant one was captured and the other skipped FOREVER. The
+same defect T09 fixed in the message list, here in the path that decides what
+a team remembers.
+
+**Regression 4 — a row committed after the watermark snapshot but stamped
+before it** sat below the watermark permanently: a transaction that began
+earlier and committed later is invisible to a reader that has already moved
+past its timestamp.
+
+**Regression 5 — `extract_candidates` ended
+`return list(parsed.facts) if parsed else []`.** `resp.parsed` is None when the
+model's answer could not be read AT ALL, so a malformed response was
+indistinguishable from "I read this and there was nothing in it" — and the
+compile then wrote its row and ADVANCED the watermark, discarding that stretch
+of conversation permanently. That is the worst of the five: a transient model
+glitch silently ate a team's decisions.
+
+**Regression 6 — every team-visible thread was ordered together by time**, so
+two unrelated conversations reached the model as one exchange. A model asked
+to extract decisions from that will happily invent the connection.
+
+**Design:** grouping happens BEFORE numbering, in one place, so `source_index`
+and the citation map refer to the order the model was actually shown. Thread
+headers do not consume an index — the reader needs to know these are separate
+conversations; the citation map must not change. `bound_batch` never returns
+empty for a non-empty input: one message longer than the whole budget still
+has to be compiled, or it blocks the watermark for good. The dedupe key is the
+boundary ROW, not its timestamp, because two batches can share a timestamp and
+keying on it alone made the second look like a duplicate and vanish.
+
+**Also:** the sweep's SQL prefilter had to learn the age rule too. A prefilter
+that disagrees with the authoritative check means the sweep never calls it and
+the new trigger is unreachable.
+**Also:** eight existing chat tests failed on the capture lag. Most needed
+backdating — a message written this instant is not eligible yet — but two were
+GLOBAL assertions (`sweep_chat_compiles() == []`) that cannot hold once any
+team anywhere with old unswept messages is a candidate, which is the entire
+point of the age trigger. Scoped to the teams they seed.
+
+**Passing:** 11 capture-reliability tests; 1106 backend tests, 6 skipped, 0
+failed.
+
+**Migration/rollback:** additive — one nullable column. A null
+`chat_through_id` still forms a valid keyset against the minimum uuid, so
+compilations written before this migration resume correctly.
+
+**Ceiling:** 🔴 the batch budget is CHARACTERS, not tokens. Characters are a
+proxy that is wrong by a factor that depends on the language and the content;
+the plan asks for estimated tokens. 🔴 The lag is five seconds, chosen rather
+than measured against how long a transaction actually stays open here. 🔴 No
+test of a crash between apply and job completion — the plan's last check —
+because that needs a killed worker rather than a raised exception.
+
 ---
 
 ## Standing ceilings

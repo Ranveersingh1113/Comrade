@@ -67,8 +67,13 @@ def seed(cur):
         (TEAM_A,),
     ).fetchone()[0]
     cur.execute(
-        "insert into public.messages (team_id, thread_id, sender_kind, sender_id, body)"
-        " values (%s, %s, 'user', %s, 'hello team A')",
+        # Backdated a minute: capture stays CAPTURE_LAG_SECONDS behind the
+        # clock (T16), so a message written this instant is not eligible yet
+        # and every threshold test would be one short. Still far inside
+        # MAX_CAPTURE_AGE, so the age trigger stays out of those tests.
+        "insert into public.messages (team_id, thread_id, sender_kind, sender_id,"
+        " body, created_at)"
+        " values (%s, %s, 'user', %s, 'hello team A', now() - interval '1 minute')",
         (TEAM_A, general_thread, A2),
     )
     cur.execute(

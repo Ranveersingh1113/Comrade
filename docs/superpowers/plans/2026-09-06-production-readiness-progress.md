@@ -1235,6 +1235,77 @@ correct and unreachable from the product. 🔴 No historical migration of
 implicit links, because there were none to migrate: nothing had ever recorded
 one.
 
+### T23 — Tie PR verification to the actual proposed workspace revision
+
+**Changed:** `agent/repo_tools.py`, `tests/test_verification_binding.py`.
+
+**Regression — verification was an in-memory COUNTER.** `repo_edit`
+incremented `repo_edit_generation`; a `repo_run` that exited 0 stamped the
+current count into `repo_verified_generation`; the proposal gate compared the
+two. It knew that "a run happened after the last edit" and nothing about WHAT
+was checked or WHAT it was checked against. Three ordinary ways through it:
+
+  * **`python -c 'pass'` exits 0**, and so do `true`, `:` and `echo ok`. The
+    old rule rejected only `--help`, `--version` and a bare `make`, so any of
+    them marked the tree verified. The plan names this example by name.
+  * **A command can change the tree.** A formatter, a codegen step, a build
+    that writes files — none of them touch the edit counter, so the check that
+    ran BEFORE the mutation still vouched for the tree AFTER it.
+  * **A restart rebuilds the ADK session**, so a check made in a previous
+    attempt left no record — and the counter, rebuilt with it, could not tell
+    "checked earlier" from "checked never".
+
+**Two errors of mine, caught by the existing tests.** The gate first computed
+its digest from `repo_checkout` — the TEAM's checkout — while every other
+repository tool works in the THREAD's tree, so a genuine check never matched
+its own proposal and the gate refused everything.
+`tests/test_repo_verification_gate.py` says so in its own fixture; I had not
+read it carefully enough. And I had claimed a resumed run with zero edits
+counted as verified. When a turn changes nothing, "go run a test" is the WRONG
+refusal — it sends a member looking for a change that was never made, and the
+empty-diff rule already says something actionable. A checkout can also carry
+work this turn did not do, and demanding the agent verify somebody else's
+uncommitted files is not an improvement. The claim was withdrawn from the test
+and its docstring rather than left standing.
+
+**Design:** the rule is split by question, which is clearer than the single
+predicate it replaced. "Did this turn change anything?" is the edit counter,
+which answers it correctly. "Is what was checked what is being proposed?" is
+the patch digest, which is the part that was missing. Verification binds to
+the PATCH — the diff against HEAD plus the
+untracked files, hashed — taken AFTER the command ran, so a check that mutates
+the tree records the tree it left behind. One mechanism closes all three
+holes, because it answers the question the gate is actually asking: was THIS
+change checked. The record carries the command and the digest, so what
+verified a proposal is now a fact rather than an inference.
+
+**Also:** the command filter is deliberately weak, and says so in the code. No
+static rule can tell a meaningful test from a shallow one; what it can do is
+rule out commands that provably read nothing from the project, which is where
+the old gate let everything through. Inline code (`python -c`, `node -e`)
+counts only when the snippet names something in the project.
+**Also:** a failed digest measurement returns a UNIQUE value, so the gate
+refuses rather than waving a change through on a measurement it could not
+take. Unknowable is not verified.
+**Also:** the counter rule is kept as `_unverified_legacy` with its original
+reasoning intact, rather than deleted — it explains why zero edits is not
+unverified, which the new rule inherits.
+
+**Passing:** 18 verification-binding tests; 47 repo-tool tests; full suite
+below.
+
+**Migration/rollback:** none — no schema change. Turn state gains one key.
+
+**Ceiling:** 🔴 NO PROJECT-DECLARED CHECKS. The plan asks for project-declared
+checks or an explicit reviewed verification policy; this rules out provable
+no-ops and accepts everything else, so `pytest tests/test_nothing.py` still
+verifies a change it never exercised. 🔴 The digest is computed with `git` in
+a subprocess against the checkout — never measured on a large repository, and
+it runs on every proposal. 🔴 No test against a real GitHub PR, and no
+coverage of a background process writing to the tree after a check: the
+mechanism handles it by construction (the digest moves) but nothing exercises
+that path.
+
 ---
 
 ## Standing ceilings

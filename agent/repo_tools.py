@@ -353,6 +353,8 @@ def repo_guide(team_id: str, repo_full_name: str | None) -> str | None:
 #: work verified — which is the entire point.
 _EDIT_GEN = "repo_edit_generation"
 _VERIFIED_GEN = "repo_verified_generation"
+#: {command, digest} — what was checked, and what it was checked against.
+_VERIFICATION = "repo_verification"
 
 NEEDS_VERIFICATION = (
     "Run a relevant test, build, lint, or executable check after your latest"
@@ -360,11 +362,46 @@ NEEDS_VERIFICATION = (
 )
 
 
+#: Commands that exit 0 without observing the project at all.
+#:
+#: 🔴 The old rule rejected only `--help`, `--version` and a bare `make`, so
+#: `python -c 'pass'` marked the tree verified. So did `true`, and `echo ok`.
+#: The plan names that example by name, and the shape is general: a command
+#: that reads nothing from the repository cannot have checked it.
+_NO_OP_COMMANDS = {"true", ":", "echo", "printf", "sleep", "cd", "pwd"}
+#: Inline-source flags. `python -c`, `node -e`, `ruby -e`, `perl -e`: the code
+#: comes from the argument, so the project is not involved unless the snippet
+#: itself names it.
+_INLINE_FLAGS = {"-c", "-e", "--eval", "--command"}
+
+
 def _is_verification_command(argv: list[str]) -> bool:
-    """Reject commands that cannot check the edited tree."""
-    return bool(argv) and not any(
-        arg in {"--help", "-h", "--version", "-V"} for arg in argv[1:]
-    ) and not (argv[0] == "make" and len(argv) == 1)
+    """Could this command have observed the edited tree at all?
+
+    A deliberately weak question, honestly asked. It cannot tell a meaningful
+    test from a shallow one — no static rule can — but it can rule out the
+    commands that provably read nothing, which is where the old gate let
+    anything through.
+    """
+    if not argv:
+        return False
+    if any(arg in {"--help", "-h", "--version", "-V"} for arg in argv[1:]):
+        return False
+    if argv[0] == "make" and len(argv) == 1:
+        return False
+    name = argv[0].rsplit("/", 1)[-1]
+    if name in _NO_OP_COMMANDS:
+        return False
+    for i, arg in enumerate(argv[1:], start=1):
+        if arg in _INLINE_FLAGS:
+            # Inline code counts only if the snippet names something in the
+            # project. `python -c 'pass'` does not; `python -c 'import app'`
+            # might, and the agent can say so.
+            snippet = " ".join(argv[i + 1:]).strip("'\"")
+            return bool(snippet) and any(
+                token in snippet for token in ("import", "require", "open(", "./")
+            )
+    return True
 
 
 def _note_edit(tool_context: ToolContext) -> None:
@@ -375,14 +412,80 @@ def _note_edit(tool_context: ToolContext) -> None:
     state[_EDIT_GEN] = state.get(_EDIT_GEN, 0) + 1
 
 
-def _note_verified(tool_context: ToolContext) -> None:
-    """The tree as it stands right now has been executed successfully."""
+def _patch_digest(root) -> str:
+    """A stable identity for what this working tree is proposing.
+
+    The diff against HEAD plus the untracked files, hashed. That is the thing
+    a pull request actually carries, so binding verification to it answers the
+    question the gate is really asking: was THIS change checked.
+    """
+    import hashlib
+    import subprocess
+
+    if root is None:
+        return ""
+    try:
+        diff = subprocess.run(  # noqa: S603 - fixed argv
+            ["git", "-C", str(root), "diff", "HEAD"],
+            capture_output=True, timeout=30,
+        ).stdout
+        untracked = subprocess.run(  # noqa: S603 - fixed argv
+            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        # Unknowable is not verified. Returning a unique value makes the gate
+        # refuse rather than wave the change through on a failed measurement.
+        return f"unreadable:{id(root)}"
+    return hashlib.sha256(diff + b"\x00" + untracked).hexdigest()
+
+
+def _note_verified(tool_context: ToolContext, argv: list[str], *, root) -> None:
+    """Record that THIS patch passed THIS check.
+
+    🔴 This used to stamp a counter: `verified_generation = edit_generation`.
+    It knew a run had happened after the last edit and nothing about what was
+    checked or what it was checked against — so a command that rewrote the
+    tree while running (a formatter, a codegen step, a build) left its own
+    check vouching for a tree that no longer existed.
+    """
     state = tool_context.state
     state[_VERIFIED_GEN] = state.get(_EDIT_GEN, 0)
+    state[_VERIFICATION] = {
+        "command": " ".join(argv),
+        # Taken AFTER the command ran, so a check that mutates the tree
+        # records the tree it left behind rather than the one it started with.
+        "digest": _patch_digest(root),
+    }
 
 
-def _unverified(tool_context: ToolContext) -> bool:
-    """True when an edit has happened that no successful run has covered.
+def _unverified(tool_context: ToolContext, *, root) -> bool:
+    """True when what is about to be proposed is not what was checked.
+
+    Bound to the PATCH rather than to a count of tool calls. That closes three
+    holes the counter had: a command that changes the tree while checking it,
+    a background process that writes after the check, and a resumed run whose
+    counters both start at zero — which read as "nothing to check" when it
+    meant "never checked".
+    """
+    if tool_context.state.get(_EDIT_GEN, 0) == 0:
+        # This turn changed nothing, so this is not the right refusal. An
+        # empty diff is refused by capture_patch with something a member can
+        # act on; "go run a test" would send them looking for a change that
+        # was never made. A checkout can also carry work this turn did not do,
+        # and demanding the agent verify somebody else's uncommitted files is
+        # not an improvement either.
+        return False
+    record = tool_context.state.get(_VERIFICATION)
+    if not record:
+        # Edited and never checked.
+        return True
+    # Edited, checked — but is the checked thing the proposed thing?
+    return record.get("digest") != _patch_digest(root)
+
+
+def _unverified_legacy(tool_context: ToolContext) -> bool:
+    """The counter rule, kept for its own reasoning.
 
     Zero edits is not unverified: nothing was changed, so there is nothing to
     have run. That case belongs to capture_patch's empty-diff refusal, which
@@ -494,7 +597,16 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
     # Before capture_patch, so the refusal names what to do rather than
     # reporting a diff the member is not going to be shown anyway. After the
     # identity check, so a turn with no repository still says so first.
-    if _unverified(tool_context):
+    # The THREAD's tree, via _root — the same one every other repository tool
+    # works in. Using repo_checkout here compared the digest of a DIFFERENT
+    # tree, so a genuine check never matched its own proposal. Caught by
+    # tests/test_repo_verification_gate.py, which says in its own fixture that
+    # "the agent works in a THREAD's tree, not the team's".
+    try:
+        root = _root(tool_context)
+    except (CapabilityError, WorkspaceError) as exc:
+        return {"error": str(exc)}
+    if _unverified(tool_context, root=root):
         return {"error": NEEDS_VERIFICATION}
 
     try:
@@ -641,7 +753,7 @@ def repo_run(command: str, tool_context: ToolContext) -> dict:
     # question the proposal gate asks.
     if (_is_verification_command(argv) and result.get("exit_code") == 0
             and not result.get("timed_out")):
-        _note_verified(tool_context)
+        _note_verified(tool_context, argv, root=root)
     return result
 
 

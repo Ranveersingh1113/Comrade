@@ -31,6 +31,9 @@ from pipeline.wiki import all_active_pages, annotate
 from pipeline.worker import PermanentJobError, register
 from shared.config import settings
 from shared.db import Role, team_session
+from shared.storage import (
+    MAX_DOCUMENT_BYTES, DocumentTooLarge, download_document,
+)
 
 MODEL_FLASH = "gemini-2.5-flash"
 logger = logging.getLogger(__name__)
@@ -55,6 +58,14 @@ def _pick_model(text: str) -> str:
 def _unmark(s: str) -> str:
     return s.replace(SPACE_MARK, " ")
 
+
+#: Formats the uploader labels `docx` that are not docx.
+#:
+#: 🔴 The browser maps `.doc` to kind 'docx'. A legacy .doc is an OLE compound
+#: file that python-docx cannot read at all, so it uploaded, parsed to nothing,
+#: and came back as "likely scanned or unsupported" — a wrong explanation the
+#: member could do nothing with.
+UNSUPPORTED_EXTENSIONS = (".doc", ".rtf", ".pages", ".odt")
 
 MIN_PARSE_CHARS = 20        # below this the parse is a scan/binary/blank -> fail loudly
 DEFAULT_PAGE_TITLE = "General"  # adds without a usable page_title land here
@@ -758,27 +769,105 @@ def _parse_by_kind(kind: str, content: str) -> str:
     return content  # text / link
 
 
+def _fail_document(team_id: str, document_id: str, reason: str) -> None:
+    """Record why, where the member can see it.
+
+    🔴 `status='failed'` and nothing else. A member could not tell "this is a
+    scanned image" from "this file is too big" from "we cannot read legacy
+    .doc" — three problems with three different answers, behind one blank
+    wall.
+    """
+    with team_session(Role.PIPELINE, team_id) as conn:
+        conn.execute(
+            "update public.documents set status='failed', parse_error=%s"
+            " where id=%s",
+            (reason[:1000], document_id),
+        )
+
+
+def _live_document(team_id: str, document_id: str) -> tuple | None:
+    """The row, if it still exists and has not been deleted."""
+    with team_session(Role.PIPELINE, team_id) as conn:
+        return conn.execute(
+            "select kind, filename, storage_path from public.documents"
+            " where id=%s and deleted_at is null",
+            (document_id,),
+        ).fetchone()
+
+
 def handle_document_job(team_id: str, payload: dict) -> None:
     """Worker handler for 'parse_document' jobs.
 
-    Content source for v1 is inline in the payload (text/whatsapp directly,
-    base64 for pdf/docx). Production will fetch bytes from Supabase Storage by
-    the document's storage_path instead.
+    The payload carries a STORAGE REFERENCE, not the document. It used to
+    carry the whole file — base64 for pdf and docx — through a table
+    `comrade_control` can read, so the cross-team maintenance role could read
+    every team's uploads. The bytes were already in private Storage; the job
+    only ever needed to say which file.
+
+    `content` is still accepted because jobs queued by the previous image
+    carry it, and a release must not strand whatever was in the queue when it
+    started.
     """
     document_id = payload["document_id"]
-    text = _parse_by_kind(payload.get("kind", "text"), payload.get("content", ""))
+
+    # Before fetching anything. A member who deletes a document has said they
+    # do not want it in the system, and "we had already started" is not an
+    # answer to that.
+    row = _live_document(team_id, document_id)
+    if row is None:
+        raise PermanentJobError(
+            f"document {document_id} was deleted before it could be parsed"
+        )
+    kind, filename, storage_path = row
+
+    lowered = (filename or "").lower()
+    if any(lowered.endswith(ext) for ext in UNSUPPORTED_EXTENSIONS):
+        reason = (
+            f"{filename} is a format Comrade cannot read. Save it as .docx or"
+            " .pdf and upload it again."
+        )
+        _fail_document(team_id, document_id, reason)
+        raise PermanentJobError(reason)
+
+    inline = payload.get("content")
+    if inline is not None:
+        raw_text = _parse_by_kind(payload.get("kind", kind or "text"), inline)
+    else:
+        path = payload.get("storage_path") or storage_path
+        if not path:
+            reason = "this document has no stored file to read"
+            _fail_document(team_id, document_id, reason)
+            raise PermanentJobError(reason)
+        try:
+            raw = download_document(path, max_bytes=MAX_DOCUMENT_BYTES)
+        except DocumentTooLarge as exc:
+            _fail_document(team_id, document_id, str(exc))
+            raise PermanentJobError(str(exc)) from exc
+        encoded = (
+            base64.b64encode(raw).decode("ascii")
+            if (kind or "text") in ("pdf", "docx")
+            else raw.decode("utf-8", errors="replace")
+        )
+        raw_text = _parse_by_kind(kind or "text", encoded)
+
+    text = raw_text
     if len(text.strip()) < MIN_PARSE_CHARS:
         # Scanned PDFs and unknown binaries parse to (near-)empty text. Mark the
         # document failed instead of compiling nothing silently; the router
         # slice will add multimodal fallback here.
-        with team_session(Role.PIPELINE, team_id) as conn:
-            conn.execute(
-                "update public.documents set status='failed' where id=%s",
-                (document_id,),
-            )
+        reason = (
+            f"parsed to {len(text.strip())} characters — likely a scan or an"
+            " unsupported format"
+        )
+        _fail_document(team_id, document_id, reason)
+        raise PermanentJobError(f"document {document_id} {reason}")
+
+    # And again before the apply. Deletion during a parse is the interesting
+    # case: the fetch succeeded, and the member has since said they do not
+    # want this in the system.
+    if _live_document(team_id, document_id) is None:
         raise PermanentJobError(
-            f"document {document_id} parsed to {len(text.strip())} chars"
-            " - likely scanned or unsupported; compile skipped"
+            f"document {document_id} was deleted while it was being parsed"
         )
     compile_document(team_id, document_id, spotlight(text))
     with team_session(Role.PIPELINE, team_id) as conn:
@@ -793,9 +882,26 @@ def handle_document_job(team_id: str, payload: dict) -> None:
         )
 
 
-def enqueue_document(team_id: str, document_id: str, kind: str, content: str) -> str:
-    """Queue a document for compilation. Returns the job id."""
-    payload = {"document_id": document_id, "kind": kind, "content": content}
+def enqueue_document(
+    team_id: str, document_id: str, kind: str, content: str | None = None,
+    *, storage_path: str | None = None, content_sha256: str | None = None,
+) -> str:
+    """Queue a document for compilation. Returns the job id.
+
+    🔴 `content` used to be required and carried the WHOLE DOCUMENT into
+    `jobs.payload` — a table `comrade_control` can read. Pass `storage_path`
+    instead: the worker fetches the bytes under its own permission when it is
+    ready to parse them. `content_sha256` records which bytes were meant, so a
+    file replaced at the same path between queueing and running is detectable
+    rather than silently parsed.
+    """
+    payload: dict = {"document_id": document_id, "kind": kind}
+    if storage_path:
+        payload["storage_path"] = storage_path
+        if content_sha256:
+            payload["content_sha256"] = content_sha256
+    elif content is not None:
+        payload["content"] = content
     dedupe_key = f"document:{document_id}"
     with team_session(Role.PIPELINE, team_id) as conn:
         document = conn.execute(

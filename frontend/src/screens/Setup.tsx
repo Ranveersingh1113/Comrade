@@ -48,7 +48,7 @@ export function Setup() {
         .single();
       if (insErr || !row) throw new Error(insErr?.message ?? 'insert failed');
       try {
-        await ingestDocument((row as DocumentRow).id, teamId, file);
+        await ingestDocument((row as DocumentRow).id, teamId);
         setUploadNote(`${file.name} uploaded — seeding the wiki.`);
       } catch (e) {
         setUploadNote(

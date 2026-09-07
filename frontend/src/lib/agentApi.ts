@@ -129,44 +129,31 @@ export function editAndApproveConsent(
 
 /**
  * Kick off parsing for an already-inserted `documents` row.
- * Contract: team_id is a QUERY parameter, the file is multipart `file`.
- * Insert the documents row under RLS first, then call this.
+ *
+ * 🔴 This used to POST THE FILE A SECOND TIME. The browser uploaded to private
+ * Storage, then sent the same bytes to the API, which put them into the job
+ * payload — and `comrade_control`, the cross-team maintenance role, can read
+ * `jobs.payload`. Every document any team uploaded travelled through a table
+ * that role could read, for no reason: the file was already in Storage.
+ *
+ * The row names its own `storage_path`, so the request carries nothing but the
+ * id. The worker fetches the bytes under its own permission when it is ready.
  */
-export async function ingestDocument(
+export function ingestDocument(
   documentId: string,
   teamId: string,
-  file: File,
 ): Promise<{ job_id: string }> {
-  const form = new FormData();
-  form.append('file', file);
-  const res = await fetch(
-    `${BASE}/documents/${documentId}/ingest?team_id=${encodeURIComponent(teamId)}`,
-    {
-      method: 'POST',
-      headers: { Authorization: await authHeader() }, // no Content-Type: the browser sets the boundary
-      body: form,
-    },
+  return request<{ job_id: string }>(
+    `/documents/${encodeURIComponent(documentId)}/ingest?team_id=${encodeURIComponent(teamId)}`,
   );
-  if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const j = (await res.json()) as { detail?: string };
-      if (j.detail) detail = j.detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new AgentApiError(res.status, detail);
-  }
-  return (await res.json()) as { job_id: string };
 }
 
 /**
- * Parse an already-uploaded document again.
+ * Parse an already-uploaded document again, from what Storage is holding.
  *
- * 🔴 The only retry was `/ingest`, which takes the bytes as multipart — so a
- * member whose ingestion failed had to find the file and upload it a second
- * time, and after a reload the browser no longer had it. This reads back what
- * is already stored.
+ * Same shape as the first parse now: a reference, never the bytes. Kept as its
+ * own name because "retry this" and "start this" are different intents to the
+ * member, even where the request is identical.
  */
 export function reingestDocument(documentId: string, teamId: string) {
   return request<{ job_id: string }>(

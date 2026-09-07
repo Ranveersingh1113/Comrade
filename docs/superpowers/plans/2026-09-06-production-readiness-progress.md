@@ -1093,6 +1093,80 @@ history, memory, files and output, and nothing counts them. 🔴 `memory_search`
 is unchanged — it was already FTS-backed and bounded, but the "retrieve
 broadly, rerank cheaply" half of the item is not built.
 
+### T21 — Minimize ingestion data and align deletion/retention behavior
+
+**Changed:** `supabase/migrations/20260907220000_document_parse_error.sql`,
+`shared/storage.py` (new), `pipeline/compiler.py`, `server/app.py`,
+`frontend/src/lib/agentApi.ts`, `frontend/src/screens/Documents.tsx`,
+`frontend/src/screens/Setup.tsx`, `tests/test_ingestion_minimisation.py`,
+`tests/test_document_reingest.py`.
+
+**Regression 1 — the queue carried every team's documents past a role that
+could read them.** `enqueue_document` put the WHOLE DOCUMENT in
+`jobs.payload` — base64 for pdf and docx — and `comrade_control` holds
+`select (… payload …)` on that table. That role is the cross-team maintenance
+plane: it claims jobs, sweeps queues, reaps leases. It could read the contents
+of every document every team had ever uploaded. The browser was uploading the
+file TWICE, once to private Storage and once to the API, so the exposure
+bought nothing at all. `handle_document_job`'s own docstring had the fix
+queued: "Production will fetch bytes from Supabase Storage by the document's
+storage_path instead."
+
+**Regression 2 — nothing rechecked deletion.** A member could delete a
+document and its contents would still be fetched, parsed and compiled into the
+wiki afterwards. Checked before the fetch AND again before the apply.
+
+**Regression 3 — no size limit anywhere.** A parser allocating a gigabyte is
+the worker dying and every other team's jobs waiting behind the restart — one
+team's upload becoming everybody's outage.
+
+**Regression 4 — `.doc` was mapped to kind `docx`.** A legacy .doc is an OLE
+compound file python-docx cannot read, so it uploaded, parsed to nothing, and
+came back as "likely scanned or unsupported": a wrong explanation the member
+could do nothing with.
+
+**Regression 5 — `status='failed'` was the whole story.** A member could not
+tell "this is a scan" from "this is too big" from "we cannot read this format"
+— three problems with three different answers behind one blank wall.
+
+**Design:** the download is STREAMED and counted rather than read whole and
+measured afterwards, because measuring afterwards means the allocation already
+happened, which is what the cap exists to prevent. `content_sha256` records
+which bytes the job meant, so a file replaced at the same path between
+queueing and running is detectable rather than silently parsed. Inline
+`content` is still accepted: jobs queued by the previous image carry it, and a
+release must not strand whatever was in the queue when it started.
+
+**Also:** the API had its own copy of the storage read, added with `/reingest`
+in T15. One copy now, in `shared/`, because the worker is the caller that
+matters.
+**Also:** two T15 tests asserted that `/reingest` DOWNLOADS the file. That was
+right when it was written and is wrong now — the fetch moved to the worker —
+so both were rewritten against the new contract with the reason in their
+docstrings rather than quietly deleted. The binary-encoding assertion moved
+with the behaviour it was guarding.
+
+**My own mistakes, recorded:** a patch script asserted its way out BEFORE its
+single `write_text`, so three edits reported as applied were silently
+discarded; the tests still failing on the old behaviour is what caught it. And
+the heredoc backslash-collapsing trap bit again on a `\x00\x01` literal.
+
+**Passing:** 10 ingestion tests, 5 reingest tests; 1156 backend tests, 6
+skipped, 0 failed; 210 frontend tests; build ✅.
+
+**Migration/rollback:** additive — one nullable column. Old jobs with inline
+`content` still run, so a rollback in either direction is safe.
+
+**Ceiling:** 🔴 `content_sha256` is RECORDED AND NEVER CHECKED. The worker
+does not compare it against what it fetched, so a file replaced at the same
+path is detectable in principle and undetected in practice. 🔴 No retention
+policy: the plan asks for retention over raw payloads, private steps, logs,
+artifacts and exports, and none of that is built — only the document payload
+shrank. 🔴 Nothing defines which derived FACTS are retracted when a source is
+deleted; the facts compiled from a deleted document stay in the wiki with
+citations pointing at something that is gone. 🔴 No orphan-upload cleanup, so
+a Storage object whose DB insert failed is never collected.
+
 ---
 
 ## Standing ceilings

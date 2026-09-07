@@ -46,18 +46,19 @@ def _document(*, storage_path: str | None = "team/report.md", kind: str = "text"
 def test_a_failed_document_can_be_retried_from_what_is_already_stored(
     seeded, monkeypatch,
 ):
+    """T21 moved the FETCH to the worker.
+
+    This endpoint used to download the file and put the bytes into the job
+    payload — a table `comrade_control` can read — so it queues a REFERENCE
+    now and the worker reads the file under its own permission when it is
+    ready to parse it.
+    """
     document_id = _document()
-    fetched: list[str] = []
-
-    def _fake_download(path: str) -> bytes:
-        fetched.append(path)
-        return b"# Report\n\nThe deadline is Friday."
-
-    monkeypatch.setattr("server.app.download_document", _fake_download)
-    queued: list[tuple] = []
+    queued: list[dict] = []
     monkeypatch.setattr(
         "server.app.enqueue_document",
-        lambda *args: queued.append(args) or "job-1",
+        lambda *args, **kwargs: queued.append({"args": args, "kwargs": kwargs})
+        or "job-1",
     )
 
     resp = _client(A1).post(
@@ -66,8 +67,8 @@ def test_a_failed_document_can_be_retried_from_what_is_already_stored(
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["job_id"] == "job-1"
-    assert fetched == ["team/report.md"], "it must read the file already stored"
-    assert queued and queued[0][1] == document_id
+    assert queued and queued[0]["args"][1] == document_id
+    assert queued[0]["kwargs"]["storage_path"] == "team/report.md"
 
 
 def test_a_document_with_nothing_stored_says_so_instead_of_failing_oddly(seeded):
@@ -101,21 +102,35 @@ def test_a_missing_document_is_a_404(seeded):
     assert resp.status_code == 404, resp.text
 
 
-def test_binary_documents_are_carried_the_same_way_the_upload_path_carries_them(
+def test_binary_documents_are_carried_the_same_way_on_both_paths(
     seeded, monkeypatch,
 ):
     """A pdf that arrives base64 on one path and raw on the other is a parser
-    bug waiting for whichever path is used second."""
-    document_id = _document(kind="pdf")
-    monkeypatch.setattr("server.app.download_document", lambda _p: b"\x00\x01binary")
-    queued: list[tuple] = []
-    monkeypatch.setattr(
-        "server.app.enqueue_document",
-        lambda *args: queued.append(args) or "job-1",
-    )
+    bug waiting for whichever path is used second.
 
-    _client(A1).post(f"/documents/{document_id}/reingest", json={"team_id": TEAM_A})
-
+    The encoding moved with the fetch. T21 made the WORKER read stored bytes
+    and turn them into what the parser expects, so that is where this belongs
+    now — the endpoint no longer touches the file at all.
+    """
     import base64
 
-    assert queued[0][3] == base64.b64encode(b"\x00\x01binary").decode("ascii")
+    from pipeline import compiler
+
+    document_id = _document(kind="pdf")
+    monkeypatch.setattr(
+        compiler, "download_document", lambda *a, **k: b"\x00\x01binary",
+    )
+    seen: list[str] = []
+    monkeypatch.setattr(
+        compiler, "_parse_by_kind",
+        lambda kind, content: seen.append(content) or ("x" * 200),
+    )
+    monkeypatch.setattr(compiler, "compile_document", lambda *a, **k: {"added": 0})
+
+    compiler.handle_document_job(
+        TEAM_A,
+        {"document_id": document_id, "kind": "pdf",
+         "storage_path": "team/report.md"},
+    )
+
+    assert seen == [base64.b64encode(b"\x00\x01binary").decode("ascii")]

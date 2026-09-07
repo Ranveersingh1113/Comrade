@@ -78,7 +78,7 @@ export function Documents() {
         .single();
       if (insErr || !row) throw new Error(insErr?.message ?? 'documents insert failed');
       try {
-        await ingestDocument((row as DocumentRow).id, teamId, file);
+        await ingestDocument((row as DocumentRow).id, teamId);
         setNotice(`${file.name} uploaded — compiling into the wiki.`);
       } catch (e) {
         // The row and the stored file exist either way; only parsing failed.

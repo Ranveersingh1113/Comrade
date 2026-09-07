@@ -7,6 +7,7 @@ Identity always comes from the verified Supabase JWT (see server/auth.py); the
 model never receives team_id / requester_id as tool arguments.
 """
 import base64
+import hashlib
 import json
 from pathlib import Path
 import logging
@@ -960,7 +961,7 @@ def document_ingest(
     document_id: str,
     team_id: str,
     user_id: CurrentUserId,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
 ) -> dict:
     """Queue an already-inserted `documents` row for parsing + compilation.
 
@@ -973,14 +974,42 @@ def document_ingest(
     require_membership(user_id, team_id)
     with user_session(user_id) as conn:
         row = conn.execute(
-            "select kind from public.documents"
+            "select kind, storage_path from public.documents"
             " where id=%s and team_id=%s and deleted_at is null",
             (document_id, team_id),
         ).fetchone()
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
-    kind = row[0]
+    kind, storage_path = row
 
+    # 🔴 The bytes used to go into the job payload — base64 for pdf and docx —
+    # and `comrade_control` can read `jobs.payload`. The cross-team maintenance
+    # role could read every document every team had uploaded, because the queue
+    # was carrying them past it. The file is already in private Storage; the
+    # job says WHICH file and the worker fetches it under its own permission.
+    if storage_path:
+        digest = None
+        if file is not None:
+            # Identity only. The bytes are dropped here; what survives is a
+            # hash the worker can use to notice the file changed underneath it.
+            digest = hashlib.sha256(file.file.read()).hexdigest()
+        try:
+            job_id = enqueue_document(
+                team_id, document_id, kind,
+                storage_path=storage_path, content_sha256=digest,
+            )
+        except LookupError as exc:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        return {"job_id": job_id}
+
+    # No stored file: older rows, and anything uploaded straight to the API.
+    # Still inline, still the old shape, and the only path that keeps a
+    # document in the queue.
+    if file is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "this document has no stored file — upload it again",
+        )
     raw = file.file.read()
     if kind in _BINARY_KINDS:
         content = base64.b64encode(raw).decode("ascii")
@@ -992,33 +1021,6 @@ def document_ingest(
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return {"job_id": job_id}
-
-
-#: Where uploaded documents live. The browser writes here under RLS; this is
-#: the same bucket read back so a retry does not ask for the file again.
-DOCUMENT_BUCKET = "documents"
-
-
-def download_document(storage_path: str) -> bytes:
-    """Read a stored document back with the service key.
-
-    Separated so the retry endpoint can be tested without Storage: the network
-    call is the one part of this that a test has no business making.
-    """
-    url = (
-        f"{settings.supabase_url.rstrip('/')}/storage/v1/object/"
-        f"{DOCUMENT_BUCKET}/{storage_path.lstrip('/')}"
-    )
-    response = httpx.get(
-        url,
-        headers={
-            "Authorization": f"Bearer {settings.supabase_secret_key}",
-            "apikey": settings.supabase_secret_key,
-        },
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.content
 
 
 @app.post("/documents/{document_id}/reingest")
@@ -1051,24 +1053,13 @@ def document_reingest(
             "this document has no stored file to read — upload it again",
         )
 
+    # By REFERENCE, like the first parse. The endpoint no longer reads the
+    # file at all: the worker fetches it when it is ready, under its own
+    # permission, and the queue never carries a team's document.
     try:
-        raw = download_document(storage_path)
-    except httpx.HTTPError as exc:
-        logger.warning("could not read %s back from storage: %s", storage_path, exc)
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            "the stored file could not be read back just now — try again shortly",
-        ) from exc
-
-    # Encoded exactly as the upload path encodes it. A pdf that arrives base64
-    # on one path and raw on the other is a parser bug waiting for whichever
-    # path is used second.
-    content = (
-        base64.b64encode(raw).decode("ascii") if kind in _BINARY_KINDS
-        else raw.decode("utf-8", errors="replace")
-    )
-    try:
-        job_id = enqueue_document(req.team_id, document_id, kind, content)
+        job_id = enqueue_document(
+            req.team_id, document_id, kind, storage_path=storage_path,
+        )
     except LookupError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return {"job_id": job_id}

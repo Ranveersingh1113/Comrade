@@ -25,7 +25,10 @@ type RoomLayout = 'classic' | 'split' | 'board';
 export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread; allowTeamMessages?: boolean }) {
   const narrow = useIsNarrow();
   const { team, myUserId, profileOf } = useTeam();
-  const { messages, compilationsByMessage, error, refresh } = useMessages(thread.id);
+  const {
+    messages, compilationsByMessage, error, refresh,
+    hasOlder, loadingOlder, loadOlder,
+  } = useMessages(thread.id);
   const [consents, setConsents] = useState<ConsentItem[]>([]);
   const [consentError, setConsentError] = useState<string | null>(null);
   const taskState = useTasks();
@@ -119,10 +122,48 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       .then(({ data }) => setDocs((data as DocumentRow[] | null) ?? []));
   }, [teamId]);
 
+  // 🔴 This used to force the view to the bottom on EVERY change, which fights
+  // anyone reading history: scroll up, a message arrives, and you are yanked
+  // back down mid-sentence. Follow only when already near the bottom, and
+  // offer a way back rather than deciding for them.
+  const NEAR_BOTTOM_PX = 120;
+  const [pinned, setPinned] = useState(true);
+  const [unread, setUnread] = useState(0);
+  const lastCount = useRef(0);
+
+  const onScroll = useCallback(() => {
+    const el = chatRef.current;
+    if (!el) return;
+    const atBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    setPinned(atBottom);
+    if (atBottom) setUnread(0);
+    // Prepending older history while the view sits at the top would otherwise
+    // load page after page in one gesture.
+    if (el.scrollTop < 200 && hasOlder && !loadingOlder) {
+      const before = el.scrollHeight;
+      void loadOlder().then(() => {
+        // Keep the reader where they were. Prepending grows the document
+        // upward, so without this correction the content jumps by exactly the
+        // height of what was just added.
+        const after = chatRef.current;
+        if (after) after.scrollTop += after.scrollHeight - before;
+      });
+    }
+  }, [hasOlder, loadingOlder, loadOlder]);
+
   useEffect(() => {
     const el = chatRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, consents.length, aiTyping]);
+    if (!el) return;
+    const grew = messages.length > lastCount.current;
+    lastCount.current = messages.length;
+    if (pinned) {
+      el.scrollTop = el.scrollHeight;
+      setUnread(0);
+    } else if (grew) {
+      setUnread((n) => n + 1);
+    }
+  }, [messages.length, consents.length, aiTyping, pinned]);
 
   const send = async () => {
     const text = draft.trim();
@@ -329,6 +370,7 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
               conversation at any window size. */}
           <div
             ref={chatRef}
+            onScroll={onScroll}
             style={{
               flex: 1, overflowY: 'auto', padding: '20px 0 8px',
               width: '100%', maxWidth: 1040, margin: '0 auto',
@@ -452,6 +494,23 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
                 composer: a preview is a thing you go and look at, and it
                 belongs beside the place you type rather than buried in
                 the transcript where it scrolls away. */}
+            {unread > 0 && !pinned && (
+              <button
+                className="btn-ghost"
+                onClick={() => {
+                  const el = chatRef.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                  setPinned(true);
+                  setUnread(0);
+                }}
+                style={{
+                  alignSelf: 'center', marginBottom: 6, fontSize: 11,
+                  padding: '3px 12px',
+                }}
+              >
+                {unread} NEW {unread === 1 ? 'MESSAGE' : 'MESSAGES'} ↓
+              </button>
+            )}
             <PreviewBar teamId={teamId} threadId={thread.id} />
             <div className="composer">
               {allowTeamMessages && <ComposerMode userId={myUserId} threadId={thread.id} defaultMode="team" onChange={setComposerMode} />}

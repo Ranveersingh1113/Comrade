@@ -168,7 +168,7 @@ undercount read as under budget.
 **Ceiling:** 🔴 no fork-bomb / disk-fill / quota-contention integration run on a
 Linux daemon; the bounds are unit-verified plus the existing Docker lanes.
 
-## T08 — Reproducible dependency environments · pending commit
+## T08 — Reproducible dependency environments · `d77faca`
 
 **Changed:** `pipeline/repo_deps.py`, `agent/processes.py`,
 `agent/repo_tools.py`, `tests/test_repo_deps.py`,
@@ -203,6 +203,52 @@ once, which is the intended effect.
 **Ceiling:** 🔴 no frozen-reinstall reproducibility run and no src-layout
 edited-code check on a real daemon; recipe selection and key composition are
 unit-verified only.
+
+---
+
+## Phase B exit gate
+
+`uv run pytest -q` → **1018 passed, 6 skipped, 0 failed** (exit 0).
+
+Against the T01 baseline of 981 passed / 6 failed: every baseline failure closed
+and 37 tests added. Frontend build ✅, lint ✅, 169 tests ✅.
+
+The gate proves the suite, not the deployment. Everything in **Standing
+ceilings** below is still unproven — all of it needs a Linux daemon or a real
+browser against two TLS hostnames.
+
+---
+
+# Phase C — Conversation and agent reliability
+
+## T09 — Paginate without hiding new conversation · pending commit
+
+**Changed:** `frontend/src/hooks/useMessages.ts`, `GroupRoom.tsx`,
+`frontend/tests/component/useMessages.test.tsx`.
+**Regression:** 🔴 the query was `.order('created_at').limit(500)` — ASCENDING.
+A thread past five hundred messages fetched the OLDEST five hundred, so **the
+newest message never appeared**. A busy thread silently stopped showing new
+conversation, which is the worst way for a chat product to fail: it looks like
+nobody is talking rather than like something is broken.
+**Design:** newest page fetched descending, displayed chronologically; keyset
+cursors on `(created_at, id)` for older pages; pages merged by id.
+**Also:** the id is in the cursor and the sort because timestamps are **not**
+unique — bulk inserts share them, and a cursor on `created_at` alone drops or
+repeats those rows. Tested with 600 identical timestamps.
+**Also:** compilations were fetched for the WHOLE TEAM on every refresh to
+render a handful of cards; now only for loaded message ids, with errors
+surfaced instead of swallowed.
+**Also:** a request token discards a superseded response — switching threads
+quickly used to land one conversation's history under another's title.
+**Also:** the view force-scrolled to the bottom on every change, yanking anyone
+reading history back down mid-sentence. It now follows only when already near
+the bottom, anchors scroll position when prepending older pages, and offers an
+"N new messages" affordance instead of deciding for the reader.
+**Passing:** 6 new hook tests; 175 frontend tests; build ✅.
+**Migration/rollback:** none — reuses the existing `(thread_id, created_at, id)`
+index.
+**Ceiling:** 🔴 no real-Supabase integration run for pagination, and no
+browser-level scroll-anchor check.
 
 ---
 

@@ -313,32 +313,51 @@ def agent_turn(req: TurnRequest, user_id: CurrentUserId) -> TurnResponse:
 
 #: The run is over and will produce nothing more.
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
-#: The run is parked on a human decision. Emphatically NOT finished -- these
+#: The run is parked on a human decision. Emphatically NOT finished — these
 #: arrived as `done` too, so a run waiting on a consent card stopped the typing
 #: indicator and read to the member as a turn that silently failed, while the
 #: card asking for the very permission that would continue it sat on screen.
 WAITING_STATUSES = {"waiting_for_permission", "waiting_for_user"}
+
+#: 🔴 The poll was a flat 200ms. A run waiting on a slow model call cost the
+#: database exactly as much as one producing a step every tick, and every
+#: viewer paid it independently. It now backs off while nothing happens and
+#: snaps back the moment something does.
+POLL_START_SECONDS = 0.2
+POLL_MAX_SECONDS = 2.0
+POLL_GROWTH = 1.5
+#: Backing off must not make a dead connection look like a quiet one. After
+#: this much silence something goes down the wire so both ends can tell.
+#: Measured in the wait the loop ASKED for rather than wall clock, so the
+#: heartbeat keeps its meaning when the loop is driven by a test.
+HEARTBEAT_SECONDS = 15.0
 
 
 async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
     """Replay durable steps from a cursor until the run stops producing them.
 
     `after_seq` is the highest sequence the browser has already rendered.
-    Replaying from zero is right after a refresh -- nothing is on screen -- and
+    Replaying from zero is right after a refresh — nothing is on screen — and
     wrong after a dropped connection, where it duplicates every tool card the
-    member is already looking at.
+    member is already looking at. It is also what is asked of the DATABASE:
+    the read starts after the cursor rather than fetching the whole run and
+    filtering afterwards.
     """
     seen = after_seq + 1
     status: str | None = None
+    wait = POLL_START_SECONDS
+    idle = 0.0
     while True:
-        run = await run_in_threadpool(get_run, team_id, run_id)
+        run = await run_in_threadpool(get_run, team_id, run_id, seen - 1)
         if run is None:
             yield json.dumps({"type": "error", "detail": "run not found"}) + "\n"
             return
+        sent = False
         if status is None:
             # Opened with the REAL status, not an assumed "queued": a reattach
             # needs to know whether it is resuming live work or reading history.
             status = run["status"]
+            sent = True
             yield json.dumps(
                 {"type": "run", "run_id": run_id, "status": status}
             ) + "\n"
@@ -346,12 +365,14 @@ async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
             # Lifecycle, on its own frame type. Queued and running are
             # different things to wait through, and the room can now say which.
             status = run["status"]
+            sent = True
             yield json.dumps(
                 {"type": "status", "run_id": run_id, "status": status}
             ) + "\n"
         for step in run["steps"]:
             if step["seq"] >= seen:
                 seen = step["seq"] + 1
+                sent = True
                 yield json.dumps(step) + "\n"
         if status in WAITING_STATUSES or status in TERMINAL_STATUSES:
             yield json.dumps({
@@ -359,7 +380,17 @@ async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
                 "run_id": run_id, "status": status, "detail": run["last_error"],
             }) + "\n"
             return
-        await asyncio.sleep(0.2)
+        if sent:
+            # Something happened, so the next thing probably will too.
+            wait = POLL_START_SECONDS
+            idle = 0.0
+        else:
+            wait = min(wait * POLL_GROWTH, POLL_MAX_SECONDS)
+            if idle >= HEARTBEAT_SECONDS:
+                idle = 0.0
+                yield json.dumps({"type": "heartbeat", "run_id": run_id}) + "\n"
+        idle += wait
+        await asyncio.sleep(wait)
 
 
 def _visible_run(team_id: str, user_id: str, run_id: str) -> None:
@@ -372,7 +403,10 @@ def _visible_run(team_id: str, user_id: str, run_id: str) -> None:
 @app.post("/agent/turn/stream")
 async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     """Compatibility shortcut: enqueue, then follow the durable event log."""
-    require_membership(user_id, req.team_id)
+    # 🔴 Called directly on the event loop. It is a DATABASE round trip, and
+    # every other request this worker was serving waited behind it — on the
+    # streaming endpoints, which are the ones a room holds open.
+    await run_in_threadpool(require_membership, user_id, req.team_id)
     turn = await run_in_threadpool(_admit_turn, req, user_id)
     return StreamingResponse(_run_frames(req.team_id, str(turn)), media_type="application/x-ndjson")
 
@@ -387,7 +421,7 @@ async def agent_run_stream(
     fresh send take one path instead of the POST-only path that lost the run
     the moment its response ended.
     """
-    require_membership(user_id, team_id)
+    await run_in_threadpool(require_membership, user_id, team_id)
     await run_in_threadpool(_visible_run, team_id, user_id, run_id)
     return StreamingResponse(
         _run_frames(team_id, run_id, after_seq=after_seq),

@@ -191,7 +191,9 @@ def _step_from_row(row: tuple) -> dict[str, Any]:
     return step
 
 
-def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
+def get_run(
+    team_id: str, run_id: str, after_seq: int = -1,
+) -> dict[str, Any] | None:
     """Read a run back under the AGENT role (team-scoped). None if not visible."""
     with team_session(Role.AGENT, team_id) as conn:
         row = conn.execute(
@@ -203,9 +205,12 @@ def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         step_rows = conn.execute(
+            # Cursored: the stream polls this, and must not re-fetch what
+            # it has already sent.
             "select seq, type, tool, args, response, text"
-            " from public.agent_steps where run_id = %s order by seq",
-            (run_id,),
+            " from public.agent_steps where run_id = %s and seq > %s"
+            " order by seq",
+            (run_id, after_seq),
         ).fetchall()
     steps = [_step_from_row(r) for r in step_rows]
     return {

@@ -65,7 +65,11 @@ vi.mock('../../src/lib/supabase', () => {
   };
   return { supabase: { from: (table: string) => makeBuilder(table) } };
 });
-vi.mock('../../src/hooks/useRealtime', () => ({ useTeamRealtime: () => {} }));
+// Returns connection state now (T13): the room reports a dropped socket
+// instead of silently showing history that has stopped updating.
+vi.mock('../../src/hooks/useRealtime', () => ({
+  useTeamRealtime: () => ({ connected: true }),
+}));
 vi.mock('../../src/state/TeamContext', () => ({
   useTeam: () => ({ team: { id: 'team-1' } }),
 }));

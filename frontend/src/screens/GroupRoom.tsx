@@ -29,7 +29,7 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
   const { team, myUserId, profileOf } = useTeam();
   const {
     messages, compilationsByMessage, error, refresh,
-    hasOlder, loadingOlder, loadOlder,
+    hasOlder, loadingOlder, loadOlder, live,
   } = useMessages(thread.id);
   const [consents, setConsents] = useState<ConsentItem[]>([]);
   const [consentError, setConsentError] = useState<string | null>(null);
@@ -591,6 +591,27 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
                 not styled as an error, because the member did nothing wrong.
                 Both causes share the slot: from where they sit, the question
                 is the same one. */}
+            {/* A dropped websocket used to freeze the room silently: no new
+                messages, no explanation, and nothing to do but wait. It
+                reconnects and refetches on its own — this only says why the
+                room went quiet in the meantime. */}
+            {!live && (
+              <div
+                data-realtime-offline
+                className="mono"
+                style={{
+                  margin: '6px 28px',
+                  padding: '6px 10px',
+                  border: '1px solid var(--border-soft)',
+                  borderRadius: 6,
+                  fontSize: 10,
+                  letterSpacing: '0.06em',
+                  color: 'var(--muted)',
+                }}
+              >
+                RECONNECTING — NEW MESSAGES MAY BE DELAYED
+              </div>
+            )}
             {agentNote && (
               <div
                 data-agent-note

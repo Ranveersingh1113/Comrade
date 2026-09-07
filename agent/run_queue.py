@@ -119,7 +119,9 @@ def cancel_run(team_id: str, run_id: str, *, requester_id: str | None) -> bool:
     return cur.rowcount == 1
 
 
-def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
+def get_run(
+    team_id: str, run_id: str, after_seq: int = -1,
+) -> dict[str, Any] | None:
     """Read queue metadata and durable events; worker input is kept separate."""
     with team_session(Role.AGENT, team_id) as conn:
         row = conn.execute(
@@ -130,9 +132,14 @@ def get_run(team_id: str, run_id: str) -> dict[str, Any] | None:
         if row is None:
             return None
         steps = conn.execute(
+            # 🔴 `where run_id=%s` alone. The streaming endpoint polls this
+            # five times a second, so a turn with four hundred steps
+            # shipped four hundred rows per poll per viewer to find the
+            # one that was new. The cursor the browser already sends
+            # filtered what it was TOLD, never what was fetched.
             "select seq, type, tool, args, response, text from public.agent_steps"
-            " where run_id=%s order by seq",
-            (run_id,),
+            " where run_id=%s and seq > %s order by seq",
+            (run_id, after_seq),
         ).fetchall()
     return {
         "id": str(row[0]), "thread_id": str(row[1]),

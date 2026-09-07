@@ -6,6 +6,7 @@ policies in 0002_rls.sql then constrain every row the worker can see or write.
 """
 import atexit
 import json
+import threading
 from contextlib import contextmanager
 from enum import Enum
 from typing import Iterator
@@ -61,6 +62,21 @@ _pools: dict[str, ConnectionPool] = {}
 # pool: a full lock pool would otherwise deadlock every holder on start_run.
 _lock_pool: ConnectionPool | None = None
 _LOCK_POOL_MAX = 32
+#: 🔴 Both lazy pools were plain `if none: create`. Two threads arriving
+#: together each built a ConnectionPool; one won the dictionary and the other
+#: was orphaned — open, holding its minimum connections, absent from `_pools`
+#: and therefore missed by `close_pools()`. Harmless while the workers ran one
+#: turn at a time. T12 gave every worker several slots and a renewer thread.
+_pool_lock = threading.Lock()
+
+
+def max_connections() -> int:
+    """The most connections this process may hold, for sizing Postgres.
+
+    An operator should not have to reconstruct this from three constants and a
+    dict comprehension in order to answer "how many backends do I need".
+    """
+    return len(set(_URLS.values())) * _POOL_MAX + _LOCK_POOL_MAX
 
 
 def _reset(conn: psycopg.Connection) -> None:
@@ -75,26 +91,36 @@ def _reset(conn: psycopg.Connection) -> None:
 
 
 def _pool(url: str) -> ConnectionPool:
+    # Double-checked: the hot path stays lock-free, and only the one-time
+    # construction is serialised.
     pool = _pools.get(url)
-    if pool is None:
-        pool = ConnectionPool(
-            url, min_size=_POOL_MIN, max_size=_POOL_MAX, reset=_reset, open=True
-        )
-        _pools[url] = pool
+    if pool is not None:
+        return pool
+    with _pool_lock:
+        pool = _pools.get(url)
+        if pool is None:
+            pool = ConnectionPool(
+                url, min_size=_POOL_MIN, max_size=_POOL_MAX, reset=_reset,
+                open=True,
+            )
+            _pools[url] = pool
     return pool
 
 
 def _advisory_lock_pool() -> ConnectionPool:
     global _lock_pool
-    if _lock_pool is None:
-        pool = ConnectionPool(
-            _URLS[Role.AGENT], min_size=_POOL_MIN, max_size=_LOCK_POOL_MAX,
-            reset=_reset, open=True,
-        )
-        # A near-zero borrow must still work for the first turn. Warm the pool
-        # once here; later saturation returns busy without a material stall.
-        pool.wait()
-        _lock_pool = pool
+    if _lock_pool is not None:
+        return _lock_pool
+    with _pool_lock:
+        if _lock_pool is None:
+            pool = ConnectionPool(
+                _URLS[Role.AGENT], min_size=_POOL_MIN, max_size=_LOCK_POOL_MAX,
+                reset=_reset, open=True,
+            )
+            # A near-zero borrow must still work for the first turn. Warm the
+            # pool once here; later saturation returns busy without a stall.
+            pool.wait()
+            _lock_pool = pool
     return _lock_pool
 
 

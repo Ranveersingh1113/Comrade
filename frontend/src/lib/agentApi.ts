@@ -143,6 +143,10 @@ export interface StreamFrame {
     // states are not content, and folding them into 'done' meant a run parked
     // on a consent card read to the member as a turn that failed in silence.
     | 'status'
+    // Sent while a run is quiet, so a dead connection can be told apart from a
+    // slow one now that the poll backs off. Carries nothing and needs no
+    // handling beyond arriving.
+    | 'heartbeat'
     | 'busy'
     // The model came back with nothing at all. Was reported as a successful
     // turn that simply rendered no reply — see agent/runtime.py.

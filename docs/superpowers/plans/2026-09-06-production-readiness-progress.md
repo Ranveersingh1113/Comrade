@@ -507,6 +507,79 @@ than dismissed — a claim that intermittently misses committed work is exactly
 the shape of bug worth remembering. T13 covers pool initialisation and is the
 likely place it gets an answer.
 
+### T13 — Make streaming, realtime, and pools scale predictably
+
+**Changed:** `shared/db.py`, `shared/agent_runs.py`, `agent/run_queue.py`,
+`server/app.py`, `frontend/src/hooks/useRealtime.ts`,
+`frontend/src/hooks/useMessages.ts`, `frontend/src/lib/agentApi.ts`,
+`frontend/src/screens/GroupRoom.tsx`, `tests/test_stream_scaling.py`,
+`frontend/tests/component/useRealtime.test.tsx`.
+
+**Regression 1 — the stream re-read the whole run five times a second.** The
+cursor T10 added filtered what the browser was TOLD; the database was still
+handed `where run_id = %s` and returned every step. A turn with four hundred
+tool calls shipped four hundred rows per poll, per viewer, to find the one that
+was new. The read now starts after the cursor.
+
+**Regression 2 — a flat 200ms poll with no heartbeat.** A run waiting on a slow
+model call cost exactly as much as one producing a step every tick, and a
+connection that had died silently was indistinguishable from one where nothing
+was happening. The wait now backs off while nothing changes and snaps back the
+moment something does, with a heartbeat so silence stays legible.
+
+**Regression 3 — every realtime event caused a full refetch.** Ten messages
+arriving together — an agent writing its reply while two people type — meant
+ten complete reloads of the thread, each throwing away the answer the one
+before it had just fetched. Events are coalesced into one read.
+
+**Regression 4 — a dropped websocket froze the room silently.** The
+subscription's status was ignored, so a reconnect restored the pipe without
+restoring anything that had come down it while it was broken; only a window
+focus recovered those events, and nothing told the member their room had gone
+quiet for a reason. Resubscribing refetches, and the room says it is
+reconnecting.
+
+**Regression 5 — lazy pools were built without a lock.** `if pool is None:
+create` from two threads builds two pools; one wins the dictionary and the
+other is orphaned — open, holding its minimum connections, absent from
+`_pools`, and therefore missed by `close_pools()`. Harmless while the workers
+were serial; T12 gave every worker several slots and a renewer thread, which
+is what made this urgent rather than theoretical.
+
+**Regression 6 — the two STREAMING endpoints called `require_membership`
+directly on the event loop.** A database round trip, on the endpoints a room
+holds open, with every other request on that worker waiting behind it.
+
+**Design:** double-checked locking, so the hot path stays lock-free and only
+the one-time construction serialises. The heartbeat counts the wait the loop
+ASKED for rather than wall clock, so it keeps its meaning when the loop is
+driven by a test. Realtime coalescing is trailing-edge: the first event opens
+the window and everything inside it collapses into one refetch, and the window
+closes so coalescing never becomes swallowing.
+
+**Also:** the FIRST subscribe must not refetch — the caller has just loaded —
+but every one after it must. That distinction is the whole fix for a dropped
+socket, and it is one boolean.
+**Also:** `max_connections()` reports what one process may hold, so sizing
+Postgres is not an archaeology exercise across five role pools and a lock pool.
+**Also:** the event-loop rule is guarded by a STATIC test that walks
+`server/app.py`'s AST, because it is a rule about how the code is written and a
+load test would only reveal it under load nobody runs by accident.
+
+**Passing:** 12 stream-scaling tests, 5 realtime hook tests; 192 frontend
+tests; build ✅; lint ✅ (warnings only).
+
+**Migration/rollback:** none — no schema change. `get_run` gained a defaulted
+third parameter, so every existing caller is unaffected.
+
+**Ceiling:** 🔴 NO MEASUREMENT. The plan asks for DB queries and bytes per
+viewer and p95 latency under representative load; what exists here is a
+correctness argument and unit evidence that the cursor, the backoff and the
+coalescing do what they say. The numbers that would justify the constants
+(200ms, 2s, 15s, 80ms) have not been taken. 🔴 The realtime tests drive a
+faked channel, not a real Supabase socket, so reconnect behaviour is proven
+against the contract rather than against the service.
+
 ---
 
 ## Standing ceilings

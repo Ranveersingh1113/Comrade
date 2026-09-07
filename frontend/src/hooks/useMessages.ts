@@ -16,6 +16,9 @@ import { useTeamRealtime } from './useRealtime';
  */
 export interface MessagesState {
   messages: Message[];
+  /** False while realtime is down: the thread is showing history that has
+   *  stopped updating, and saying so beats looking idle. */
+  live: boolean;
   /** diff_message_id -> compilation, for rendering memory diff cards inline. */
   compilationsByMessage: Map<string, MemoryCompilation>;
   loading: boolean;
@@ -159,10 +162,12 @@ export function useMessages(threadId: string): MessagesState {
     setLoading(true);
     void refresh();
   }, [refresh]);
-  useTeamRealtime('messages', teamId, refresh, `thread_id=eq.${threadId}`);
+  const { connected } = useTeamRealtime(
+    'messages', teamId, refresh, `thread_id=eq.${threadId}`,
+  );
 
   return {
     messages, compilationsByMessage, loading, loadingOlder, hasOlder,
-    error, loadOlder, refresh,
+    error, loadOlder, refresh, live: connected,
   };
 }

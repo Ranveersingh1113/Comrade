@@ -964,6 +964,81 @@ many were held back, and nothing yet shows a member WHICH, or lets them
 confirm one. 🔴 `confirmed` and `verified` exist in the vocabulary with no
 path that sets them.
 
+### T19 — Add compact durable thread working memory
+
+**Changed:** `supabase/migrations/20260907190000_thread_working_state.sql`,
+`20260907200000_compaction_sweep_grants.sql`,
+`20260907210000_compact_thread_job.sql`, `agent/history.py`,
+`agent/runtime.py`, `pipeline/compaction.py` (new), `pipeline/worker.py`,
+`tests/test_thread_working_state.py`.
+
+**Regression — the context window WAS the memory.** The agent's knowledge of a
+thread was the last `agent_history_turns` messages and nothing else, so
+everything said before that was gone: not summarised, not stored, gone. A
+constraint stated a hundred messages ago — "we are not touching the vendored
+fork", "the customer is still on Postgres 14" — was invisible to every later
+turn, so the agent proposed what the team had already ruled out and somebody
+had to say it again. Nothing survived a worker restart either: whatever a turn
+had worked out lived in a prompt that no longer existed.
+
+**Design:** pins are stored SEPARATELY from the summary. A rolling summary is
+rewritten by a model every time it grows, and prose gets paraphrased a little
+each round until it means something else — a constraint the team stated is not
+a thing to paraphrase. Compaction is a JOB rather than part of a turn: it
+costs a model call, and a member waiting for an answer should not pay for the
+bookkeeping that makes the next answer better. The cursor and the summary move
+together and only after the summary exists, because a cursor that advanced
+first would silently drop everything it covered the moment the call failed —
+the same shape as T16's extraction bug.
+
+**Boundaries that pushed back, and were respected rather than widened:**
+- Compaction reads messages AS THE REQUESTER. The first version read as
+  `comrade_agent` and was refused: findings §4.1 deliberately revoked that
+  role's select on `messages`. Compaction is not a reason to widen it.
+- `comrade_control` can claim and finish jobs but CANNOT create them, so the
+  sweep scans cross-team as control and enqueues per team as pipeline — the
+  same split the chat sweep uses.
+- Its column grants meant the sweep needed exactly two new columns, so the
+  scan is a PREFILTER on `created_at` alone while `compact_thread` recomputes
+  the range with the full keyset. An approximate count can queue a job that
+  finds nothing to do; it cannot cause a message to be missed.
+
+**Also:** the working state is datamarked on its way into the turn. A summary
+is written FROM member text, and one that reaches the model unmarked is an
+injection surface with a very long memory — it is replayed on every subsequent
+turn of the thread.
+**Also:** the summary prompt is told NOT to restate approvals, permissions,
+paths or diffs. Those are recorded exactly elsewhere, and a paraphrase here
+would be a second, weaker version of a thing that has to be exact.
+**Also:** `test_the_worker_registers_a_handler_for_every_job_type` caught that
+`pipeline.compaction` was not imported in the worker's `main()` — the exact
+failure that test exists for, where a handler registers in the test process
+and nowhere else.
+
+**Passing:** 15 working-state tests; full suite below.
+
+**Migration/rollback:** additive — a new table, two column grants, one widened
+check constraint. A thread with no row reads as empty state.
+
+**Measured, not asserted.** `_summarise` is stubbed in the unit tests, so the
+prompt itself was run against the real model over a 105-message thread
+(`tests/test_thread_summary_live.py`). Both constraints stated in the first two
+messages survived a hundred messages of noise; the thread's self-correction was
+carried forward WITHOUT the thing it corrected ("the exporter will ship first,
+with the importer to follow"); the unanswered question was kept; and the whole
+summary came to 395 characters against a 2,000 budget. That is the plan's own
+first check for this task, and it now has an answer rather than an argument.
+
+**Ceiling:** 🔴 One thread shape, one run. It shows the prompt can do this,
+not that it does it reliably across the shapes real threads take. 🔴 No
+concurrent-compaction test: two
+workers compacting one thread would both write a summary, and the second's
+cursor wins. The job dedupe key makes it unlikely, not impossible. 🔴 No UI:
+the state is inspectable and correctable through RLS, so a member could fix a
+wrong summary via the API, but nothing shows it to them. 🔴 `open_questions`,
+`plan_version` and `pending` are in the contract and in the schema, and
+nothing populates them yet.
+
 ---
 
 ## Standing ceilings

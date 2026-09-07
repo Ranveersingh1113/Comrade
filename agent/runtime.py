@@ -21,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 
 from agent.agent import APP_NAME, app
 from agent.effects import completed_effects, run_is_active
-from agent.history import recent_turns
+from agent.history import recent_turns, working_state_content
 from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
@@ -256,6 +256,17 @@ async def stream_turn(
                 recent_turns, team_id, requester_id, thread_id,
                 settings.agent_history_turns, exclude_message_id,
             )
+            # 🔴 The window WAS the memory. A constraint stated a hundred
+            # messages ago was invisible to this turn, so the agent proposed
+            # what the team had already ruled out and somebody had to say it
+            # again. The thread's established state goes in FIRST, ahead of
+            # the recent messages, and is datamarked because a summary is
+            # written from member text.
+            established = await run_in_threadpool(
+                working_state_content, team_id, thread_id,
+            )
+            if established is not None:
+                history = [established, *history]
             effects = await run_in_threadpool(completed_effects, team_id, run_id)
             plan = await run_in_threadpool(read_plan, team_id, thread_id)
             continuation = _continuation_content(effects, plan)

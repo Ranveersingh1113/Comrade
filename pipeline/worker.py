@@ -244,6 +244,14 @@ def tick() -> int:
         processed += 1
     if _due("chat", CHAT_SWEEP_SECONDS):
         try:
+            from pipeline.compaction import sweep_thread_compaction
+
+            # Threads that have outgrown the agent's context window. On the
+            # same clock as the chat sweep: both are about a conversation
+            # having moved on without memory keeping up.
+            compacted = sweep_thread_compaction()
+            if compacted:
+                logger.info("queued %d thread compaction(s)", len(compacted))
             swept = sweep_chat_compiles()
             if swept:
                 logger.info("chat sweep enqueued %d compile job(s)", len(swept))
@@ -337,6 +345,7 @@ def main() -> None:
     # now checks this list against the job types the database permits, in a
     # subprocess, because only a fresh interpreter can tell the difference.
     import pipeline.chat  # noqa: F401
+    import pipeline.compaction  # noqa: F401
     import pipeline.compiler  # noqa: F401
     import pipeline.github  # noqa: F401
     import pipeline.repo_env  # noqa: F401

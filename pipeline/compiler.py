@@ -210,6 +210,22 @@ class StaleConsolidation(RuntimeError):
     """
 
 
+class ConsolidationUnavailable(RuntimeError):
+    """The consolidation answer could not be read at all.
+
+    🔴 (fix.md F12) An unreadable response produced NO decisions, and
+    `validate_decisions` turned every candidate with no decision into an
+    `add` — so a response the model never successfully gave published every
+    extracted claim as a new fact, and the compilation row then advanced the
+    capture watermark over the conversation it came from.
+
+    A failure rather than a rejection, deliberately: rejecting every candidate
+    would also advance the cursor, and the messages would be gone. This retries
+    with backoff and leaves the watermark alone, the same shape as
+    `ExtractionUnavailable`.
+    """
+
+
 class ExtractionUnavailable(RuntimeError):
     """The model's answer could not be read.
 
@@ -383,7 +399,13 @@ def build_consolidation_prompt(
     )
 
 
+#: What the MODEL may ask for.
 _ACTIONS = {"add", "revise", "invalidate", "noop"}
+
+#: Our own verdict on output we could not use. Never something the model says,
+#: which is why it is not in `_ACTIONS`: a response asking to `reject` its own
+#: candidate is malformed, and would be rejected on those grounds anyway.
+REJECT = "reject"
 _PAGE_KINDS = {"fact", "skill"}
 
 
@@ -392,10 +414,22 @@ def validate_decisions(
     pages: list[dict],
     decisions: list[Decision],
 ) -> list[Decision]:
-    """Pure: exactly one decision per candidate, in order; anything malformed
-    (unknown index, unknown action, entry_id not on any page) degrades to
-    'add'. page_title is normalised (stripped; empty -> None, so apply falls
-    back to the default page)."""
+    """Pure: exactly one decision per candidate, in order.
+
+    🔴 Anything malformed — a missing decision, an unknown action, an
+    `entry_id` on no page — used to degrade to `'add'`. So the compiler
+    responded to output it could not understand by PUBLISHING, and it did so
+    ahead of the apply loop's own rejection, which therefore never saw the
+    cases it was written for.
+
+    Degrading is right for a page KIND: a model inventing 'procedure' should
+    not abort a compile, and the fact still belongs in memory on an ordinary
+    page. It is wrong for the decision that determines whether to publish at
+    all. Those become `reject` and are counted, not written.
+
+    page_title is still normalised (stripped; empty -> None, so apply falls
+    back to the default page).
+    """
     allowed = {f["entry_id"] for p in pages for f in p["facts"]}
     by_index: dict[int, Decision] = {}
     for d in decisions:
@@ -410,7 +444,12 @@ def validate_decisions(
             or d.action not in _ACTIONS
             or (d.action != "add" and d.entry_id not in allowed)
         ):
-            out.append(Decision(candidate_index=i, action="add"))
+            logger.warning(
+                "rejecting candidate %d: %s", i,
+                "no decision" if d is None
+                else f"action={d.action!r} entry_id={d.entry_id!r}",
+            )
+            out.append(Decision(candidate_index=i, action=REJECT))
             continue
         title = (d.page_title or "").strip() or None
         description = (d.page_description or "").strip() or None
@@ -461,8 +500,25 @@ def consolidate(
         ),
     )
     parsed = resp.parsed
-    raw = list(parsed.decisions) if parsed else []
-    return validate_decisions(candidates, pages, raw)
+    if parsed is None:
+        # 🔴 This was `if parsed else []`, so an answer that could not be read
+        # AT ALL was indistinguishable from one that decided nothing — and
+        # every candidate then degraded to `add`. Unreadable is a failure: the
+        # job retries and the watermark stays put.
+        raise ConsolidationUnavailable(
+            "the consolidation answer could not be read"
+        )
+    decisions = validate_decisions(candidates, pages, list(parsed.decisions))
+    if candidates and all(d.action == REJECT for d in decisions):
+        # Parsed, and usable about nothing. Rejecting every candidate would be
+        # a visible record — and would also advance the capture watermark past
+        # a conversation nothing was learned from, which is the loss this
+        # distinction exists to prevent. Partial results are different: those
+        # reject only the candidates they are wrong about.
+        raise ConsolidationUnavailable(
+            "the consolidation answer decided nothing usable"
+        )
+    return decisions
 
 
 def _resolve_page(
@@ -609,6 +665,12 @@ def apply_compilation(
     rejected = quarantined = 0
     for cand, dec, src in zip(candidates, decisions, sources):
         action, target = dec.action, dec.entry_id
+        if action == REJECT:
+            # Output that could not be understood. Counted so the member sees
+            # it happened, and published as nothing — which is what "could not
+            # be understood" has to mean.
+            rejected += 1
+            continue
         if action in ("revise", "invalidate", "noop"):
             valid = conn.execute(
                 "select 1 from public.memory_entries"

@@ -5,7 +5,7 @@ import psycopg
 import pytest
 
 from pipeline.compiler import (
-    DEFAULT_PAGE_TITLE, Candidate, Decision, apply_compilation,
+    DEFAULT_PAGE_TITLE, REJECT, Candidate, Decision, apply_compilation,
     build_consolidation_prompt, validate_decisions,
 )
 from shared.config import settings
@@ -81,28 +81,37 @@ def test_prompt_marks_empty_page_and_empty_wiki():
     assert "(wiki is empty)" in prompt
 
 
-def test_validate_fills_missing_and_fixes_bad_targets():
+def test_validate_keeps_one_decision_per_candidate_in_order():
+    """🔴 The two malformed cases here used to become `add` (fix.md F12), so
+    a hallucinated entry id and a candidate the model never mentioned were
+    both PUBLISHED. They are rejected now; what this test still pins is the
+    shape — one decision per candidate, in order, duplicates and unknown
+    indices ignored.
+    """
     cands = [Candidate(text="a"), Candidate(text="b"), Candidate(text="c")]
     pages = [_page("P", [{"entry_id": "e-1", "text": "x"}])]
     decisions = [
         Decision(candidate_index=0, action="revise", entry_id="e-1"),   # valid
-        Decision(candidate_index=1, action="revise", entry_id="e-9"),   # bad target -> add
-        # candidate 2 missing -> add
+        Decision(candidate_index=1, action="revise", entry_id="e-9"),   # unknown target
+        # candidate 2 missing
         Decision(candidate_index=0, action="noop", entry_id="e-1"),     # duplicate -> ignored
         Decision(candidate_index=9, action="add"),                      # unknown index -> ignored
     ]
     out = validate_decisions(cands, pages, decisions)
     assert [(d.candidate_index, d.action) for d in out] == [
-        (0, "revise"), (1, "add"), (2, "add"),
+        (0, "revise"), (1, REJECT), (2, REJECT),
     ]
 
 
 def test_validate_rejects_unknown_action():
+    """🔴 This test was always named for what it should do, and asserted
+    `== "add"`. The name described the intent; the assertion encoded the
+    defect, and the two sat next to each other unremarked."""
     out = validate_decisions(
         [Candidate(text="a")], [],
         [Decision(candidate_index=0, action="obliterate")],
     )
-    assert out[0].action == "add"
+    assert out[0].action == REJECT
 
 
 def test_validate_normalises_page_title():

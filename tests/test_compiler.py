@@ -162,10 +162,28 @@ def test_apply_add_writes_fact_provenance_citation_card(seeded):
         conn.close()
 
 
+def _active_version(entry_id: str) -> str:
+    """The version a real consolidation would have been shown.
+
+    `consolidate` binds this for every revision now (fix.md F14): a null
+    expectation used to match whatever was active, which let a compile
+    supersede a version it had never read.
+    """
+    conn = _admin()
+    try:
+        return str(conn.execute(
+            "select id from public.memory_versions"
+            " where entry_id=%s and is_active", (entry_id,),
+        ).fetchone()[0])
+    finally:
+        conn.close()
+
+
 def test_apply_revise_supersedes(seeded):
     entry_id = _seed_entry()
     cands = [Candidate(text="Deadline is Friday", excerpt="moved")]
-    decs = [Decision(candidate_index=0, action="revise", entry_id=entry_id)]
+    decs = [Decision(candidate_index=0, action="revise", entry_id=entry_id,
+                     seen_version_id=_active_version(entry_id))]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
         result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert result["revised"] == 1
@@ -185,7 +203,8 @@ def test_apply_revise_supersedes(seeded):
 def test_apply_invalidate_tombstones_without_replacement(seeded):
     entry_id = _seed_entry("Mobile app is planned")
     cands = [Candidate(text="Mobile app was dropped", excerpt="drop the mobile app")]
-    decs = [Decision(candidate_index=0, action="invalidate", entry_id=entry_id)]
+    decs = [Decision(candidate_index=0, action="invalidate", entry_id=entry_id,
+                     seen_version_id=_active_version(entry_id))]
     with team_session(Role.PIPELINE, TEAM_A) as conn:
         result = apply_compilation(conn, TEAM_A, cands, decs, [("document", _source_document())] * len(cands))
     assert (result["added"], result["removed"]) == (0, 1)

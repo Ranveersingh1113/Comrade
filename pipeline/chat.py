@@ -372,7 +372,6 @@ def compile_messages(
     )
     # Bind each revision to the version this snapshot showed, so a second
     # compile cannot erase a first one it never saw.
-    bind_to_seen_versions(decisions, pages)
 
     with team_session(Role.PIPELINE, team_id) as conn:
         return apply_compilation(

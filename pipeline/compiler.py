@@ -509,6 +509,15 @@ def consolidate(
             "the consolidation answer could not be read"
         )
     decisions = validate_decisions(candidates, pages, list(parsed.decisions))
+    # 🔴 (fix.md F14) This was left to each caller, and the GitHub compile
+    # forgot. An unbound revision then met a supersession guard that treats a
+    # missing version as a WILDCARD, so a stale GitHub result could overwrite a
+    # newer chat or document revision it had never seen.
+    #
+    # Bound HERE because this is the function that read the pages: the version
+    # id is a fact about what consolidation was shown, not a decision a caller
+    # makes afterwards, and a third call site is a third chance to forget.
+    bind_to_seen_versions(decisions, pages)
     if candidates and all(d.action == REJECT for d in decisions):
         # Parsed, and usable about nothing. Rejecting every candidate would be
         # a visible record — and would also advance the capture watermark past
@@ -741,14 +750,29 @@ def apply_compilation(
             ).fetchone()[0]
             change, added = "added", added + 1
         else:
+            if dec.seen_version_id is None:
+                # 🔴 The guard below reads a null as "match whatever is active
+                # now", so an unbound revision silently superseded a version it
+                # had never read. A revision that cannot say WHAT it is
+                # revising is not a revision.
+                #
+                # Rejected rather than raised: a caller that forgets the
+                # binding should show up as every revision being refused, in
+                # the counts and the log, rather than as a lost batch.
+                logger.warning(
+                    "rejecting %s for entry %s: no seen version was bound",
+                    action, target,
+                )
+                rejected += 1
+                continue
             # Bound to the version consolidation READ. Without the binding this
             # supersedes whatever is active now, which is how a second compile
             # erases a first one it never saw.
             closed = conn.execute(
                 "update public.memory_versions set is_active=false, valid_until=now(),"
                 " trust='superseded' where entry_id=%s and is_active"
-                " and (%s::uuid is null or id = %s::uuid)",
-                (target, dec.seen_version_id, dec.seen_version_id),
+                " and id = %s::uuid",
+                (target, dec.seen_version_id),
             )
             if closed.rowcount != 1:
                 raise StaleConsolidation(
@@ -836,7 +860,6 @@ def compile_document(team_id: str, document_id: str, marked_text: str) -> dict:
     decisions = (
         consolidate(candidates, pages, len(marked_text)) if candidates else []
     )
-    bind_to_seen_versions(decisions, pages)
     sources: list[tuple[str, str] | None] = [
         ("document", document_id) for _ in candidates
     ]

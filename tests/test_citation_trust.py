@@ -291,9 +291,16 @@ def test_revising_the_version_consolidation_read_succeeds(seeded):
     assert result["revised"] == 1
 
 
-def test_a_revision_with_no_expectation_still_works(seeded):
-    """Consolidation that did not report a version — an older payload, or the
-    document path — must not become an error."""
+def test_a_revision_bound_to_the_current_version_works(seeded):
+    """The ordinary path, with the binding the real callers now supply.
+
+    🔴 This was `test_a_revision_with_no_expectation_still_works`, and its
+    docstring said a missing version "must not become an error" — which was
+    the wildcard contract, and the defect (fix.md F14): a null expectation
+    matched whatever was active, so a compile could supersede a version it had
+    never read. `consolidate` binds every revision now, so a revision arriving
+    without one is a wiring fault rather than an older payload.
+    """
     _clear()
     conn = _admin()
     try:
@@ -311,10 +318,10 @@ def test_a_revision_with_no_expectation_still_works(seeded):
         )
     conn = _admin()
     try:
-        entry_id = conn.execute(
-            "select entry_id from public.memory_versions"
+        entry_id, version_id = conn.execute(
+            "select entry_id, id from public.memory_versions"
             " where team_id=%s and is_active", (TEAM_A,),
-        ).fetchone()[0]
+        ).fetchone()
     finally:
         conn.close()
 
@@ -323,7 +330,8 @@ def test_a_revision_with_no_expectation_still_works(seeded):
             conn, TEAM_A,
             [Candidate(text="The deadline is Monday",
                        excerpt="deadline moved to Friday")],
-            [Decision(candidate_index=0, action="revise", entry_id=str(entry_id))],
+            [Decision(candidate_index=0, action="revise", entry_id=str(entry_id),
+                      seen_version_id=str(version_id))],
             [("message", message_id)],
         )
 

@@ -21,7 +21,7 @@ from starlette.concurrency import run_in_threadpool
 
 from agent.agent import APP_NAME, app
 from agent.effects import completed_effects, run_is_active
-from agent.history import recent_turns, working_state_content
+from agent.history import replay_for_turn, working_state_content
 from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
@@ -298,8 +298,13 @@ async def stream_turn(
         # Inside the try: a failed history read must close the run row too, not
         # leave it 'running' forever.
         try:
+            # The summary and the replay have to MEET: everything since the
+            # summary, not the last N messages, or up to
+            # MIN_COMPACT_MESSAGES-1 of them sit in neither window
+            # (fix.md F16). Composed in one place so there is one answer to
+            # "what does a turn see".
             history = await run_in_threadpool(
-                recent_turns, team_id, requester_id, thread_id,
+                replay_for_turn, team_id, requester_id, thread_id,
                 settings.agent_history_turns, exclude_message_id,
             )
             # 🔴 The window WAS the memory. A constraint stated a hundred

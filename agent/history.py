@@ -15,9 +15,14 @@ requesting member (findings §4.1).
 Scoping note: a member can read more than one visible thread. `thread_id` is
 therefore an explicit scope as well as an RLS-authorized one.
 """
+import logging
 from google.genai import types
 
 from shared.db import Role, team_session, user_session
+
+logger = logging.getLogger(__name__)
+
+
 
 # Newest-first with an explicit LIMIT (so the DB does the capping), reversed
 # below into chronological order. `id is distinct from %s` also holds when the
@@ -32,8 +37,35 @@ _SQL = (
     " where m.team_id = %s and m.thread_id = %s::uuid"
     " and m.deleted_scope is null"
     " and m.id is distinct from %s::uuid"
+    # 🔴 (fix.md F16) Everything since the summary, not just the last N.
+    #
+    # The summary advances in jumps: compaction waits for
+    # MIN_COMPACT_MESSAGES older than the KEEP_RECENT_MESSAGES it will not
+    # touch. The replay showed `agent_history_turns`. Between the two, up to
+    # 39 messages were in NEITHER — with a summary through message 40 and a
+    # thread at 61, the turn replayed 42-61 and message 41 was invisible.
+    #
+    # T19 exists because a constraint stated a hundred messages ago was lost.
+    # It fixed the far end and left a moving hole just behind the replay
+    # window, which is where a constraint stated ten minutes ago lives.
+    #
+    # A null cursor means no summary, and every row passes — the `limit`
+    # below is then the only bound, which is the original behaviour.
+    " and (%s::timestamptz is null"
+    "      or (m.created_at, m.id) > (%s::timestamptz, %s::uuid))"
     " order by m.created_at desc, m.id desc limit %s"
 )
+
+
+#: The most messages a turn will replay, however far behind compaction is.
+#:
+#: The unsummarised tail is normally at most
+#: MIN_COMPACT_MESSAGES + KEEP_RECENT_MESSAGES, because compaction closes it.
+#: If compaction STOPS — a broken worker, a model outage — the tail grows
+#: without limit, and an unbounded tail is an unbounded prompt on every turn.
+#: Capping it reintroduces a gap in exactly that case, which is the lesser of
+#: the two failures and a loud one: the log says so.
+MAX_REPLAY_MESSAGES = 200
 
 
 def recent_turns(
@@ -42,8 +74,14 @@ def recent_turns(
     thread_id: str,
     limit: int,
     exclude_message_id: str | None = None,
+    since: tuple | None = None,
 ) -> list[types.Content]:
-    """The last `limit` undeleted messages of one thread, oldest first.
+    """This thread's conversation since the summary, oldest first.
+
+    `since` is the summary's compound cursor `(timestamp, id)`. Everything
+    after it is replayed, so the summary and the replay MEET rather than
+    leaving a hole between them; `limit` still applies when there is no
+    summary to bridge from.
 
     exclude_message_id drops the message this turn is about: server/app.py
     persists the member's message BEFORE the runtime runs, so without it the
@@ -54,10 +92,26 @@ def recent_turns(
     """
     if limit <= 0:
         return []
+    through, through_id = since if since else (None, None)
+    if through is not None and through_id is None:
+        # Half a cursor is not a cursor: without the id a tie at the boundary
+        # either repeats or vanishes. Fall back to the window rather than
+        # guess.
+        through = None
+    # Everything since the summary can legitimately exceed `limit`; the
+    # ceiling is what stops a stalled compaction becoming an unbounded prompt.
+    bound = MAX_REPLAY_MESSAGES if through is not None else limit
     with user_session(requester_id) as conn:
         rows = conn.execute(
-            _SQL, (team_id, thread_id, exclude_message_id, limit)
+            _SQL,
+            (team_id, thread_id, exclude_message_id, through, through, through_id,
+             bound),
         ).fetchall()
+    if through is not None and len(rows) >= MAX_REPLAY_MESSAGES:
+        logger.warning(
+            "thread %s has %d+ unsummarised messages; replay is capped and"
+            " compaction is behind", thread_id, MAX_REPLAY_MESSAGES,
+        )
     return [
         types.Content(
             role="user" if kind == "user" else "model",
@@ -154,6 +208,32 @@ _EMPTY_STATE = {
     "pins": [], "open_questions": [], "plan_version": None,
     "workspace_revision": None, "pending": {},
 }
+
+
+def replay_for_turn(
+    team_id: str,
+    requester_id: str,
+    thread_id: str,
+    limit: int,
+    exclude_message_id: str | None = None,
+) -> list[types.Content]:
+    """The conversation a turn should see: everything since the summary.
+
+    🔴 (fix.md F16) The runtime read the last `limit` messages and the summary
+    covered an old prefix, and NOTHING made the two meet. Compaction advances
+    the summary in jumps of MIN_COMPACT_MESSAGES, so up to 39 messages sat in
+    neither window — with a summary through message 40 and a thread at 61, the
+    turn replayed 42-61 and message 41 was invisible.
+
+    Composed here rather than at the call site so there is ONE answer to "what
+    does a turn see". Two callers assembling it separately is how the summary
+    and the replay came to disagree in the first place.
+    """
+    state = working_state(team_id, thread_id)
+    return recent_turns(
+        team_id, requester_id, thread_id, limit, exclude_message_id,
+        (state.get("summary_through"), state.get("summary_through_id")),
+    )
 
 
 def working_state(team_id: str, thread_id: str) -> dict:

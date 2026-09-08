@@ -87,6 +87,20 @@ DEPS_MOUNT = "/deps"
 SANDBOX_UID = 10001
 VENV = f"{DEPS_MOUNT}/venv"
 
+#: Where uv and poetry themselves live, SEPARATE from the environment they
+#: build.
+#:
+#: 🔴 They were installed into {VENV} and then run against it — and both of
+#: them SYNC, meaning they remove whatever the lockfile does not name. Measured
+#: on a real uv project: `uv sync` uninstalled uv and poetry from the venv it
+#: was executing out of. uv survived because it is a single static binary
+#: already running; poetry is pure Python and imports as it goes, so
+#: `poetry install --sync` deletes its own dependencies out from under itself.
+#:
+#: On the volume rather than in /tmp because /tmp is a sized tmpfs — memory —
+#: and poetry's dependency tree is about a hundred megabytes.
+TOOLS = f"{DEPS_MOUNT}/tools"
+
 #: The properties that make this a container rather than a subprocess, in ONE
 #: place because there are now two entry points and they must not drift.
 #: `run_contained` runs the agent's commands; `run_setup` installs a repo's
@@ -125,31 +139,56 @@ class BoundedOutput:
 
     def __init__(self, limit: int) -> None:
         self._limit = max(limit, 0)
+        self._half = max(self._limit // 2, 1)
         self._head = bytearray()
-        self._tail = collections.deque(maxlen=max(limit // 2, 1))
+        # 🔴 CHUNKS, not bytes. This was a `deque(maxlen=limit // 2)` fed one
+        # byte at a time, which made the safeguard its own denial of service:
+        # a 16MB flood cost fifty seconds of Python doing a loop iteration per
+        # byte, and the deque held 131,072 boxed ints — about a megabyte per
+        # stream to store a hundred and twenty-eight kilobytes. Slicing whole
+        # chunks is the same bound in constant work.
+        self._tail: collections.deque[bytes] = collections.deque()
+        self._tail_len = 0
         self._total = 0
         self.truncated = False
 
     def feed(self, chunk: bytes) -> None:
         self._total += len(chunk)
-        for byte in chunk:
-            if len(self._head) < self._limit // 2:
-                self._head.append(byte)
-            else:
-                if len(self._tail) == self._tail.maxlen:
-                    self.truncated = True
-                self._tail.append(byte)
+        if len(self._head) < self._half:
+            take = self._half - len(self._head)
+            self._head += chunk[:take]
+            chunk = chunk[take:]
+            if not chunk:
+                return
+        self._tail.append(chunk)
+        self._tail_len += len(chunk)
+        # Drop from the front only while a WHOLE chunk is surplus, so the tail
+        # holds at least `_half` bytes and never rebuilds itself to trim.
+        while self._tail and self._tail_len - len(self._tail[0]) >= self._half:
+            self._tail_len -= len(self._tail.popleft())
+        # Set on the BUDGET, not on a chunk falling off the front: the tail
+        # carries a little slack so it never has to re-slice, and bytes lost
+        # inside that slack are lost just the same. `_drain` kills the
+        # container on this transition, so it has to fire on the first byte
+        # past the limit rather than on the first whole chunk past it.
+        if self._total > len(self._head) + self._half:
+            self.truncated = True
 
     @property
     def total(self) -> int:
         return self._total
 
+    def _tail_bytes(self) -> bytes:
+        # The last `_half`, however the chunks happened to fall.
+        return b"".join(self._tail)[-self._half:]
+
     def text(self) -> str:
         head = bytes(self._head).decode("utf-8", "replace")
-        tail = bytes(self._tail).decode("utf-8", "replace")
+        tail_bytes = self._tail_bytes()
+        tail = tail_bytes.decode("utf-8", "replace")
         if not self.truncated:
             return head + tail
-        dropped = self._total - len(self._head) - len(self._tail)
+        dropped = self._total - len(self._head) - len(tail_bytes)
         # Said out loud, in the result the model reads. A silently shortened
         # result is one the agent reasons about as though it were complete.
         return (
@@ -336,6 +375,39 @@ def _docker_cmd(argv: list[str]) -> str:
     return proc.stdout
 
 
+def deps_env(deps: str | None) -> list[str]:
+    """Mount what setup installed, and point every runtime at it.
+
+    🔴 (fix.md F06) There were two of these — one here, one in
+    agent/processes.py — and they had already drifted: the preview set
+    NODE_PATH and the finite-command path did not, so `node -e "require(...)"`
+    worked in a preview and failed in `repo_run` against the same volume.
+    Neither put the installed binaries on PATH, so `eslint`, `vite`, `tsc` and
+    every other package-provided command was missing from both.
+
+    Described once so "execution and preview use the same environment" is a
+    fact about the code rather than a thing to remember twice.
+
+    READ-ONLY. The run phase uses what setup installed and never adds to it: a
+    test suite that can write to site-packages changes what the next run
+    imports, which turns one compromised dependency into a persistent one.
+    Installing is a separate phase with the network, and it is the only thing
+    that may write here.
+    """
+    if not deps:
+        return []
+    return [
+        "-v", f"{deps}:{DEPS_MOUNT}:ro",
+        # The venv's bin, then node_modules/.bin, then the image's own. A
+        # project's pinned tool wins over the image's copy of it, which is the
+        # point of installing it.
+        "-e", f"PATH={VENV}/bin:{DEPS_MOUNT}/node_modules/.bin"
+              ":/usr/local/bin:/usr/bin:/bin",
+        "-e", f"VIRTUAL_ENV={VENV}",
+        "-e", f"NODE_PATH={DEPS_MOUNT}/node_modules",
+    ]
+
+
 def _git_mask(root: Path) -> list[str]:
     """Flags that put the checkout's `.git` out of reach inside the container.
 
@@ -397,14 +469,7 @@ def _docker_run_argv(
         "--user", f"{SANDBOX_UID}:{SANDBOX_UID}",
         "-v", f"{root}:{MOUNT}",
         "-w", MOUNT,
-        # READ-ONLY. The run phase uses what setup installed and never adds to
-        # it: a test suite that can write to site-packages can change what the
-        # next run imports, which turns one compromised dependency into a
-        # persistent one. Installing is a separate phase with the network, and
-        # it is the only thing that may write here.
-        *(["-v", f"{deps}:{DEPS_MOUNT}:ro",
-           "-e", f"PATH={VENV}/bin:/usr/local/bin:/usr/bin:/bin",
-           "-e", f"VIRTUAL_ENV={VENV}"] if deps else []),
+        *deps_env(deps),
         settings.comrade_sandbox_image,
         *argv,
     ]
@@ -694,26 +759,47 @@ def run_setup(argv: list[str], *, root: Path, deps: str, timeout: int = SETUP_TI
     # The network is per-run, so it is per-run garbage. Left behind they
     # accumulate until Docker runs out of address space, which surfaces as
     # unrelated containers failing to start.
+    # 🔴 BOUNDED, like every other path that runs a repository's code. This
+    # was the last `capture_output=True`: it buffered whatever an install hook
+    # produced for up to the setup timeout and clipped it AFTERWARDS, which
+    # protects the log and not the worker — by the time there is something to
+    # clip, the worker has already held all of it. And this is the phase with
+    # the network on, running `pip install`'s setup.py and npm's postinstall
+    # scripts for up to ten minutes: a hook printing in a loop grew the
+    # pipeline worker until it died, taking every other team's job with it.
+    #
+    # `run_bounded` also drains both pipes concurrently and kills the
+    # CONTAINER by name rather than the docker client, so a hook noisy on the
+    # wrong stream cannot fill a pipe and stall, and a timeout does not leave
+    # the container running.
     try:
         try:
-            proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
-                docker, capture_output=True, text=True, timeout=timeout,
-                errors="replace",
+            result = run_bounded(
+                docker, timeout=timeout, container=name, limit=MAX_OUTPUT_BYTES,
             )
-        except subprocess.TimeoutExpired:
-            _kill(name)
-            return {"exit_code": None, "stdout": "", "stderr": "",
-                    "timed_out": True}
         except FileNotFoundError as exc:
             raise SandboxError("Docker is not available.") from exc
     finally:
         _drop_network(network, proxy_container)
 
-    if "docker:" in proc.stderr:
-        raise SandboxError(f"the container could not start: {proc.stderr.strip()[:300]}")
+    if result["timed_out"]:
+        # Output from a killed install is a partial log of a phase that did
+        # not happen; the status is the whole message.
+        return {"exit_code": None, "stdout": "", "stderr": "",
+                "timed_out": True, "output_limited": result["output_limited"]}
+
+    if "docker:" in result["stderr"]:
+        raise SandboxError(
+            f"the container could not start: {result['stderr'].strip()[:300]}"
+        )
 
     # NOT datamarked, unlike run_contained's output. This never reaches the
     # model — it goes to a log and a job row for a human — and marking it would
     # make a pip error unreadable to the person who has to fix it.
-    return {"exit_code": proc.returncode, "stdout": _clip(proc.stdout),
-            "stderr": _clip(proc.stderr), "timed_out": False}
+    #
+    # Clipped again on top of the byte budget: the budget is what protects
+    # memory, this is what keeps a job row readable. Both say what they
+    # dropped, so neither shortening is silent.
+    return {"exit_code": result["exit_code"],
+            "stdout": _clip(result["stdout"]), "stderr": _clip(result["stderr"]),
+            "timed_out": False, "output_limited": result["output_limited"]}

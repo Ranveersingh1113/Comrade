@@ -1,0 +1,12 @@
+-- The reconciler may write back the container id it discovered.
+--
+-- 🔴 (fix.md F07) A crash between `docker run` and the write-back leaves a row
+-- that knows the container's NAME and not its id. Reconciliation can now find
+-- it by that name — but finding it by name every pass is a rescue repeated
+-- forever, not a repair. Recording the id makes the row ordinary again.
+--
+-- The control role already SELECTs both columns; this adds the one write that
+-- closes the gap. It stays metadata: a container id is a Docker handle, and
+-- the role still cannot read a command, its output, or anything a member
+-- wrote. That boundary is the reason the grants are per-column at all.
+grant update (container_id) on public.sandbox_processes to comrade_control;

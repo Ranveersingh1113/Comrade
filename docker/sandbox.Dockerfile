@@ -12,15 +12,31 @@
 # The team's OWN dependencies. A repository with a requirements.txt or a
 # package.json needs those installed, and there is no network inside the
 # container, on purpose -- exfiltration is the failure that leaves no trace in
-# a diff. So this image covers repositories that run on the standard library
-# plus the common runners, and anything else gets a clear "not installed"
-# rather than a silent wrong answer.
-#
-# The real fix for that is the shape Codex uses: a setup phase WITH network
-# that installs dependencies, then the network off for the run itself. That is
-# the next thing to build here, and it is a phase boundary rather than a flag,
-# which is why it is not a flag.
+# a diff. The setup phase (agent/sandbox.py:run_setup) installs them WITH the
+# network, through a registry proxy, into a separate volume; the run phase
+# mounts that volume read-only with the network off.
 FROM python:3.12-slim
+
+# 🔴 NODE, BECAUSE THE PRODUCT SAYS IT INSTALLS NODE (fix.md F06).
+#
+# pipeline/repo_deps.py advertises npm, pnpm and package.json recipes. This
+# image was python:3.12-slim, so every one of them failed with
+# "npm: not found" -- from the sync pipeline, where nobody sees it, leaving a
+# JavaScript repository with an empty dependency volume and an agent reporting
+# module-not-found as if it were the team's bug.
+#
+# Copied from the official node image rather than installed from Debian, whose
+# bookworm nodejs is two majors behind and would fail lockfileVersion 3.
+COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+ && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+ # pnpm at BUILD time, not through corepack at install time: corepack fetches
+ # the manager itself on first use, and the setup phase's egress policy is a
+ # registry proxy, not the internet. A recipe that needs an unlisted host to
+ # bootstrap is a recipe that fails closed in production and works here.
+ && npm install --global --no-fund --no-audit pnpm@9.15.4 \
+ && npm cache clean --force
 
 # --no-cache-dir because the layer is never reused for anything: this image is
 # built once and read many times.

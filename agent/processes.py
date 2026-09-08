@@ -24,6 +24,7 @@ from psycopg import errors as pg_errors
 
 from agent.sandbox import (
     DEPS_MOUNT, MOUNT, SANDBOX_UID, VENV, _SECURITY_FLAGS, _git_mask,
+    deps_env,
 )
 from shared.config import settings
 from shared.errors import safe_error
@@ -132,21 +133,56 @@ def _ensure_network(process_id: str) -> str:
     return network
 
 
-def _remove_network(process_id: str) -> None:
-    """Give the network back. One per process is one resource per process, and
-    left behind they accumulate until Docker runs out of address space — which
-    surfaces as unrelated containers failing to start."""
-    network = network_for(process_id)
+def _absent(exc: Exception) -> bool:
+    """Did Docker say the thing is not there?
+
+    Reclaiming something that is already gone is the goal, reached early — so
+    this is a SUCCESS, not an error (fix.md F08). It matters on retries: a
+    drain interrupted after removing the container failed forever afterwards
+    on the container it had already removed.
+    """
+    return any(marker in str(exc).lower() for marker in _ABSENT)
+
+
+def drop_network(network: str) -> None:
+    """Detach the proxy, then remove the network. Raises if it is still there.
+
+    🔴 (fix.md F08) The cleanup drain called `docker network rm` directly. The
+    preview proxy's endpoint is still attached to that network and Docker
+    refuses to remove a network with active endpoints — so every deleted
+    thread's network failed on every pass, for as long as the deployment had a
+    proxy, which is always. The detach is not a nicety; it is the step that
+    makes removal possible.
+    """
     proxy = (settings.comrade_preview_proxy_container or "").strip()
     if proxy:
         try:
             _docker(["docker", "network", "disconnect", "-f", network, proxy])
         except ProcessError as exc:
-            logger.warning("could not detach proxy from %s: %s", network, exc)
+            # Not attached, or already gone. Either way the removal below is
+            # the thing that decides whether this worked.
+            if not _absent(exc):
+                logger.warning("could not detach proxy from %s: %s", network, exc)
     try:
         _docker(["docker", "network", "rm", network])
     except ProcessError as exc:
-        logger.warning("could not remove %s: %s", network, exc)
+        if not _absent(exc):
+            raise
+
+
+def _remove_network(process_id: str) -> None:
+    """Give the network back. One per process is one resource per process, and
+    left behind they accumulate until Docker runs out of address space — which
+    surfaces as unrelated containers failing to start.
+
+    Best effort: the callers here are already recording a state change and a
+    stranded network must not turn a stop into a failure. The cleanup drain
+    wants the opposite and calls `drop_network` directly.
+    """
+    try:
+        drop_network(network_for(process_id))
+    except ProcessError as exc:
+        logger.warning("could not remove the network for %s: %s", process_id, exc)
 
 
 def _run_argv(
@@ -186,10 +222,7 @@ def _run_argv(
         # previews exist — failed on missing modules for any project with
         # dependencies. READ-ONLY, like the finite-command path: a server that
         # can write to what setup installed changes what the next run imports.
-        *(["-v", f"{deps}:{DEPS_MOUNT}:ro",
-           "-e", f"PATH={VENV}/bin:/usr/local/bin:/usr/bin:/bin",
-           "-e", f"VIRTUAL_ENV={VENV}",
-           "-e", f"NODE_PATH={DEPS_MOUNT}/node_modules"] if deps else []),
+        *deps_env(deps),
         "-w", MOUNT,
         settings.comrade_sandbox_image,
         "sh", "-lc", command,
@@ -320,20 +353,21 @@ def stop(team_id: str, process_id: str) -> dict:
     request can both arrive, and the second must not be an error."""
     with team_session(Role.AGENT, team_id) as conn:
         row = conn.execute(
-            "select container_id, state from public.sandbox_processes"
-            " where id=%s and team_id=%s",
+            "select container_id, container_name, state"
+            " from public.sandbox_processes where id=%s and team_id=%s",
             (process_id, team_id),
         ).fetchone()
     if row is None:
         raise ProcessError("no such process in this thread.")
-    container_id, state = row
+    container_id, container_name, state = row
     if state not in ("starting", "running"):
         return {"id": process_id, "state": state}
     # Confirm the removal BEFORE recording it. A row that says stopped while
     # the container runs is the false signal this whole table exists to avoid,
     # so a failure here propagates and stays retryable.
-    if container_id:
-        _remove_container(container_id)
+    ref = handle(container_id, container_name)
+    if ref:
+        _remove_container(ref)
     _remove_network(process_id)
     _finish(team_id, process_id, "stopped")
     return {"id": process_id, "state": "stopped"}
@@ -386,7 +420,7 @@ def reap() -> int:
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         rows = conn.execute(
-            "select id, container_id from public.sandbox_processes"
+            "select id, container_id, container_name from public.sandbox_processes"
             " where state in ('starting','running')"
             # Two clocks, and both are ceilings. Idle catches what nobody is
             # using; absolute catches what is busy forever, which idle alone
@@ -395,9 +429,13 @@ def reap() -> int:
             "        or started_at < now() - make_interval(hours => %s))",
             (IDLE_HOURS, MAX_LIFETIME_HOURS),
         ).fetchall()
-        for process_id, container_id in rows:
-            if container_id:
-                _kill(container_id)
+        for process_id, container_id, container_name in rows:
+            ref = handle(container_id, container_name)
+            if ref:
+                _kill(ref)
+            # 🔴 The kill was skipped when the id was null and the network was
+            # removed anyway — which detaches a running container from
+            # everything that could reach it and leaves it running.
             _remove_network(str(process_id))
             try:
                 conn.execute(
@@ -428,25 +466,69 @@ def reap() -> int:
 MAX_LIFETIME_HOURS = 24
 
 
-def _inspect_state(container_id: str) -> dict | None:
+#: What Docker says when the thing simply is not there. Everything else it can
+#: fail with — a daemon that is down, a socket permission, a timeout — is a
+#: failure to ANSWER, and answering "gone" for those is how a daemon restart
+#: rewrites every live preview as dead.
+#: Taken from the daemon rather than guessed. Checked against Docker 28:
+#:   docker rm -f X       -> "No such container: X"
+#:   docker inspect X     -> "No such object: X"
+#:   docker network rm X  -> "network X not found"        <- NOT "no such"
+#: The network wording is the one that would have been got wrong by analogy.
+_ABSENT = ("no such object", "no such container", "no such image",
+           "not found")
+
+
+def _inspect_state(ref: str) -> dict | None:
     """What Docker says about a container, or None if it has never heard of it.
+
+    `ref` is an id or a NAME. The name is the handle a crash between
+    `docker run` and the write-back leaves behind, and it is the only one
+    (fix.md F07).
 
     None and "exited" are different answers and the caller treats them
     differently: a container Docker cannot find was removed underneath us,
     which is a lost process rather than a finished one.
+
+    🔴 So is "the daemon would not answer", and this returned None for that
+    too. The caller writes 'the container is gone from the daemon' for None —
+    so a daemon restart marked every running preview failed and dropped their
+    ids, losing the only handle on containers that were still running. That
+    case now RAISES, and the reconciler leaves the row alone.
     """
     try:
         raw = _docker([
-            "docker", "inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}",
-            container_id,
+            "docker", "inspect",
+            "-f", "{{.State.Running}} {{.State.ExitCode}} {{.Id}}",
+            ref,
         ]).strip()
-    except ProcessError:
-        return None
+    except ProcessError as exc:
+        if any(marker in str(exc).lower() for marker in _ABSENT):
+            return None
+        raise
     if not raw:
         return None
-    running, _, code = raw.partition(" ")
+    running, _, rest = raw.partition(" ")
+    code, _, container_id = rest.partition(" ")
     return {"running": running.lower() == "true",
-            "exit_code": int(code) if code.strip().lstrip("-").isdigit() else None}
+            "exit_code": int(code) if code.strip().lstrip("-").isdigit() else None,
+            "container_id": container_id.strip() or None}
+
+
+def handle(container_id: str | None, container_name: str | None) -> str | None:
+    """What to ask Docker about, given what the row knows.
+
+    🔴 (fix.md F07) Every reclaimer used the id and skipped the row when it was
+    null — `reconcile`, `stop`, the expiry sweep and the delete trigger alike.
+    That is precisely the state a crash between `docker run` and the write-back
+    leaves, which is the state the name was reserved up front to survive. The
+    one case the design was built for was the one nothing acted on.
+
+    The id wins when both are known: it cannot be recycled, and a name can be
+    (a later process could reuse a name only if Docker had let the first one
+    go, but preferring the id removes the question).
+    """
+    return container_id or container_name
 
 
 def _remove_container(container_id: str) -> None:
@@ -462,7 +544,13 @@ def _remove_container(container_id: str) -> None:
         _docker(["docker", "kill", container_id])
     except ProcessError:
         pass          # already dead is a fine reason for kill to fail
-    _docker(["docker", "rm", "-f", container_id])
+    try:
+        _docker(["docker", "rm", "-f", container_id])
+    except ProcessError as exc:
+        # A container Docker has never heard of is one nobody has to reclaim.
+        # This is what makes a retry after a partial success possible at all.
+        if not _absent(exc):
+            raise
 
 
 def touch(team_id: str, process_id: str) -> None:
@@ -492,11 +580,31 @@ def reconcile() -> int:
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         rows = conn.execute(
-            "select id, container_id from public.sandbox_processes"
-            " where state in ('starting','running') and container_id is not null"
+            # 🔴 `and container_id is not null` was here, and it excluded the
+            # one state this reconciler exists for: a container that started
+            # and whose row never learned its id.
+            "select id, container_id, container_name from public.sandbox_processes"
+            " where state in ('starting','running')"
+            "   and (container_id is not null or container_name is not null)"
         ).fetchall()
-        for process_id, container_id in rows:
-            state = _inspect_state(container_id)
+        for process_id, container_id, container_name in rows:
+            ref = handle(container_id, container_name)
+            try:
+                state = _inspect_state(ref)
+            except ProcessError as exc:
+                # The daemon would not answer. That is not evidence about this
+                # container, and writing 'gone' for it would throw away the id.
+                logger.warning("could not inspect %s: %s", ref, exc)
+                continue
+            if state is not None and state.get("container_id") and not container_id:
+                # Finding it by name is the rescue; recording the id is the
+                # repair, so later passes are ordinary.
+                conn.execute(
+                    "update public.sandbox_processes set container_id=%s"
+                    " where id=%s and container_id is null",
+                    (state["container_id"], process_id),
+                )
+                changed += 1
             if state is None:
                 # Docker has never heard of it. Removed underneath us, or it
                 # never started — either way the process is lost, not finished.
@@ -535,19 +643,41 @@ def drain_cleanup() -> int:
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
         rows = conn.execute(
-            "select id, container_id, network from public.sandbox_cleanup"
-            " where done_at is null order by requested_at limit 50"
+            "select id, container_id, container_name, network"
+            " from public.sandbox_cleanup"
+            # 🔴 `order by requested_at` alone. A row that fails keeps its
+            # place at the FRONT of that order forever, so fifty stuck rows
+            # consumed every 50-row batch and nothing queued behind them was
+            # ever reached. Attempts first: a row nobody has tried is never
+            # behind one that has already refused.
+            #
+            # And the wait, so putting fresh rows first does not turn a
+            # starved queue into a hot loop against a daemon that keeps
+            # saying no.
+            " where done_at is null and next_attempt_at <= now()"
+            " order by attempts, requested_at limit 50"
         ).fetchall()
-        for cleanup_id, container_id, network in rows:
+        for cleanup_id, container_id, container_name, network in rows:
+            ref = handle(container_id, container_name)
             try:
-                if container_id:
-                    _remove_container(container_id)
+                if ref:
+                    _remove_container(ref)
                 if network:
-                    _docker(["docker", "network", "rm", network])
+                    # The normal path, which detaches the proxy first. A bare
+                    # `network rm` is refused while an endpoint is attached.
+                    drop_network(network)
             except ProcessError as exc:
                 conn.execute(
                     "update public.sandbox_cleanup"
-                    "   set attempts = attempts + 1, last_error = %s where id=%s",
+                    "   set attempts = attempts + 1, last_error = %s,"
+                    # Doubling from half a minute, capped at an hour: long
+                    # enough that a daemon outage costs nothing, short enough
+                    # that a container is not left running for a day.
+                    "       next_attempt_at = now() + least("
+                    "         interval '1 hour',"
+                    "         make_interval(secs => 30 * power(2,"
+                    "           least(attempts, 7))::int))"
+                    " where id=%s",
                     (safe_error(exc), cleanup_id),
                 )
                 continue

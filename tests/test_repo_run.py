@@ -11,6 +11,7 @@ arbitrary code execution and nobody should pretend otherwise. So these spend
 their effort on what the container denies, not on what the allowlist spells.
 """
 import subprocess
+import time
 
 from pathlib import Path
 
@@ -237,6 +238,18 @@ def test_a_command_that_will_not_stop_is_actually_killed(checkout):
     )
     assert result["timed_out"] is True
     assert result["exit_code"] is None
+    # Settled, not sampled. The count is GLOBAL — it is the only way to see a
+    # container the caller has lost track of, which is the whole point — so a
+    # sibling test's container still shutting down reads as this one having
+    # survived. That is a race with the neighbours, not a fact about the kill,
+    # and it failed a full-suite run while passing every time on its own.
+    #
+    # A container that really survived stays up for as long as it is asked to
+    # loop, which is forever, so this window cannot hide the failure it exists
+    # to catch.
+    deadline = time.monotonic() + 20
+    while _running_sandboxes() > before and time.monotonic() < deadline:
+        time.sleep(0.5)
     assert _running_sandboxes() <= before, "a timed-out container survived"
 
 

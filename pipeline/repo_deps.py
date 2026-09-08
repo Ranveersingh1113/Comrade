@@ -63,7 +63,9 @@ import logging
 import subprocess
 from pathlib import Path
 
-from agent.sandbox import DEPS_MOUNT, MOUNT, VENV, SandboxError, run_setup
+from agent.sandbox import (
+    DEPS_MOUNT, MOUNT, TOOLS, VENV, SandboxError, run_setup,
+)
 from shared.config import settings
 from shared.workspace import deps_volume, repo_checkout
 
@@ -105,22 +107,57 @@ class Recipe:
 #: That is reproducibility theatre: the hash moved when the lock did, so the
 #: cache looked correct while the install resolved whatever the registry served
 #: that day. A lock is only reproducible if the installer is told to obey it.
+#: Copied into the writable dependency volume before a node install runs.
+#:
+#: 🔴 (fix.md F06) `npm ci --prefix /deps` does not mean "read the manifest
+#: here, install over there". `--prefix` IS the project root: npm looked for
+#: /deps/package.json, found nothing, and installed nothing — while the
+#: manifests sat in /workspace, which setup mounts READ-ONLY, so npm could not
+#: have written node_modules beside them either. Both halves had to move.
+#:
+#: `--dir` does the same thing for pnpm. Copied rather than symlinked because
+#: an unfrozen `npm install` REWRITES package-lock.json, and through a symlink
+#: that is a write into the checkout.
+NODE_MANIFESTS = ("package.json", "package-lock.json", "npm-shrinkwrap.json",
+                  "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
+
 RECIPES = (
+    # 🔴 `uv sync --project /workspace` puts the environment in
+    # /workspace/.venv, and setup mounts the checkout read-only — so the
+    # advertised uv path could not succeed on any repository at all.
+    # UV_PROJECT_ENVIRONMENT moves it onto the dependency volume, which is
+    # also the venv the run phase mounts.
+    #
+    # --no-install-project because installing the ROOT package is a PEP 517
+    # build, and a build writes into the source tree (egg-info, build/) that
+    # we deliberately cannot write to. The run phase's working directory is
+    # the checkout, so the project's own modules import from there.
     Recipe("uv.lock", "python",
-           f"{VENV}/bin/uv sync --frozen --project {MOUNT}", frozen=True),
+           f"UV_PROJECT_ENVIRONMENT={VENV} {TOOLS}/bin/uv sync --frozen"
+           f" --no-install-project --project {MOUNT}", frozen=True),
+    # Poetry makes its own virtualenv in a cache directory by default — inside
+    # the read-only rootfs, and not the venv the run phase mounts.
+    # VIRTUALENVS_CREATE=false makes it install into the active one instead.
     Recipe("poetry.lock", "python",
-           f"cd {MOUNT} && {VENV}/bin/poetry install --sync --no-root", frozen=True),
+           f"cd {MOUNT} && VIRTUAL_ENV={VENV} POETRY_VIRTUALENVS_CREATE=false"
+           # `poetry sync`, not `poetry install --sync`: the flag is
+           # deprecated and slated for removal, and the installer is fetched
+           # fresh on every setup — so the flag disappearing under us is a
+           # question of when, not whether. Pinned to >=2 below, where the
+           # subcommand exists.
+           f" {TOOLS}/bin/poetry sync --no-root", frozen=True),
     Recipe("requirements.txt", "python",
            f"{VENV}/bin/pip install -r {MOUNT}/requirements.txt", frozen=False),
+    # pip builds in a temporary directory, so a read-only checkout is fine here.
     Recipe("pyproject.toml", "python",
            f"{VENV}/bin/pip install {MOUNT}", frozen=False),
     Recipe("package-lock.json", "node",
-           f"cd {MOUNT} && npm ci --prefix {DEPS_MOUNT}", frozen=True),
+           f"cd {DEPS_MOUNT} && npm ci --no-audit --no-fund", frozen=True),
     Recipe("pnpm-lock.yaml", "node",
-           f"cd {MOUNT} && pnpm install --frozen-lockfile --dir {DEPS_MOUNT}",
-           frozen=True),
+           f"cd {DEPS_MOUNT} && pnpm install --frozen-lockfile"
+           f" --store-dir {DEPS_MOUNT}/.pnpm-store", frozen=True),
     Recipe("package.json", "node",
-           f"cd {MOUNT} && npm install --prefix {DEPS_MOUNT}", frozen=False),
+           f"cd {DEPS_MOUNT} && npm install --no-audit --no-fund", frozen=False),
 )
 
 #: Manifests we recognise but do not install.
@@ -174,12 +211,17 @@ def manifest_hash(root: Path, name: str) -> str:
 #: rebuilt — the environment silently keeps whatever layout the old script
 #: produced, which is the kind of staleness that surfaces as an inexplicable
 #: import error months later.
-RECIPE_VERSION = "1"
+#: "2": node manifests are copied into the dependency volume and installed
+#: there, and uv is pointed at that volume's virtualenv. A volume built by "1"
+#: has an empty or absent node_modules and would otherwise keep a key that
+#: still matched — handed back as current forever.
+RECIPE_VERSION = "2"
 
 #: Hashed into the key when present. A lockfile pins the RESOLVED set, so it
 #: changing means the installed packages change even when the manifest that
 #: named them did not.
-LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "requirements.lock")
+LOCKFILES = ("uv.lock", "poetry.lock", "Pipfile.lock", "requirements.lock",
+             "package-lock.json", "pnpm-lock.yaml")
 
 
 def _head_sha(root: Path) -> str | None:
@@ -230,6 +272,13 @@ def environment_key(root: Path, manifest: str) -> str:
             parts.append(f"lock={lock}:{digest}")
     if manifest == "pyproject.toml":
         parts.append(f"commit={_head_sha(root) or 'unknown'}")
+    # `npm ci` validates the lockfile against package.json and REFUSES when
+    # they disagree, so a package.json that moved without its lock is a
+    # different environment — a failing one, which the key has to notice or
+    # the volume is handed back as current forever.
+    if (root / "package.json").is_file():
+        digest = hashlib.sha256((root / "package.json").read_bytes()).hexdigest()[:16]
+        parts.append(f"pkg={digest}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 
@@ -256,29 +305,61 @@ def _install_script(recipe: "Recipe", digest: str) -> str:
     nothing from the repository is interpolated into it. The manifest name comes
     from MANIFESTS, not from the filesystem.
     """
-    return (
-        "set -e\n"
-        f'if [ "$(cat {DEPS_MOUNT}/.manifest 2>/dev/null)" = "{digest}" ]; then\n'
-        '  echo "dependencies already current"\n'
-        "  exit 0\n"
-        "fi\n"
-        # Rebuild from empty. An incremental install on top of a venv built
-        # from a different manifest leaves whatever the old one pulled in, so
-        # "it works here" would depend on install order and history.
-        f"rm -rf {DEPS_MOUNT}/venv\n"
-        f"python -m venv {VENV}\n"
-        # The recipe's OWN command. This used to be a two-way branch that
-        # ran `pip install` whatever the project was, which is exactly what
-        # made a hashed lockfile meaningless: the hash moved when the lock
-        # did, while the install resolved fresh from the registry.
-        + (f"{VENV}/bin/pip install uv poetry\n"
-           if recipe.name in ("uv.lock", "poetry.lock") else "")
-        + f"{recipe.command}\n"
+    lines = [
+        "set -e",
+        f'if [ "$(cat {DEPS_MOUNT}/.manifest 2>/dev/null)" = "{digest}" ]; then',
+        '  echo "dependencies already current"',
+        "  exit 0",
+        "fi",
+        # The rootfs is read-only and every one of these tools wants somewhere
+        # to put state. /tmp is the sized tmpfs; the big caches go on the
+        # volume below, where they survive and are not memory.
+        "export HOME=/tmp",
+        # Rebuild from empty. An incremental install on top of an environment
+        # built from a different manifest leaves whatever the old one pulled
+        # in, so "it works here" would depend on install order and history.
+        f"rm -rf {DEPS_MOUNT}/venv {DEPS_MOUNT}/node_modules {TOOLS}",
+    ]
+
+    if recipe.runtime == "node":
+        # 🔴 The manifests, into the place the installer actually reads.
+        # See NODE_MANIFESTS: --prefix/--dir IS the project root, and the
+        # checkout they used to be read from is mounted read-only.
+        #
+        # `if`, not `[ -f ] && cp`: under `set -e` a false test is a failed
+        # command, so the && form would abort the script on the first
+        # manifest a repository happens not to have — which is most of them.
+        for name in NODE_MANIFESTS:
+            lines.append(f"if [ -f {MOUNT}/{name} ]; then"
+                         f" cp {MOUNT}/{name} {DEPS_MOUNT}/{name}; fi")
+        # On the volume, not in the tmpfs: an npm cache is hundreds of
+        # megabytes and the tmpfs is memory.
+        lines.append(f"export npm_config_cache={DEPS_MOUNT}/.npm-cache")
+    else:
+        lines.append(f"python -m venv {VENV}")
+        lines.append(f"export PATH={VENV}/bin:$PATH")
+        if recipe.name in ("uv.lock", "poetry.lock"):
+            # The installer the lockfile belongs to, in its OWN environment.
+            # Both of these SYNC — they remove what the lock does not name —
+            # so an installer living in the venv it is rebuilding deletes
+            # itself partway through. See TOOLS in agent/sandbox.py.
+            lines.append(f"python -m venv {TOOLS}")
+            lines.append(f'{TOOLS}/bin/pip install uv "poetry>=2"')
+
+    lines += [
+        # The recipe's OWN command. This used to be a two-way branch that ran
+        # `pip install` whatever the project was, which is exactly what made a
+        # hashed lockfile meaningless: the hash moved when the lock did, while
+        # the install resolved fresh from the registry.
+        recipe.command,
         # World-readable, because the run phase is a different, non-root user
         # and mounts this read-only.
-        + f"chmod -R a+rX {DEPS_MOUNT}\n"
-        f'echo "{digest}" > {DEPS_MOUNT}/.manifest\n'
-    )
+        f"chmod -R a+rX {DEPS_MOUNT}",
+        # LAST, and only on success: `set -e` means a failed install never
+        # reaches this line, so a broken environment is never marked current.
+        f'echo "{digest}" > {DEPS_MOUNT}/.manifest',
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def install(team_id: str, repo_full_name: str) -> dict:

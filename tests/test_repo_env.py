@@ -254,8 +254,15 @@ def test_changing_the_recipe_invalidates_every_environment(
     """🔴 Without a recipe version, a volume built by an older install script
     keeps a key that still matches and is never rebuilt — it silently keeps
     whatever layout the old script produced."""
+    from pipeline.repo_deps import RECIPE_VERSION
+
     before = environment_key(connected, "requirements.txt")
-    monkeypatch.setattr("pipeline.repo_deps.RECIPE_VERSION", "2")
+    # Derived from the current value rather than written down. A literal here
+    # silently stops testing anything the day the real version reaches it —
+    # which is exactly what happened when the node/uv layout bumped this to
+    # "2" and the assertion started comparing a key against itself.
+    monkeypatch.setattr("pipeline.repo_deps.RECIPE_VERSION",
+                        f"{RECIPE_VERSION}-other")
     assert environment_key(connected, "requirements.txt") != before
 
 

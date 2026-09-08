@@ -301,8 +301,7 @@ def metrics(authorization: str = Header(default="")) -> dict:
             "  join public.threads th"
             "    on th.id = m.thread_id and th.team_id = m.team_id"
             " where " + chat.CAPTURABLE_SQL +
-            "   and m.created_at >" + chat.CAPTURED_THROUGH_SQL.format(
-                team="m.team_id")
+            "   and" + chat.UNCAPTURED_SQL.format(team="m.team_id")
         ).fetchone()[0]
 
         # Summed here rather than listed per team: an operations endpoint

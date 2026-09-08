@@ -278,15 +278,36 @@ CAPTURABLE_SQL = (
     " and m.deleted_scope is null"
 )
 
-#: How far capture has actually got for a team. `status='done'` matters: a
-#: compilation that is still running, or that failed, has captured nothing, and
-#: treating its `chat_through` as progress hides a real backlog.
+#: What capture has NOT taken yet, as SQL.
 #:
-#: Expects a `%(team)s`-style team expression substituted in.
-CAPTURED_THROUGH_SQL = (
-    " coalesce((select max(c.chat_through) from public.memory_compilations c"
-    "            where c.team_id = {team} and c.chat_through is not null"
-    "              and c.status='done'), '-infinity'::timestamptz)"
+#: 🔴 (fix.md F15) This was a timestamp comparison — `m.created_at >
+#: max(chat_through)` — while the bounded fetch resumes from the COMPOUND
+#: cursor `(created_at, id)` that `chat_keyset` returns. Timestamps are not
+#: unique, and a batch boundary can fall in the middle of a group sharing one.
+#: The fetch would correctly take the rest of that group on the next run; the
+#: sweep, comparing timestamps only, excluded every row AT the boundary
+#: timestamp and so never asked for another job. Those messages waited for
+#: unrelated later chatter to arrive, and on a quiet team that is forever.
+#:
+#: The same ordering, in candidate discovery and in the fetch, or the two
+#: disagree about which rows still exist.
+#:
+#: `status='done'` matters too: a compilation still running, or one that
+#: failed, has captured nothing, and treating its cursor as progress hides a
+#: real backlog.
+#:
+#: Expects `m` (messages) in scope and a `{team}` expression.
+UNCAPTURED_SQL = (
+    " (m.created_at, m.id) > coalesce("
+    "   (select (c.chat_through, coalesce(c.chat_through_id,"
+    "            '00000000-0000-0000-0000-000000000000'::uuid))"
+    "      from public.memory_compilations c"
+    "     where c.team_id = {team} and c.chat_through is not null"
+    "       and c.status = 'done'"
+    "     order by c.chat_through desc, c.chat_through_id desc nulls last"
+    "     limit 1),"
+    "   ('-infinity'::timestamptz,"
+    "    '00000000-0000-0000-0000-000000000000'::uuid))"
 )
 
 
@@ -324,7 +345,7 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
             "     from public.messages m"
             "   join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
             "    where m.team_id = t.id and" + CAPTURABLE_SQL +
-            "      and m.created_at >" + CAPTURED_THROUGH_SQL.format(team="t.id") +
+            "      and" + UNCAPTURED_SQL.format(team="t.id") +
             # The prefilter has to agree with the authoritative check in
             # enqueue_chat_compile, or the sweep never calls it and the age
             # rule is unreachable.

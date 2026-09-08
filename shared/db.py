@@ -115,6 +115,21 @@ _LOCK_POOL_MAX = 32
 _pool_lock = threading.Lock()
 
 
+def runtime_urls() -> dict[str, str]:
+    """Every credential a request actually depends on, by name.
+
+    Readiness has to probe all of them. 🔴 It probed the CONTROL role only —
+    the one the API itself answers with — so a half-done credential rotation
+    left the deployment green while every turn, every approved action and
+    every document failed on a role nobody had checked. The table owner is
+    absent by design: nothing that serves a request may hold it (see
+    `allow_table_owner`).
+    """
+    urls = {role.value: url for role, url in _URLS.items() if role is not Role.ADMIN}
+    urls["authenticator"] = settings.comrade_authenticator_db_url
+    return urls
+
+
 def max_connections() -> int:
     """The most connections this process may hold, for sizing Postgres.
 

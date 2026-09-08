@@ -1596,6 +1596,159 @@ service time, which is fair per JOB and not per unit of work — a team whose
 jobs each take ten minutes still consumes more of the worker than one whose
 jobs take ten seconds.
 
+### T27 — Add truthful health, structured observability, and safe drain
+
+**Changed:** `shared/errors.py` (new), `shared/observability.py` (new),
+`supabase/migrations/20260908160000_usage_metrics_grant.sql`, `server/app.py`,
+`pipeline/worker.py`, `agent/worker.py`, `agent/runtime.py`,
+`agent/run_queue.py`, `agent/processes.py`, `pipeline/compiler.py`,
+`shared/agent_runs.py`, `shared/config.py`, `docs/operations.md` (new),
+`.env.example`, `tests/test_error_redaction.py` (new),
+`tests/test_observability.py` (new), `tests/test_drain.py` (new),
+`tests/test_metrics.py` (new), `tests/test_readiness.py` (extended).
+
+**A near-miss worth recording.** `tests/test_readiness.py` already existed with
+seven tests, and I wrote it as if it were new — the Write reported success and
+replaced the file whole. Caught at review, when `git status` showed it as `M`
+among a group I expected to be `??`, and recovered from HEAD. All seven are
+restored and passing against the new route; only two assertions changed, both
+because they had become factually wrong (the check set grew from three names to
+six). Had that file been uncommitted work from earlier in the session it would
+simply have been gone.
+
+**Regression — the error column handed over exactly what T26 had just taken
+away.** Every failure path recorded `str(exc)` verbatim. A Postgres error is
+not a short sentence: it attaches `DETAIL: Failing row contains (...)`, which
+is THE ROW, every column of it in order. So a constraint violation while
+compiling a document or writing a message wrote that content into
+`jobs.last_error` — a column `comrade_control` reads across every team — and
+into a log that is shipped somewhere else again. Confirmed end to end before
+fixing: the failing row landed in the column intact.
+
+**Design:** the diagnosis survives, the data does not. The exception CLASS, the
+constraint name and the statement's shape stay; the values go. Redaction is
+applied at the BOUNDARY where an error becomes durable — `_finish` on the job
+queue, `finish_run`, `finish_claimed_run`, `_fail_document`, the process rows —
+rather than at each caller, so the callers nobody has written yet are covered
+too.
+
+The log gets a stronger guarantee than a convention: a filter on the HANDLER
+runs every record — message, arguments and traceback together — through the
+same function. `logger.exception` is the case that needs it, because the
+traceback carries the exception's own text and that is exactly where a DSN with
+a password ends up.
+
+**Regression — readiness compared MAXIMUMS.** `applied >= newest_on_disk`, so a
+release that skipped one migration in the middle passed on the strength of the
+newest being present. A migration that failed and was retried, a rebase that
+reordered two files, a partially restored backup: each leaves a gap below the
+top, and the column nobody created is then a 500 on whichever request first
+touches it — which reads as a code bug rather than a half-finished release. Now
+a set difference, and the missing versions are NAMED: "3 missing" sends an
+operator to diff two lists by hand at the moment they can least afford it.
+
+**Regression — one role's connectivity stood for five.** `/ready` probed
+`comrade_control`, the role the API itself answers with. A turn needs
+`comrade_agent`, an approved action needs `comrade_executor`, a document needs
+`comrade_pipeline` and a member read needs `comrade_authenticator` — so a
+half-done credential rotation, which T26 turned into a routine operation, left
+the deployment green while every turn in it failed. Probed directly rather than
+through the pools: the question is whether the CREDENTIAL works, and a pool
+borrow on a bad one waits out its whole timeout before saying so.
+
+**Regression — half the product was invisible.** The pipeline queue was not
+checked at all. A wedged pipeline worker means no document compiled and no
+memory written, silently, while the agent queue it did check moved fine. Added
+with expired leases — work a dead worker is holding that nobody is doing, which
+no queue-depth check would show, because the rows are not pending.
+
+**Regression — a stop claimed one more job.** The drain guard read
+`if _stopping.is_set() and processed: break`, and `processed` is 0 at the top of
+a batch. So a stop arriving while the worker was idle claimed a job anyway,
+which then had the whole shutdown grace period to finish or be killed
+mid-flight — and a job killed mid-flight waits out its entire 30-minute lease
+before anyone redoes it. The comment above the line said the right thing; the
+condition did not.
+
+**Regression — the documented escape hatch did not exist.** Both workers'
+`_drain_on_signal` docstrings said "second signal is not caught, so an operator
+who means it can still kill the process outright". `signal.signal` installs a
+PERSISTENT handler; it is not reset after delivery. So every subsequent SIGTERM
+was swallowed exactly like the first, and a worker wedged inside a long job
+could not be stopped with anything short of SIGKILL. Found while checking the
+runbook's claims against the code rather than transcribing them — the first
+signal now hands itself back to the default handler, which makes the sentence
+true. An escape hatch that is documented and absent is worse than one never
+claimed: it is what an operator reaches for when the first attempt did nothing.
+
+**And the first version of the redactor was wrong about class names.** It
+prefixed every message with the exception's type, which is right for a library
+error — nobody wrote `CheckViolation`'s message for a person, and its type is
+most of the diagnosis — and wrong for ours. `PermanentJobError`,
+`BudgetExceeded` and their siblings are raised with a sentence somebody wrote,
+and several of those strings are shown to MEMBERS: `jobs.last_error` is what
+the connect screen renders when a clone fails. The full suite caught it as one
+failing assertion, and the member-facing consequence was "PermanentJobError:
+no GitHub credential reaches acme/app" on a setup screen. Now: a library
+exception keeps its class, ours keeps its sentence.
+
+**Also — the runbook's numbers were wrong the first time I wrote them.** I
+claimed `stop_grace_period: 300s` for both workers. The pipeline worker's is
+120s and its lease is 30 minutes, not 5 — so an operator sizing a deploy window
+from that table would have been out by an order of magnitude, and a deploy
+during a large repository sync can leave a team's checkout stale for half an
+hour with nothing failing and nothing to see. Corrected, and both the check
+NAMES and the recovery NUMBERS are now pinned by tests against the code and the
+compose file, because a runbook that drifts is worse than none.
+
+**Also — `/metrics`, gated closed.** Nothing counted anything, so every
+operational question was a SQL query somebody had to write from memory. Queue
+age, lease loss, compiler lag, run outcomes and hourly spend against the caps
+are now one call. Aggregates only and no string from any row: an endpoint that
+lists which team is spending what is a cross-team disclosure wearing a
+monitoring hat, and one that reported `last_error` would undo the redaction
+above by another route. It answers 404 unless `COMRADE_METRICS_TOKEN` is set —
+"public unless somebody remembers to put a proxy in front" is the fail-open
+default this codebase keeps having to remove — and the token is compared with
+`compare_digest`.
+
+**Also — the first version of the lag metric could not see the thing it is
+for.** `compiler_lag_seconds` compared every message against
+`max(chat_through)` across ALL teams, so one team compiling five minutes ago
+made every older message everywhere look already-compiled. The team whose
+pipeline had been broken for a week — the only one worth finding — was
+precisely the one it reported nothing about. Now per team, then the worst of
+them; a two-day backlog behind another team's fresh compilation is the
+regression test.
+
+**Passing:** 25 redaction tests, 11 observability tests, 7
+drain tests, 14 metrics tests, 18 readiness tests; 1311 backend tests,
+6 skipped, 17 deselected, 0 failed. 210 frontend tests; build and lint
+green.
+
+**Migration/rollback:** one grant, additive. `usage_buckets` aggregate columns
+to the control role — consistent with the line T26 drew, since turn and token
+COUNTS are the same class of metadata as the run statuses and job attempts that
+role already reads, and the endpoint sums them so no per-team figure leaves the
+process.
+
+**Ceiling:** 🔴 SANDBOX READINESS IS NOT CHECKED, and cannot be from where the
+check lives: the API deliberately has no Docker socket (granting it would turn
+a request-handling bug into a host compromise), so it cannot tell whether
+Docker is alive. Dead Docker still means every repository tool fails behind a
+green `/ready`. It belongs on a worker-side check that reports INTO the
+database, which is a different shape from anything here. 🔴 The metrics are a
+snapshot, not a series — no counters, no histograms, nothing that survives a
+restart, so "how often" and "how long" questions still need the database. 🔴
+Tool errors, permission wait times, preview failures and denial counts from the
+plan's list are not in `/metrics`: run outcomes cover the last of them
+indirectly and the rest have no aggregate to read yet. 🔴 Redaction is
+pattern-based, so a secret in a shape nobody anticipated passes through; the
+`DETAIL:` strip is the part that is structural rather than guessed. 🔴 No alert
+is wired to anything — `docs/operations.md` defines the conditions and the
+first action for each, and connecting them to a pager is a deployment decision
+this repository does not make.
+
 ---
 
 ## Standing ceilings

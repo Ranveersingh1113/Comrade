@@ -20,6 +20,9 @@ import time
 from typing import Callable
 
 from shared.db import Role, connect, team_session
+from shared.errors import redact, safe_error
+
+from shared import observability
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +103,12 @@ def _finish(
     over the new claim: two workers, one job, and the second one's work thrown
     away by the first one's late answer.
     """
+    # Redacted HERE rather than at each caller: this is the boundary where an
+    # error becomes durable, and a guard at the boundary covers the callers
+    # nobody has written yet. Postgres attaches `DETAIL: Failing row contains
+    # (...)` — the whole row — to a constraint violation, and this column is
+    # readable across every team by `comrade_control`. See shared/errors.py.
+    error = redact(error) if error else error
     terminal = status in ("done", "failed")
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
@@ -199,19 +208,26 @@ def run_once(
         target=_renew_until_done, args=(job_id, worker_id, done), daemon=True
     )
     renewer.start()
+    # A worker slot handles one team's job and then another's, so this is
+    # scoped to the job rather than set once for the process. Everything the
+    # handler logs — and everything the modules it calls log — is attributable
+    # without any of them knowing they are inside a job.
     try:
-        handler = handlers.get(job_type)
-        if handler is None:
-            raise ValueError(f"no handler registered for job_type: {job_type}")
-        handler(str(team_id), payload or {})
-        _finish(job_id, "done", worker_id=worker_id)
+        with observability.log_context(
+            team_id=team_id, job_id=job_id, job_type=job_type,
+        ):
+            handler = handlers.get(job_type)
+            if handler is None:
+                raise ValueError(f"no handler registered for job_type: {job_type}")
+            handler(str(team_id), payload or {})
+            _finish(job_id, "done", worker_id=worker_id)
     except PermanentJobError as exc:
         # It will never succeed, so scheduling it again is only noise.
-        _finish(job_id, "failed", error=str(exc), worker_id=worker_id)
+        _finish(job_id, "failed", error=safe_error(exc), worker_id=worker_id)
     except Exception as exc:  # noqa: BLE001 - record any transient failure on the job
         retry = attempts < MAX_ATTEMPTS
         _finish(
-            job_id, "pending" if retry else "failed", error=str(exc),
+            job_id, "pending" if retry else "failed", error=safe_error(exc),
             worker_id=worker_id,
             retry_in=_backoff_seconds(attempts) if retry else 0,
         )
@@ -274,7 +290,14 @@ def tick() -> int:
     # maintenance that never happens on a busy system.
     for _ in range(MAX_DRAIN_BATCH):
         # Shutdown means finish what is in hand, not start more.
-        if _stopping.is_set() and processed:
+        #
+        # 🔴 This read `if _stopping.is_set() and processed`, and `processed`
+        # is 0 at the top of a batch — so a stop that arrived while the worker
+        # was idle claimed ONE MORE job before noticing. That job then had the
+        # whole shutdown grace period to finish or be killed mid-flight, and a
+        # job killed mid-flight waits out its entire lease before anyone redoes
+        # it. The comment above said the right thing; the condition did not.
+        if _stopping.is_set():
             break
         if not run_once():
             break
@@ -354,10 +377,27 @@ _stopping = threading.Event()
 
 
 def _drain_on_signal() -> None:
-    """Finish the item in hand, then stop. Second signal is not caught, so an
-    operator who means it can still kill the process outright."""
+    """Finish the item in hand, then stop.
+
+    The FIRST signal drains. The second is left to the default handler, so an
+    operator who means it can still kill the process outright.
+
+    🔴 The line above used to say that and it was not true. `signal.signal`
+    installs a PERSISTENT handler — it is not reset after delivery — so every
+    subsequent SIGTERM was caught and swallowed exactly like the first, and a
+    worker wedged inside a long job could not be stopped with anything short of
+    SIGKILL. An escape hatch that is documented and absent is worse than one
+    that was never claimed, because it is the thing an operator reaches for
+    when the first attempt did not work.
+    """
     def _handle(signum, _frame):
         logger.info("signal %s received: draining, will stop after this item", signum)
+        # Hand this signal back to the default handler before doing anything
+        # else: from here on a second one terminates.
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
         _stopping.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -370,7 +410,7 @@ def _drain_on_signal() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    observability.setup("pipeline-worker")
     # Handlers register at import time, so this list IS the wiring — a module
     # missing here is a job type that fails three times and gives up, with
     # "no handler registered" as the only trace.

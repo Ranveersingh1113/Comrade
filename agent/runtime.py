@@ -27,6 +27,7 @@ from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
 from shared.db import thread_lock
+from shared.observability import bind, log_context
 from shared.usage import finalize_usage, run_allowance
 from shared.config import settings
 
@@ -250,6 +251,12 @@ async def stream_turn(
     # The HTTP layer may already hold this lock before it records the input,
     # which prevents a rejected busy turn becoming later history.
     with ExitStack() as stack:
+        # Every line this turn produces — here, in the tools, in the DB
+        # helpers — carries the ids an operator filters on. `run_id` is bound
+        # later, because the run row does not exist yet.
+        stack.enter_context(log_context(
+            team_id=team_id, thread_id=thread_id, worker_id=worker_id,
+        ))
         if not lock_held and not stack.enter_context(thread_lock(thread_id)):
             yield {
                 "type": "busy",
@@ -265,6 +272,7 @@ async def stream_turn(
                 start_run, team_id, requester_id, thread_id, exclude_message_id,
                 trigger_type, user_text[:200],
             )
+        bind(run_id=run_id)
         yield {"type": "run", "run_id": run_id}
 
         message = types.Content(role="user", parts=[types.Part(text=user_text)])

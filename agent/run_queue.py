@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from shared.config import settings
+from shared.errors import redact
 from shared.db import Role, team_session, user_session
 
 MAX_ATTEMPTS = 3
@@ -181,6 +182,12 @@ def finished_by_worker(run: Run) -> bool:
 
 def finish_claimed_run(run: Run, status: str, error: str | None = None) -> bool:
     """Only the worker currently holding the lease may close its run."""
+    # Redacted HERE rather than at each caller: this is the boundary where an
+    # error becomes durable, and a guard at the boundary covers the callers
+    # nobody has written yet. Postgres attaches `DETAIL: Failing row contains
+    # (...)` — the whole row — to a constraint violation, and this column is
+    # readable across every team by `comrade_control`. See shared/errors.py.
+    error = redact(error) if error else error
     with team_session(Role.AGENT, run.team_id) as conn:
         cur = conn.execute(
             "update public.agent_runs set status=%s, finished_at=now(),"

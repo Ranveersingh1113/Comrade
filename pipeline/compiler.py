@@ -30,6 +30,7 @@ from pipeline.parsers import (
 from pipeline.wiki import all_active_pages, annotate
 from pipeline.worker import PermanentJobError, register
 from shared.config import settings
+from shared.errors import redact
 from shared.db import Role, team_session
 from shared.storage import (
     MAX_DOCUMENT_BYTES, DocumentTooLarge, download_document,
@@ -777,6 +778,9 @@ def _fail_document(team_id: str, document_id: str, reason: str) -> None:
     .doc" — three problems with three different answers, behind one blank
     wall.
     """
+    # Same boundary guard as the queue's `_finish`: this is a message the
+    # member reads, and a Postgres error carries the failing row with it.
+    reason = redact(reason)
     with team_session(Role.PIPELINE, team_id) as conn:
         conn.execute(
             "update public.documents set status='failed', parse_error=%s"

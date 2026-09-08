@@ -26,6 +26,7 @@ from agent.sandbox import (
     DEPS_MOUNT, MOUNT, SANDBOX_UID, VENV, _SECURITY_FLAGS, _git_mask,
 )
 from shared.config import settings
+from shared.errors import safe_error
 from shared.db import Role, team_session
 
 logger = logging.getLogger(__name__)
@@ -284,7 +285,7 @@ def start(
         # network per process means one leak per failure.
         if network:
             _remove_network(process_id)
-        _finish(team_id, process_id, "failed", detail=str(exc))
+        _finish(team_id, process_id, "failed", detail=safe_error(exc))
         raise
 
     with team_session(Role.AGENT, team_id) as conn:
@@ -547,7 +548,7 @@ def drain_cleanup() -> int:
                 conn.execute(
                     "update public.sandbox_cleanup"
                     "   set attempts = attempts + 1, last_error = %s where id=%s",
-                    (str(exc)[:400], cleanup_id),
+                    (safe_error(exc), cleanup_id),
                 )
                 continue
             conn.execute(

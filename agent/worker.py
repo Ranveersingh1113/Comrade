@@ -16,7 +16,10 @@ from agent.run_queue import (
 )
 from agent.runtime import run_turn_sync
 from shared.config import settings
+from shared.errors import safe_error
 from shared.db import Role, team_session
+
+from shared import observability
 
 logger = logging.getLogger(__name__)
 POLL_SECONDS = 1.0
@@ -30,10 +33,27 @@ _stopping = threading.Event()
 
 
 def _drain_on_signal() -> None:
-    """Finish the item in hand, then stop. Second signal is not caught, so an
-    operator who means it can still kill the process outright."""
+    """Finish the item in hand, then stop.
+
+    The FIRST signal drains. The second is left to the default handler, so an
+    operator who means it can still kill the process outright.
+
+    🔴 The line above used to say that and it was not true. `signal.signal`
+    installs a PERSISTENT handler — it is not reset after delivery — so every
+    subsequent SIGTERM was caught and swallowed exactly like the first, and a
+    worker wedged inside a long job could not be stopped with anything short of
+    SIGKILL. An escape hatch that is documented and absent is worse than one
+    that was never claimed, because it is the thing an operator reaches for
+    when the first attempt did not work.
+    """
     def _handle(signum, _frame):
         logger.info("signal %s received: draining, will stop after this item", signum)
+        # Hand this signal back to the default handler before doing anything
+        # else: from here on a second one terminates.
+        try:
+            signal.signal(signum, signal.SIG_DFL)
+        except (ValueError, OSError):
+            pass
         _stopping.set()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -91,7 +111,7 @@ def run_once(worker_id: str | None = None) -> bool:
             _persist_ai_reply(run.team_id, run.thread_id, result.get("reply", ""))
     except Exception as exc:  # noqa: BLE001 - failures are durable queue state
         logger.exception("agent run failed: %s", run.id)
-        finish_claimed_run(run, "failed", str(exc))
+        finish_claimed_run(run, "failed", safe_error(exc))
     finally:
         stopped.set()
         renewer.join(timeout=1)
@@ -129,7 +149,7 @@ def main() -> None:
     slot needs its own identity — the lease fence is by worker id, so two slots
     in one process must not be mistaken for each other.
     """
-    logging.basicConfig(level=logging.INFO)
+    observability.setup("agent-worker")
     base = _worker_id()
     _drain_on_signal()
     slots = max(settings.comrade_agent_concurrency, 1)

@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # HTTP surface. The JWT secret verifies Supabase-issued user tokens; without
     # it the API refuses to authenticate anyone rather than trusting the caller.
     supabase_jwt_secret: str = ""
+    # Bearer token for /metrics. EMPTY TURNS THE ENDPOINT OFF.
+    #
+    # Queue depth, hourly spend and failure counts are not a member's data,
+    # but they are not the internet's either. "Public unless somebody
+    # remembers to put a proxy in front" is the fail-open default this
+    # codebase keeps having to remove, so unset means 404 rather than open.
+    comrade_metrics_token: str = ""
+
     # Comma-separated browser origins allowed to call the API.
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     # Per-team hourly cap on agent turns — the lid on LLM spend and the

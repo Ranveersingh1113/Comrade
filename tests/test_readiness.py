@@ -6,7 +6,31 @@ request failed. That is fixed. This file pins the OTHER half: a process can be
 perfectly alive and still unable to serve a turn — schema a release behind, or
 no worker draining the queue — and a deploy that goes green on liveness alone
 tells an operator nothing about either.
+
+🔴 AND THEN /ready ITSELF WAS TOO EASY TO SATISFY (T27):
+
+1. The migration check compared MAXIMUMS — `applied >= newest_on_disk`. A
+   release that skipped one in the middle (a migration that failed and was
+   retried, a rebase that reordered two files, a partially restored backup)
+   passed on the strength of the newest one being present. The column nobody
+   created is then a 500 on whichever request first touches it, which reads as
+   a code bug rather than a half-finished release.
+
+2. Only ONE role's connectivity was checked. The API answers with
+   `comrade_control`; a turn needs `comrade_agent`, an approved action needs
+   `comrade_executor`, a document needs `comrade_pipeline` and a member read
+   needs `comrade_authenticator`. A half-done credential rotation left the
+   deployment green while every turn in it failed.
+
+3. The PIPELINE queue was not checked at all. A wedged pipeline worker means
+   no document compiled and no memory written, silently, while the agent queue
+   it did check moved fine.
+
+4. Nothing noticed leases that had expired while still marked running: work a
+   dead worker is holding that nobody is doing.
 """
+from pathlib import Path
+
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +38,8 @@ from fastapi.testclient import TestClient
 from server.app import app
 from shared.config import settings
 from tests._seed import A1, TEAM_A
+
+MIGRATIONS = Path(__file__).resolve().parent.parent / "supabase" / "migrations"
 
 
 @pytest.fixture
@@ -36,9 +62,9 @@ def test_ready_reports_each_check_by_name(seeded, client):
     about which thing — at 3am that is the whole difference."""
     body = client.get("/ready").json()
     assert body["status"] == "ready", body
-    assert body["checks"]["database"] == "ok"
-    assert body["checks"]["migrations"] == "ok"
-    assert body["checks"]["agent_queue"] == "ok"
+    for name in ("database", "migrations", "roles", "agent_queue",
+                 "pipeline_queue", "expired_leases"):
+        assert body["checks"][name] == "ok", (name, body["checks"][name])
 
 
 def test_a_stalled_queue_is_not_ready(seeded, client, admin):
@@ -99,7 +125,13 @@ def test_readiness_needs_no_authentication(seeded, client):
     dependency, and it must not leak anything either — the checks name
     subsystems, never rows."""
     body = client.get("/ready").json()
-    assert set(body["checks"]) <= {"database", "migrations", "agent_queue"}
+    # The SET grew in T27 (roles, pipeline_queue, expired_leases). What must
+    # not grow is what a check VALUE may contain, which the two tests at the
+    # end of this file pin.
+    assert set(body["checks"]) <= {
+        "database", "migrations", "roles", "agent_queue", "pipeline_queue",
+        "expired_leases",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -138,3 +170,229 @@ def test_a_drained_agent_worker_claims_nothing_more(monkeypatch):
         worker._stopping.clear()
 
     assert len(claims) == 1, f"kept claiming after SIGTERM: {len(claims)} claims"
+
+def _admin_conn():
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    return conn
+
+
+def _checks(client) -> dict:
+    return client.get("/ready").json()["checks"]
+
+
+# ---------------------------------------------------------------------------
+# Migrations
+# ---------------------------------------------------------------------------
+
+def test_a_missing_middle_migration_is_not_ready(seeded, client):
+    """🔴 It was. The check compared the newest version on disk with the
+    newest applied, so a gap anywhere below the top was invisible."""
+    versions = sorted(p.name.split("_", 1)[0] for p in MIGRATIONS.glob("*.sql"))
+    middle = versions[len(versions) // 2]
+
+    conn = _admin_conn()
+    try:
+        row = conn.execute(
+            "select version, statements, name from"
+            " supabase_migrations.schema_migrations where version=%s", (middle,),
+        ).fetchone()
+        assert row, f"{middle} should be applied in a healthy database"
+        conn.execute(
+            "delete from supabase_migrations.schema_migrations where version=%s",
+            (middle,),
+        )
+        response = client.get("/ready")
+        checks = response.json()["checks"]
+    finally:
+        conn.execute(
+            "insert into supabase_migrations.schema_migrations"
+            " (version, statements, name) values (%s,%s,%s)"
+            " on conflict (version) do nothing", row,
+        )
+        conn.close()
+
+    assert response.status_code == 503
+    assert checks["migrations"] != "ok"
+    assert middle in checks["migrations"], (
+        "an operator has to be told WHICH migration is missing: " + checks["migrations"]
+    )
+
+
+def test_a_complete_schema_is_ready(seeded, client):
+    assert _checks(client)["migrations"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Roles
+# ---------------------------------------------------------------------------
+
+def test_every_role_the_product_needs_is_checked(seeded, client):
+    """🔴 Only the control role was. A turn needs `comrade_agent`, an approved
+    action needs `comrade_executor`, a document needs `comrade_pipeline`, and
+    a member read needs `comrade_authenticator` — so a half-done credential
+    rotation left this green while every turn failed."""
+    checks = _checks(client)
+
+    assert checks["roles"] == "ok", checks["roles"]
+
+
+def test_a_role_that_cannot_connect_is_not_ready(seeded, client, monkeypatch):
+    import shared.db as db
+    from shared.db import Role
+
+    monkeypatch.setitem(
+        db._URLS, Role.EXECUTOR,
+        "postgresql://comrade_executor:wrong@127.0.0.1:54322/postgres",
+    )
+    db.close_pools()
+    try:
+        response = client.get("/ready")
+    finally:
+        db.close_pools()
+
+    assert response.status_code == 503
+    assert "executor" in response.json()["checks"]["roles"]
+
+
+# ---------------------------------------------------------------------------
+# Work actually moving
+# ---------------------------------------------------------------------------
+
+def test_a_stalled_pipeline_queue_is_not_ready(seeded, client):
+    """🔴 Not checked at all. A wedged pipeline worker means no document is
+    compiled and no memory written, silently, behind a green deploy."""
+    conn = _admin_conn()
+    try:
+        conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, created_at,"
+            " available_at) values (%s,'ingest_github','{}',"
+            " now() - interval '3 hours', now() - interval '3 hours')",
+            (TEAM_A,),
+        )
+        response = client.get("/ready")
+    finally:
+        conn.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+        conn.close()
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["pipeline_queue"] != "ok"
+
+
+def test_a_lease_that_expired_while_still_running_is_not_ready(seeded, client):
+    """Work a dead worker is holding and nobody is doing. The recovery sweep
+    is supposed to reclaim these; if they are piling up, it is not running."""
+    conn = _admin_conn()
+    try:
+        conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, status,"
+            " picked_at, lease_expires_at, worker_id)"
+            " values (%s,'ingest_github','{}','processing',"
+            " now() - interval '2 hours', now() - interval '90 minutes','gone')",
+            (TEAM_A,),
+        )
+        response = client.get("/ready")
+    finally:
+        conn.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+        conn.close()
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["expired_leases"] != "ok"
+
+
+def test_a_quiet_system_is_ready(seeded, client):
+    """An EMPTY queue is the normal state and must not read as a stall — the
+    check is "is work stuck", not "is work happening"."""
+    conn = _admin_conn()
+    try:
+        conn.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+    finally:
+        conn.close()
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200, response.json()
+
+
+# ---------------------------------------------------------------------------
+# Liveness is a different question
+# ---------------------------------------------------------------------------
+
+def test_health_does_not_fail_on_a_stalled_PIPELINE_queue(seeded, client):
+    """🔴 The distinction this route exists for. Restarting the API does not
+    unstick a queue, so a stall must not be something an orchestrator kills
+    healthy containers over — Compose's own health status does not restart
+    anything, but a Kubernetes livenessProbe does."""
+    conn = _admin_conn()
+    try:
+        conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, created_at,"
+            " available_at) values (%s,'ingest_github','{}',"
+            " now() - interval '3 hours', now() - interval '3 hours')",
+            (TEAM_A,),
+        )
+        health = client.get("/health")
+        ready = client.get("/ready")
+    finally:
+        conn.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
+        conn.close()
+
+    assert health.status_code == 200, "liveness must not follow readiness"
+    assert ready.status_code == 503
+
+
+def test_readiness_never_reports_a_credential(seeded, client, monkeypatch):
+    """The checks name what is broken, and a connection failure quotes the
+    DSN back. See shared/errors.py."""
+    import shared.db as db
+    from shared.db import Role
+
+    monkeypatch.setitem(
+        db._URLS, Role.EXECUTOR,
+        "postgresql://comrade_executor:s3cr3t-rotation@127.0.0.1:54322/postgres",
+    )
+    db.close_pools()
+    try:
+        body = client.get("/ready").text
+    finally:
+        db.close_pools()
+
+    assert "s3cr3t-rotation" not in body
+
+
+# ---------------------------------------------------------------------------
+# The runbook has to describe this system, not a former one
+# ---------------------------------------------------------------------------
+
+def test_the_runbook_documents_every_check_this_route_reports(seeded, client):
+    """A runbook that names four of six checks is a runbook that sends an
+    operator to read the source at the worst possible moment."""
+    runbook = (Path(__file__).resolve().parent.parent
+               / "docs" / "operations.md").read_text(encoding="utf-8")
+
+    for name in _checks(client):
+        assert f"### `{name}`" in runbook, (
+            f"/ready reports `{name}` and docs/operations.md never mentions it"
+        )
+
+
+def test_the_runbook_quotes_the_real_recovery_windows():
+    """🔴 It quoted 300s for both workers; the pipeline worker's is 120s, and
+    its lease is 30 minutes rather than 5. An operator sizing a deploy window
+    from those numbers would have been out by an order of magnitude."""
+    import yaml
+
+    from agent import run_queue
+    from pipeline import worker
+
+    root = Path(__file__).resolve().parent.parent
+    runbook = (root / "docs" / "operations.md").read_text(encoding="utf-8")
+    compose = yaml.safe_load((root / "docker-compose.yml").read_text(encoding="utf-8"))
+
+    for service in ("pipeline-worker", "agent-worker"):
+        grace = compose["services"][service]["stop_grace_period"]
+        assert f"| {grace} |" in runbook, (
+            f"{service} stops after {grace} and the runbook does not say so"
+        )
+    assert f"| {worker.LEASE_INTERVAL} |" in runbook
+    assert f"| {run_queue.LEASE_INTERVAL} |" in runbook

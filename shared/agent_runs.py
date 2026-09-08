@@ -16,6 +16,7 @@ from typing import Any
 
 from psycopg.types.json import Json
 
+from shared.errors import redact
 from shared.db import Role, team_session
 
 
@@ -123,6 +124,12 @@ def finish_run(
     failed still consumed the prompt it was handed, and accounting that only
     counts successes understates exactly the runs worth investigating.
     """
+    # Redacted HERE rather than at each caller: this is the boundary where an
+    # error becomes durable, and a guard at the boundary covers the callers
+    # nobody has written yet. Postgres attaches `DETAIL: Failing row contains
+    # (...)` — the whole row — to a constraint violation, and this column is
+    # readable across every team by `comrade_control`. See shared/errors.py.
+    last_error = redact(last_error) if last_error else last_error
     with team_session(Role.AGENT, team_id) as conn:
         cur = conn.execute(
             "update public.agent_runs set status = %s, finished_at = now(),"

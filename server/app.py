@@ -10,6 +10,10 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+
+import hmac
+
+import psycopg
 import logging
 import uuid
 import asyncio
@@ -21,7 +25,8 @@ import websockets
 import httpx
 
 from fastapi import (
-    Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket,
+    Depends, FastAPI, File, Header, HTTPException, Request, UploadFile,
+    WebSocket,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,11 +58,18 @@ from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
     reject_consent, revoke_permission_grant,
 )
-from shared.db import Role, connect, team_session, user_session
+from shared import observability
+from shared.errors import safe_error
+from shared.db import Role, connect, runtime_urls, team_session, user_session
 from shared.agent_runs import get_thread_runs
 from shared.usage import (
     BudgetExceeded, finalize_usage, record_reservation, release_turn, reserve_turn,
 )
+
+# At import rather than in a main(): the API is started by uvicorn, which
+# never calls one. Without this the handler is uvicorn's own — no correlation
+# fields and, more to the point, no redaction.
+observability.setup("api")
 
 logger = logging.getLogger(__name__)
 
@@ -159,48 +171,50 @@ def ready(response: Response) -> dict:
             conn.execute("select 1")
         checks["database"] = "ok"
     except Exception as exc:  # noqa: BLE001 - any failure to reach it counts
-        logger.warning("readiness: database unreachable: %s", exc)
+        logger.warning("readiness: database unreachable: %s", safe_error(exc))
         checks["database"] = "unreachable"
 
-    # The migration the CODE expects against the one the DATABASE has applied.
-    # An app deployed ahead of its schema fails on the first request that
-    # touches a new column, which reads as a code bug rather than a half
-    # finished release.
-    if checks["database"] == "ok":
+    # 🔴 Only the CONTROL role was ever checked — the one the API answers with.
+    # A turn needs `comrade_agent`, an approved action needs
+    # `comrade_executor`, a document needs `comrade_pipeline` and a member read
+    # needs `comrade_authenticator`, so a half-done credential rotation left
+    # this green while every turn in the deployment failed.
+    #
+    # Direct connections rather than the pools: the question is whether the
+    # CREDENTIAL works, and a pool borrow on a bad one waits out its whole
+    # timeout before saying so — a readiness probe that hangs is a readiness
+    # probe that gets killed.
+    broken = []
+    for name, url in runtime_urls().items():
+        if not url:
+            broken.append(f"{name}: not configured")
+            continue
         try:
-            newest_on_disk = max(
-                path.name.split("_", 1)[0]
-                for path in (Path(__file__).resolve().parent.parent
-                             / "supabase" / "migrations").glob("*.sql")
-            )
-            with connect(Role.CONTROL) as conn:
-                applied = conn.execute(
-                    "select max(version) from supabase_migrations.schema_migrations"
-                ).fetchone()[0]
-            checks["migrations"] = (
-                "ok" if applied and applied >= newest_on_disk
-                else f"behind: code expects {newest_on_disk}, database has {applied}"
-            )
+            with psycopg.connect(url, connect_timeout=READY_CONNECT_SECONDS) as conn:
+                conn.execute("select 1")
         except Exception as exc:  # noqa: BLE001
-            checks["migrations"] = f"unknown: {exc}"
+            broken.append(f"{name}: {safe_error(exc)}")
+    checks["roles"] = "ok" if not broken else "; ".join(broken)
 
-        # A queue nobody is draining. Not "is a worker registered" — that is a
-        # claim a dead process can keep making — but "is work actually moving",
-        # which is the thing a member experiences.
-        try:
-            with connect(Role.CONTROL) as conn:
-                stalled = conn.execute(
-                    "select count(*) from public.agent_runs"
-                    " where status='queued'"
-                    "   and created_at < now() - make_interval(mins => %s)",
-                    (READY_STALL_MINUTES,),
-                ).fetchone()[0]
-            checks["agent_queue"] = (
-                "ok" if not stalled
-                else f"{stalled} run(s) queued over {READY_STALL_MINUTES}m — is a worker running?"
-            )
-        except Exception as exc:  # noqa: BLE001
-            checks["agent_queue"] = f"unknown: {exc}"
+    if checks["database"] == "ok":
+        checks["migrations"] = _migration_check()
+        checks["agent_queue"] = _queue_check(
+            "select count(*) from public.agent_runs where status='queued'"
+            " and created_at < now() - make_interval(mins => %s)",
+            "run(s) queued over {mins}m — is the agent worker running?",
+        )
+        # 🔴 Not checked at all. A wedged pipeline worker means no document is
+        # ever compiled and no memory ever written — silently, behind a green
+        # deploy, because the agent queue it did check was moving fine.
+        checks["pipeline_queue"] = _queue_check(
+            "select count(*) from public.jobs where status='pending'"
+            " and available_at < now() - make_interval(mins => %s)",
+            "job(s) pending over {mins}m — is the pipeline worker running?",
+        )
+        # Work a dead worker is holding that nobody is doing. The recovery
+        # sweeps are supposed to reclaim these; a pile of them means the sweep
+        # itself is not running, which no queue-depth check would show.
+        checks["expired_leases"] = _lease_check()
 
     ok = all(v == "ok" for v in checks.values())
     if not ok:
@@ -208,10 +222,180 @@ def ready(response: Response) -> dict:
     return {"status": "ready" if ok else "not_ready", "checks": checks}
 
 
+@app.get("/metrics")
+def metrics(authorization: str = Header(default="")) -> dict:
+    """Counts and ages, for deciding whether a limit is set right.
+
+    🔴 Nothing counted anything. `/ready` answers "is it broken", which is the
+    wrong question for every decision an operator actually makes: whether the
+    hourly token cap is too tight, whether the compiler is falling behind, how
+    many turns ended badly and in which way. Each of those was a SQL query
+    somebody had to write from memory against a schema they did not have in
+    front of them, at the moment they could least afford it.
+
+    AGGREGATES ONLY, and no strings from any row. An operations endpoint that
+    lists which team is spending what is a cross-team disclosure wearing a
+    monitoring hat, and one that reports `last_error` undoes the redaction in
+    shared/errors.py by another route.
+    """
+    expected = settings.comrade_metrics_token
+    if not expected:
+        # 404, not 401: an endpoint that is not turned on should not advertise
+        # that it exists.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
+    supplied = authorization.removeprefix("Bearer ").strip()
+    # Constant time. A metrics token is guessable by timing exactly like any
+    # other secret, and `==` on strings returns early on the first differing
+    # byte.
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "not authorised")
+
+    with connect(Role.CONTROL) as conn:
+        pipeline = conn.execute(
+            "select"
+            "  count(*) filter (where status='pending'),"
+            "  count(*) filter (where status='processing'),"
+            "  count(*) filter (where status='failed'),"
+            # The number `/ready`'s threshold is compared against. An operator
+            # choosing that threshold needs to see it.
+            "  coalesce(extract(epoch from now() -"
+            "    min(created_at) filter (where status='pending')), 0),"
+            # Work reclaimed from a worker that stopped answering. A rising
+            # count is how an OOM-killed worker is found when nothing else says
+            # so.
+            "  count(*) filter (where status='processing'"
+            "                     and lease_expires_at < now()),"
+            "  coalesce(max(attempts), 0)"
+            " from public.jobs"
+        ).fetchone()
+        runs = conn.execute(
+            "select status, count(*) from public.agent_runs"
+            " where created_at > now() - interval '24 hours' group by status"
+        ).fetchall()
+        # How far behind the wiki is from the conversation. Nothing FAILS when
+        # this grows; the product just quietly stops knowing things.
+        #
+        # 🔴 This compared against `max(chat_through)` across ALL teams, so one
+        # team compiling five minutes ago made every older message everywhere
+        # look already-compiled. The team whose pipeline has been broken for a
+        # week — the only one this metric exists to find — was the one it could
+        # not see. Per team, then the worst of them.
+        lag = conn.execute(
+            "select coalesce(max(extract(epoch from now() - m.created_at)), 0)"
+            "  from public.messages m"
+            " where m.created_at > coalesce("
+            "   (select max(c.chat_through) from public.memory_compilations c"
+            "     where c.team_id = m.team_id), 'epoch'::timestamptz)"
+        ).fetchone()[0]
+
+        # Summed here rather than listed per team: an operations endpoint
+        # that says which team is spending what is a cross-team disclosure
+        # wearing a monitoring hat.
+        usage = conn.execute(
+            "select coalesce(sum(turns),0), coalesce(sum(tokens),0),"
+            "       count(*) from public.usage_buckets"
+            " where bucket = date_trunc('hour', now())"
+        ).fetchone()
+
+    return {
+        "pipeline": {
+            "pending": pipeline[0],
+            "processing": pipeline[1],
+            "failed": pipeline[2],
+            "oldest_pending_seconds": int(pipeline[3]),
+            "leases_expired": pipeline[4],
+            "max_attempts_seen": pipeline[5],
+            "compiler_lag_seconds": int(lag),
+        },
+        "agent": {
+            "runs_by_status": {status: count for status, count in runs},
+        },
+        "usage": {
+            "turns_this_hour": int(usage[0]),
+            "tokens_this_hour": int(usage[1]),
+            "teams_active_this_hour": usage[2],
+            # A number with nothing to compare it to is not a metric.
+            "turns_cap": settings.agent_turns_per_hour,
+            "tokens_cap": settings.agent_tokens_per_hour,
+            "turn_estimate": settings.agent_tokens_estimate,
+        },
+    }
+
+
+def _migration_check() -> str:
+    """Every migration the code carries, against every one the database has.
+
+    🔴 This compared MAXIMUMS — `applied >= newest_on_disk` — so a release that
+    skipped one in the middle passed on the strength of the newest one being
+    there. A migration that failed and was retried, a rebase that reordered two
+    files, a partially restored backup: each leaves a gap below the top, and
+    the column nobody created is then a 500 on whichever request first touches
+    it, which reads as a code bug rather than a half-finished release.
+    """
+    try:
+        on_disk = {
+            path.name.split("_", 1)[0]
+            for path in (Path(__file__).resolve().parent.parent
+                         / "supabase" / "migrations").glob("*.sql")
+        }
+        with connect(Role.CONTROL) as conn:
+            applied = {
+                row[0] for row in conn.execute(
+                    "select version from supabase_migrations.schema_migrations"
+                ).fetchall()
+            }
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown: {safe_error(exc)}"
+    missing = sorted(on_disk - applied)
+    if not missing:
+        return "ok"
+    # Named, not counted: "3 missing" sends an operator to diff two lists by
+    # hand at the moment they can least afford it.
+    shown = ", ".join(missing[:READY_MAX_LISTED])
+    more = f" (+{len(missing) - READY_MAX_LISTED} more)"         if len(missing) > READY_MAX_LISTED else ""
+    return f"not applied: {shown}{more}"
+
+
+def _queue_check(sql: str, complaint: str) -> str:
+    """Is work STUCK — not "is work happening". An empty queue is the normal
+    state of a healthy deployment and must never read as a stall."""
+    try:
+        with connect(Role.CONTROL) as conn:
+            stalled = conn.execute(sql, (READY_STALL_MINUTES,)).fetchone()[0]
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown: {safe_error(exc)}"
+    if not stalled:
+        return "ok"
+    return f"{stalled} " + complaint.format(mins=READY_STALL_MINUTES)
+
+
+def _lease_check() -> str:
+    try:
+        with connect(Role.CONTROL) as conn:
+            stuck = conn.execute(
+                "select count(*) from public.jobs where status='processing'"
+                " and lease_expires_at < now() - make_interval(mins => %s)",
+                (READY_STALL_MINUTES,),
+            ).fetchone()[0]
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown: {safe_error(exc)}"
+    if not stuck:
+        return "ok"
+    return (f"{stuck} job(s) held past an expired lease for over"
+            f" {READY_STALL_MINUTES}m — is the recovery sweep running?")
+
+
 #: How long a run may sit queued before readiness calls the queue stalled.
 #: Longer than the slowest legitimate turn, so a busy worker is never reported
 #: as a missing one.
 READY_STALL_MINUTES = 10
+#: A readiness probe that hangs is a readiness probe that gets killed, and an
+#: unreachable role is exactly the case where a connect can hang.
+READY_CONNECT_SECONDS = 3
+#: Missing migrations are NAMED rather than counted — "3 missing" sends an
+#: operator to diff two lists by hand at the moment they can least afford it —
+#: but a fresh database is missing all of them, and that is not a report.
+READY_MAX_LISTED = 5
 
 
 # ---------- agent ----------

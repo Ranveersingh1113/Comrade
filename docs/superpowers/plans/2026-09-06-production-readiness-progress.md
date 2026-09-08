@@ -1841,6 +1841,98 @@ a migrated schema here. 🔴 Six of the ten register entries say "consequence no
 traced" — they are historical, and a consequence nobody verified is not
 written down as if it had been.
 
+## Repair checklist (fix.md)
+
+A read-only review pinned at `7be319e` produced 34 findings across T01–T27.
+Worked in the order the document itself sets, and **every finding was
+re-confirmed against the current branch before it was fixed** — the document
+asks for that, and one of its own items turned out to overstate the situation
+while several understated it. Each fix was then mutation-checked: the new tests
+were run against the old behaviour to prove they fail.
+
+**Closed: 16 of 34.** Commits `d701f56` and `e3990eb`.
+
+### The two that should not have shipped
+
+**F24/F25 — T25's feature never ran once.** The webhook route passed the
+delivery id as a fifth POSITIONAL argument to a keyword-only parameter, so
+every check event raised `TypeError: record_check_result() takes 4 positional
+arguments but 5 were given` into a broad `except` and the delivery was
+acknowledged with nothing recorded. And `_create_pr` returns `pr_url` and
+`created`, while the consent flow reads `result["number"]` — a KeyError into a
+second broad `except`, so no pull request was ever correlated with its thread.
+
+The lesson is in the test shape, not the typo: T25's tests called
+`record_check_result(...)` and `record_pull_request(...)` directly, with the
+correct keywords, and were green over both broken call sites the whole time. A
+unit test of a helper says nothing about whether anything calls it correctly.
+The replacements go through the signed webhook route and through the real
+`_create_pr` with its transport mocked.
+
+The review also corrected the DESIGN, not just the call. The T25 entry above
+argues the result must be recorded before the delivery is acknowledged, because
+"one that is only queued is one a worker crash loses". That is not true of a
+queued JOB — a durable row with retries and backoff — and logging-and-
+continuing was what actually lost results. Correlation now happens in the job
+handler.
+
+### The rest, by what they were
+
+| | Defect, as reproduced |
+|---|---|
+| F01 | Previews OFF — the default — made `caddy:2-alpine` refuse the whole config; the release printed "deployed" over the outage because its check ran inside the api container against localhost |
+| F03 | `max_size=None` let a team's own preview server exhaust the internet-facing API |
+| F04 | Stream authorization was checked at connect and never again; a removed participant kept receiving private steps |
+| F11 | The per-team run ceiling was advice under concurrency: measured, 2 admitted against a ceiling of 1 |
+| F19 | The audit log snapshotted whole rows behind a team-wide policy, including `documents.parsed_text` |
+| F20 | Member-written `storage_path` read with the service secret, with no ownership check |
+| F22 | The recorded content hash was never compared with the bytes fetched |
+| F26 | The verification digest hashed untracked FILENAMES, so a checked new file could be rewritten |
+| F27 | A failed git measurement produced a stable digest that matched another failure |
+| F31 | uvicorn configures logging before importing the app, so access logs never reached the redactor |
+| F32 | PostgreSQL puts values in the PRIMARY message, not only in `DETAIL` |
+| F33 | Empty queues with both workers dead read as ready |
+| F34 | Compiler lag counted private, AI and deleted messages that capture never looks at |
+
+### Two of my own fixes were wrong first
+
+**The F31 filter wedged the server.** Redacting by mutating the record cleared
+`record.args`, which uvicorn's `AccessFormatter` reads positionally. Every
+request then raised inside logging, and under a captured pipe the tracebacks
+filled the buffer and stopped the API answering. A privacy fix that took the
+product down. Redacting the FORMATTED output instead is both safer and
+formatter-agnostic.
+
+**The F33 heartbeat exposed a latent race.** Adding a database round trip to
+the worker loop widened a window in an existing drain test that asserted one
+claim while the worker runs two slots — each of which legitimately claims once.
+The test was pinned to one slot rather than the assertion loosened.
+
+### Deliberately not fixed
+
+**F02 is confirmed and open.** Measured directly: a container on an
+`--internal` network reaches another member on port 8000 and gets a response,
+so a preview can dial the API, which is attached to every preview network.
+`--internal` blocks egress, not lateral traffic. The fix needs a per-preview
+transport container — and fix.md's own F17 says to reassess F02 and F05–F08
+after the Docker-versus-ASCII-Box provider decision. Building it now risks
+throwing it away.
+
+**Passing:** 1395 backend tests, 7 skipped, 17 deselected, 0 failed, in 14:56.
+210 frontend tests; build and lint green.
+
+**Ceiling:** 🔴 18 findings remain open, including every acceptance item
+(A01–A12) and the whole of F05–F10, F12–F18, F21, F23, F28–F30. 🔴 The
+readiness sandbox check trusts what the worker reports; a worker that lies or
+whose heartbeat is stale in a way the freshness window tolerates is not
+detected. 🔴 F19 scopes audit reads by thread, so once a THREAD is deleted its
+audit rows are unreadable by any member — the evidence survives for an operator
+with the table owner, and that is a deliberate fail-closed choice rather than a
+solved problem. 🔴 The 3h10m suite run that preceded the clean one was my own
+doing: running targeted tests against the same database while a full run was
+live produced three failures that were pure contention, and I nearly read them
+as real.
+
 ---
 
 ## Standing ceilings

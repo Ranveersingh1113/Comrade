@@ -24,9 +24,20 @@
 --      member creates a document with their own object, waits for it to be
 --      accepted, and then edits `storage_path` to the one they want read.
 --
--- `shared/storage.py` additionally refuses a path outside the reading team's
--- own prefix, so an object with no document row yet is still not reachable
--- across teams.
+-- 🔴 THIS COMMENT USED TO CLAIM that `shared/storage.py` additionally refused
+-- a path outside the reading team's own prefix. IT DID NOT — `download_document`
+-- took a path and nothing else, and fetched it with the service secret. The
+-- claim described code that was never written, which left the two guards above
+-- looking complete when they only cover objects that ALREADY have a document
+-- row. An object in the upload-before-metadata window, or one whose row was
+-- hard-deleted, was still claimable.
+--
+-- A prefix check would not have been sufficient either: a restricted same-team
+-- attachment sits under the reader's own prefix. The real check is object
+-- OWNERSHIP, added in 20260909100000_object_authenticity.sql and enforced in
+-- shared/storage.py:assert_object_is_authentic.
+--
+-- Only the comment is corrected here; the migration's statements are unchanged.
 
 -- Existing rows first: a duplicate path today would make the index creation
 -- fail during a release, and finding that out at deploy time is worse than

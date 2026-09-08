@@ -62,7 +62,11 @@ def served(monkeypatch):
     box = {"bytes": ORIGINAL}
     monkeypatch.setattr(
         compiler, "download_document",
-        lambda path, max_bytes=None: box["bytes"],
+        # `team_id`/`document_id` are required now: the privileged read is the
+        # last place that can ask whether the caller is entitled to these bytes
+        # (fix.md F20), so a stub that ignored them would let the caller drift
+        # back to calling it without them.
+        lambda path, *, team_id, document_id, max_bytes=None: box["bytes"],
     )
     # The compile itself is not what these tests are about.
     monkeypatch.setattr(compiler, "compile_document", lambda *a, **k: None)

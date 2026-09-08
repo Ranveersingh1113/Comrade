@@ -34,7 +34,7 @@ from shared.config import settings
 from shared.errors import redact
 from shared.db import Role, team_session
 from shared.storage import (
-    MAX_DOCUMENT_BYTES, DocumentTooLarge, download_document,
+    MAX_DOCUMENT_BYTES, DocumentTooLarge, ObjectNotOwned, download_document,
 )
 
 MODEL_FLASH = "gemini-2.5-flash"
@@ -1003,14 +1003,26 @@ def handle_document_job(team_id: str, payload: dict) -> None:
             raise PermanentJobError(reason)
         raw_text = _parse_by_kind(payload.get("kind", kind or "text"), inline)
     else:
-        path = payload.get("storage_path") or storage_path
+        # THE ROW, not the payload. The payload's copy is written at enqueue
+        # from this same column, so the two agree by construction — and when
+        # they do not, the row is the one under RLS and the one the
+        # authenticity check is about (fix.md F20).
+        path = storage_path
         if not path:
             reason = "this document has no stored file to read"
             _fail_document(team_id, document_id, reason)
             raise PermanentJobError(reason)
         try:
-            raw = download_document(path, max_bytes=MAX_DOCUMENT_BYTES)
+            raw = download_document(
+                path, team_id=team_id, document_id=document_id,
+                max_bytes=MAX_DOCUMENT_BYTES,
+            )
         except DocumentTooLarge as exc:
+            _fail_document(team_id, document_id, str(exc))
+            raise PermanentJobError(str(exc)) from exc
+        except ObjectNotOwned as exc:
+            # Not retryable, and said plainly in the document's own status: a
+            # row pointing at somebody else's object is not a transient fault.
             _fail_document(team_id, document_id, str(exc))
             raise PermanentJobError(str(exc)) from exc
 

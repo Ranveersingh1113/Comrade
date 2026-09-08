@@ -894,6 +894,16 @@ def handle_document_job(team_id: str, payload: dict) -> None:
 
     inline = payload.get("content")
     if inline is not None:
+        # 🔴 The cap covered the DOWNLOAD path only. A job queued by an older
+        # image carries its content inline, and nothing measured it before
+        # parsing — so the one path whose size was never checked at the API
+        # was also the one the worker did not check.
+        if len(inline) > MAX_DOCUMENT_BYTES:
+            reason = (
+                f"this document is over the {MAX_DOCUMENT_BYTES:,} byte limit"
+            )
+            _fail_document(team_id, document_id, reason)
+            raise PermanentJobError(reason)
         raw_text = _parse_by_kind(payload.get("kind", kind or "text"), inline)
     else:
         path = payload.get("storage_path") or storage_path

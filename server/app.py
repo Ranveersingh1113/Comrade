@@ -60,6 +60,7 @@ from shared.consent import (
 from pipeline import chat
 from shared import observability
 from shared.errors import safe_error
+from shared.storage import DocumentTooLarge, hash_upload, read_upload
 from shared.heartbeat import STALE_SECONDS as WORKER_STALE_SECONDS
 from shared.heartbeat import live_workers
 from shared.db import Role, connect, runtime_urls, team_session, user_session
@@ -1314,7 +1315,14 @@ def document_ingest(
         if file is not None:
             # Identity only. The bytes are dropped here; what survives is a
             # hash the worker can use to notice the file changed underneath it.
-            digest = hashlib.sha256(file.file.read()).hexdigest()
+            # Streamed rather than read whole: this used to allocate the entire
+            # upload purely to hash it, with no cap at all (fix.md F23).
+            try:
+                digest = hash_upload(file.file)
+            except DocumentTooLarge as exc:
+                raise HTTPException(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc),
+                ) from exc
         try:
             job_id = enqueue_document(
                 team_id, document_id, kind,
@@ -1332,7 +1340,15 @@ def document_ingest(
             status.HTTP_409_CONFLICT,
             "this document has no stored file — upload it again",
         )
-    raw = file.file.read()
+    # 🔴 Unbounded, on the path that puts the bytes INTO A DATABASE ROW as
+    # base64 — which is a third larger again. The worker's cap covered the
+    # download and not this.
+    try:
+        raw = read_upload(file.file)
+    except DocumentTooLarge as exc:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, str(exc),
+        ) from exc
     if kind in _BINARY_KINDS:
         content = base64.b64encode(raw).decode("ascii")
     else:

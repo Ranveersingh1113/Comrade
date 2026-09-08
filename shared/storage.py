@@ -30,6 +30,52 @@ class DocumentTooLarge(RuntimeError):
     """The file is bigger than this system will parse. Not retryable."""
 
 
+#: How much of an upload to move at a time. Small enough that the refusal
+#: happens long before the allocation matters.
+UPLOAD_CHUNK = 1024 * 1024
+
+
+def hash_upload(stream, *, max_bytes: int = MAX_DOCUMENT_BYTES) -> str:
+    """The sha256 of an upload, without ever holding it.
+
+    🔴 (fix.md F23) The API did `hashlib.sha256(file.file.read())` — the whole
+    file into memory purely to compute an identity it then threw away. The
+    25 MiB cap covered the worker's DOWNLOAD and neither of the API's reads, so
+    the bound existed on the path where the bytes were already known to be
+    fine and not on the one a caller controls.
+    """
+    import hashlib
+
+    digest = hashlib.sha256()
+    total = 0
+    while chunk := stream.read(UPLOAD_CHUNK):
+        total += len(chunk)
+        if total > max_bytes:
+            raise DocumentTooLarge(
+                f"file is over the {max_bytes:,} byte limit"
+            )
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_upload(stream, *, max_bytes: int = MAX_DOCUMENT_BYTES) -> bytes:
+    """An upload's bytes, or a refusal — counted as they arrive.
+
+    Measuring after `read()` is measuring after the allocation already
+    happened, which is the thing the cap exists to prevent.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := stream.read(UPLOAD_CHUNK):
+        total += len(chunk)
+        if total > max_bytes:
+            raise DocumentTooLarge(
+                f"file is over the {max_bytes:,} byte limit"
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def download_document(
     storage_path: str, *, max_bytes: int = MAX_DOCUMENT_BYTES,
 ) -> bytes:

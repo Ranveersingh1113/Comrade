@@ -25,7 +25,9 @@ from agent.history import replay_for_turn, working_state_content
 from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
-from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
+from shared.agent_runs import (
+    append_step, finish_run, pause_for_permission, start_run, usage_so_far,
+)
 from shared.db import thread_lock
 from shared.observability import bind, log_context
 from shared.usage import claim_budget, claimed_tokens, finalize_usage
@@ -293,8 +295,14 @@ async def stream_turn(
         # Outside the retry loop on purpose: a retried empty turn paid
         # for its prompt every attempt, and that is the number worth
         # having.
-        used_input = 0
-        used_output = 0
+        # 🔴 (fix.md F42) SEEDED, not zeroed. A run resumed after a permission
+        # wait carries what its earlier segments spent; starting from zero made
+        # `finish_run` — which writes these columns absolutely — record only
+        # the last segment, while the claimed allocation stayed cumulative.
+        used_input, used_output = (
+            await run_in_threadpool(usage_so_far, team_id, run_id)
+            if run_id else (0, 0)
+        )
         # Inside the try: a failed history read must close the run row too, not
         # leave it 'running' forever.
         try:
@@ -391,6 +399,15 @@ async def stream_turn(
                         max_llm_calls=settings.agent_max_llm_calls
                     ),
                 ):
+                    # 🔴 (fix.md F43) COUNTED FIRST. This event is a response
+                    # that has already been generated and already been paid
+                    # for. The ownership check used to come first and return,
+                    # so a stop landing during the first model call finalized
+                    # ZERO tokens and refunded the whole estimate — the team
+                    # got the bill from the provider and a refund from us.
+                    prompt_tokens, generated_tokens = _usage_from_event(event)
+                    used_input += prompt_tokens
+                    used_output += generated_tokens
                     # Between steps is where a stop becomes real. An in-flight
                     # model call cannot be taken back, but everything after it
                     # can, and this is the boundary the loop actually passes
@@ -404,9 +421,6 @@ async def stream_turn(
                         )
                         yield {"type": "cancelled", "run_id": run_id}
                         return
-                    prompt_tokens, generated_tokens = _usage_from_event(event)
-                    used_input += prompt_tokens
-                    used_output += generated_tokens
                     for step in _steps_from_event(event, len(all_steps)):
                         await run_in_threadpool(
                             append_step, team_id, run_id, step, worker_id=worker_id
@@ -414,8 +428,12 @@ async def stream_turn(
                         all_steps.append(step)
                         yield step
                         if _permission_wait(step):
+                            # With what it has spent so far: the next segment
+                            # resumes from these, and without them the earlier
+                            # ones are overwritten (fix.md F42).
                             await run_in_threadpool(
-                                pause_for_permission, team_id, run_id, worker_id
+                                pause_for_permission, team_id, run_id,
+                                worker_id, used_input, used_output,
                             )
                             yield {"type": "waiting_for_permission", "run_id": run_id}
                             return

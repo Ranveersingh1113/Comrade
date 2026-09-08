@@ -147,18 +147,40 @@ def test_edits_with_no_verification_record_are_unverified(monkeypatch):
     assert repo_tools._unverified(ctx, root=None) is True
 
 
-def test_a_turn_that_changed_nothing_is_not_this_refusal(monkeypatch):
-    """Nothing was edited THIS TURN, so "go run a test" would send a member
+def test_a_tree_proposing_nothing_is_not_this_refusal(monkeypatch):
+    """Nothing is being proposed, so "go run a test" would send a member
     looking for a change that was never made. The empty diff refuses that, and
     says something they can act on.
 
-    A checkout can also carry work this turn did not do — a tree is not
-    guaranteed clean — and demanding the agent verify somebody else's
-    uncommitted files is not an improvement.
+    🔴 REWRITTEN (fix.md F40). This test used to set `edits=0` with a NON-EMPTY
+    patch and assert no refusal, and its docstring argued that "a checkout can
+    carry work this turn did not do... demanding the agent verify somebody
+    else's uncommitted files is not an improvement". That is the bypass: a
+    resumed turn, or a change made by a command rather than the edit tool,
+    proposes real work with no verification record at all. The review rejected
+    the reasoning, so the condition is now the PATCH rather than the turn's
+    edit counter — and an empty patch is what takes this path.
+    """
+    import hashlib
+
+    from agent import repo_tools
+
+    ctx = _Ctx(edits=0)
+    empty = hashlib.sha256(b"").hexdigest()
+    monkeypatch.setattr(repo_tools, "_patch_digest", lambda *_a, **_k: empty)
+
+    assert repo_tools._unverified(ctx, root=None) is False
+
+
+def test_work_this_turn_did_not_do_still_has_to_be_checked(monkeypatch):
+    """The other half of the same rewrite, stated as its own claim.
+
+    A dirty tree the turn did not dirty is still what the pull request would
+    carry, and a reviewer's time is the thing T23 exists to protect.
     """
     from agent import repo_tools
 
     ctx = _Ctx(edits=0)
     monkeypatch.setattr(repo_tools, "_patch_digest", lambda *_a, **_k: "digest-1")
 
-    assert repo_tools._unverified(ctx, root=None) is False
+    assert repo_tools._unverified(ctx, root=None) is True

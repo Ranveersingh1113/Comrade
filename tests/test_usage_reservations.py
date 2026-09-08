@@ -48,7 +48,17 @@ def _bucket(admin, team_id=TEAM_A):
     ).fetchone()
 
 
-def _run(admin, team_id=TEAM_A):
+def _run(admin, team_id=TEAM_A, status="done"):
+    """A run in a settleable state.
+
+    `status` defaults to a TERMINAL one because that is the only state
+    production ever settles from: `_finish` writes the terminal status through
+    `finish_run` before calling `finalize_usage`, and the cancel endpoint goes
+    through `cancel_run` first. Settling a run that is still `running` is now
+    refused outright — an obsolete worker walking its exit path used to settle
+    a run a replacement was still working on, skipping the real owner's
+    reconciliation (fix.md F43). Pass status='running' to exercise that.
+    """
     thread_id = admin.execute(
         "select id from public.threads where team_id=%s and title='General'",
         (team_id,),
@@ -56,8 +66,8 @@ def _run(admin, team_id=TEAM_A):
     return admin.execute(
         "insert into public.agent_runs"
         " (team_id, thread_id, requester_id, status, trigger_type)"
-        " values (%s,%s,%s,'running','user') returning id",
-        (team_id, thread_id, A1),
+        " values (%s,%s,%s,%s,'user') returning id",
+        (team_id, thread_id, A1, status),
     ).fetchone()[0]
 
 

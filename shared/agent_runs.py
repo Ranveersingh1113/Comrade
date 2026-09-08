@@ -159,7 +159,29 @@ def finish_run(
             )
 
 
-def pause_for_permission(team_id: str, run_id: str, worker_id: str | None) -> None:
+def usage_so_far(team_id: str, run_id: str) -> tuple[int, int]:
+    """What this run has already been recorded as spending.
+
+    🔴 (fix.md F42) A resumed run started counting from zero. `finish_run`
+    writes the token columns ABSOLUTELY, so the segments before a permission
+    wait were overwritten by the last one — the team was charged for the tail
+    of a turn and finalization reconciled against a total that never happened.
+    The claimed allocation, meanwhile, is cumulative, so the two disagreed in
+    the team's favour on the cap and against them on the record.
+    """
+    with team_session(Role.AGENT, team_id) as conn:
+        row = conn.execute(
+            "select coalesce(input_tokens, 0), coalesce(output_tokens, 0)"
+            " from public.agent_runs where id=%s and team_id=%s",
+            (run_id, team_id),
+        ).fetchone()
+    return (row[0], row[1]) if row else (0, 0)
+
+
+def pause_for_permission(
+    team_id: str, run_id: str, worker_id: str | None,
+    input_tokens: int = 0, output_tokens: int = 0,
+) -> None:
     """Park a run on a human decision, and let go of the worker lease.
 
     🔴 The lease used to stay. It answers one question — is the process holding
@@ -173,9 +195,17 @@ def pause_for_permission(team_id: str, run_id: str, worker_id: str | None) -> No
     with team_session(Role.AGENT, team_id) as conn:
         cur = conn.execute(
             "update public.agent_runs set status='waiting_for_permission',"
-            " worker_id=null, lease_expires_at=null where id=%s"
+            " worker_id=null, lease_expires_at=null,"
+            # 🔴 (fix.md F42) Checkpointed in the SAME statement that parks the
+            # run. Parking without recording what the run had already spent is
+            # how a resume started from zero, and a separate write would leave
+            # a window where a crash loses exactly that.
+            "     input_tokens=%s, output_tokens=%s, cost_usd=%s"
+            " where id=%s"
             " and (%s::text is null or worker_id=%s) and status='running'",
-            (run_id, worker_id, worker_id),
+            (input_tokens, output_tokens,
+             _cost_usd(input_tokens, output_tokens),
+             run_id, worker_id, worker_id),
         )
     if cur.rowcount != 1:
         raise LookupError(f"agent_run {run_id!r} is no longer runnable")

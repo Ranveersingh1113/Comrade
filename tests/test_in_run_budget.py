@@ -39,7 +39,7 @@ def _bucket(tokens: int) -> None:
         conn.close()
 
 
-def _run(reserved: int) -> str:
+def _run(reserved: int, status: str = "running") -> str:
     conn = _admin()
     try:
         thread_id = conn.execute(
@@ -50,8 +50,8 @@ def _run(reserved: int) -> str:
         run_id = conn.execute(
             "insert into public.agent_runs (team_id, thread_id, requester_id,"
             " status, trigger_type, tokens_reserved)"
-            " values (%s,%s,%s,'running','user',%s) returning id",
-            (TEAM_A, thread_id, A1, reserved),
+            " values (%s,%s,%s,%s,'user',%s) returning id",
+            (TEAM_A, thread_id, A1, status, reserved),
         ).fetchone()[0]
     finally:
         conn.close()
@@ -350,7 +350,10 @@ def test_a_run_whose_reservation_was_never_linked_does_not_earn_budget(seeded):
     from shared.usage import finalize_usage
 
     _bucket(settings.agent_tokens_estimate)
-    run_id = _run(0)          # the linkage that never happened
+    # Terminal: settling is something a run does on its way out, and a run
+    # that is still `running` is now refused because an obsolete worker used
+    # to settle one a replacement was still working on (fix.md F43).
+    run_id = _run(0, status="done")   # the linkage that never happened
 
     finalize_usage(TEAM_A, run_id, 1_000)
 
@@ -364,7 +367,7 @@ def test_reconciliation_happens_exactly_once(seeded):
     from shared.usage import finalize_usage
 
     _bucket(settings.agent_tokens_estimate)
-    run_id = _run(settings.agent_tokens_estimate)
+    run_id = _run(settings.agent_tokens_estimate, status="done")
 
     finalize_usage(TEAM_A, run_id, 1_000)
     after_first = _bucket_tokens()

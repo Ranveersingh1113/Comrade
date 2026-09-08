@@ -514,49 +514,64 @@ def _note_verified(tool_context: ToolContext, argv: list[str], *, root) -> None:
     state[_VERIFICATION] = {"command": " ".join(argv), "digest": digest}
 
 
+def _nothing_proposed() -> str:
+    """The digest of a tree that is proposing nothing.
+
+    An empty `git diff HEAD` and no untracked files feed no bytes at all into
+    the hash, so this is sha256 of the empty string. Named rather than
+    inlined, because the equality below is a statement about the tree and not
+    a magic constant.
+    """
+    import hashlib
+
+    return hashlib.sha256(b"").hexdigest()
+
+
 def _unverified(tool_context: ToolContext, *, root) -> bool:
     """True when what is about to be proposed is not what was checked.
 
-    Bound to the PATCH rather than to a count of tool calls. That closes three
-    holes the counter had: a command that changes the tree while checking it,
-    a background process that writes after the check, and a resumed run whose
-    counters both start at zero — which read as "nothing to check" when it
-    meant "never checked".
+    Bound to the PATCH, and to nothing else.
+
+    🔴 (fix.md F40) This used to open with `if edit_generation == 0: return
+    False`. That counter counts calls to `repo_edit` IN THIS IN-MEMORY TURN,
+    and "this turn called the edit tool" is not "there is nothing to propose".
+    Two ordinary cases separate them:
+
+      * a resumed or new turn, whose state starts fresh over a checkout that
+        still carries uncommitted work — read as "nothing to check" when it
+        meant "never checked here";
+      * a change made by a COMMAND rather than the edit tool: a formatter, a
+        codegen step, a build script.
+
+    In both, `capture_patch` finds a real diff, so the empty-diff refusal did
+    not fire either, and the pull request went out with no verification record
+    and no measurement at all — through the middle of the wall built to stop
+    exactly that.
+
+    Asking the tree instead answers the question the gate is actually for, and
+    keeps the reasoning the counter was standing in for: a tree proposing
+    nothing still takes the empty-diff path, because there is nothing to have
+    checked.
     """
-    if tool_context.state.get(_EDIT_GEN, 0) == 0:
-        # This turn changed nothing, so this is not the right refusal. An
-        # empty diff is refused by capture_patch with something a member can
-        # act on; "go run a test" would send them looking for a change that
-        # was never made. A checkout can also carry work this turn did not do,
-        # and demanding the agent verify somebody else's uncommitted files is
-        # not an improvement either.
-        return False
-    record = tool_context.state.get(_VERIFICATION)
-    if not record:
-        # Edited and never checked.
-        return True
-    # Edited, checked — but is the checked thing the proposed thing?
     try:
-        return record.get("digest") != _patch_digest(root)
+        proposing = _patch_digest(root)
     except MeasurementFailed as exc:
         # 🔴 Unmeasurable used to compare EQUAL to a previous unmeasurable, so
         # a broken git waved the change through. It cannot be established that
-        # this is what was checked, and that is a refusal.
+        # this is what was checked, and that is a refusal (fix.md F27).
         logger.warning("refusing a proposal that cannot be measured: %s", exc)
         return True
-
-
-def _unverified_legacy(tool_context: ToolContext) -> bool:
-    """The counter rule, kept for its own reasoning.
-
-    Zero edits is not unverified: nothing was changed, so there is nothing to
-    have run. That case belongs to capture_patch's empty-diff refusal, which
-    tells the member something they can act on — "go run a test" would send
-    them looking for a change nobody made.
-    """
-    state = tool_context.state
-    edits = state.get(_EDIT_GEN, 0)
-    return edits > 0 and state.get(_VERIFIED_GEN) != edits
+    if proposing == _nothing_proposed():
+        # Nothing is being proposed. capture_patch refuses this with something
+        # a member can act on; "go run a test" would send them looking for a
+        # change nobody made.
+        return False
+    record = tool_context.state.get(_VERIFICATION)
+    if not record:
+        # Changed and never checked — however the change got here.
+        return True
+    # Checked — but is the checked thing the proposed thing?
+    return record.get("digest") != proposing
 
 
 def repo_edit(

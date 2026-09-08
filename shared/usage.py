@@ -132,20 +132,28 @@ def finalize_usage(team_id: str, run_id: str, actual_tokens: int) -> None:
         claimed = conn.execute(
             "update public.agent_runs set usage_finalized_at = now()"
             " where id=%s and team_id=%s and usage_finalized_at is null"
+            # 🔴 (fix.md F43) FENCED ON A TERMINAL STATUS. A worker that has
+            # lost its lease still walks its exit path, and settling there
+            # marked the run finalized while a REPLACEMENT was still running
+            # it — so the real owner's settlement was skipped and the estimate
+            # stayed on the bucket. A run that is still live is not one to
+            # settle, whoever is asking.
+            "   and status not in ('queued','running','waiting_for_permission',"
+            "                      'waiting_for_user')"
             " returning coalesce(tokens_reserved, 0),"
-            "           created_at >= date_trunc('hour', now())",
+            #  The hour this run's claims were charged to (fix.md F44), not
+            #  whatever hour it happens to be when it finishes.
+            "           coalesce(usage_bucket, date_trunc('hour', created_at))",
             (run_id, team_id),
         ).fetchone()
         if claimed is None:
             return
-        reserved, same_hour = claimed
-        if not same_hour:
-            return
+        reserved, bucket = claimed
         conn.execute(
             "update public.usage_buckets"
             "   set tokens = greatest(tokens - %s + %s, 0)"
-            " where team_id=%s and bucket=date_trunc('hour', now())",
-            (reserved, max(actual_tokens, 0), team_id),
+            " where team_id=%s and bucket=%s",
+            (reserved, max(actual_tokens, 0), team_id, bucket),
         )
 
 
@@ -190,18 +198,58 @@ def claim_budget(team_id: str, run_id: str, chunk: int | None = None) -> bool:
         return True
     chunk = settings.agent_tokens_estimate if chunk is None else chunk
     with team_session(Role.AGENT, team_id) as conn:
+        # 🔴 (fix.md F44) THE RUN'S OWN BUCKET, not "whatever hour it is now".
+        #
+        # This used to update `bucket = date_trunc('hour', now())` and treat a
+        # missing row as "no room". Across an hour boundary that row often does
+        # not exist yet — buckets are created at admission — so a run admitted
+        # at 10:59 was refused at 11:00 with a full unused hour in front of it,
+        # unless some unrelated request happened to be admitted first and
+        # create the row. Whether a member's turn could continue depended on
+        # other people's traffic.
+        #
+        # A run's claims belong to the hour it was ADMITTED in, for its whole
+        # life. That hour's cap is the one bounding it, and finalization
+        # reconciles the same one, so a boundary can neither refuse a turn nor
+        # move a refund into an hour it did not spend in.
+        bucket = conn.execute(
+            "select coalesce(usage_bucket, date_trunc('hour', created_at))"
+            " from public.agent_runs where id=%s and team_id=%s",
+            (run_id, team_id),
+        ).fetchone()
+        if bucket is None:
+            return False
+        bucket = bucket[0]
+        # Recorded on first use, so later claims and the settlement all agree
+        # about which hour this run is spending.
+        conn.execute(
+            "update public.agent_runs set usage_bucket=%s"
+            " where id=%s and team_id=%s and usage_bucket is null",
+            (bucket, run_id, team_id),
+        )
         row = conn.execute(
-            "update public.usage_buckets set tokens = tokens + %s"
-            " where team_id=%s and bucket=date_trunc('hour', now())"
-            # The cap, in the statement that spends against it.
-            "   and tokens + %s <= %s"
+            # INSERT ... ON CONFLICT, so a bucket that does not exist yet is
+            # created rather than read as an empty allowance. The cap lives in
+            # the same statement that spends against it, on both arms.
+            "insert into public.usage_buckets (team_id, bucket, turns, tokens)"
+            " values (%s, %s, 0, %s)"
+            " on conflict (team_id, bucket) do update"
+            "   set tokens = public.usage_buckets.tokens + %s"
+            "   where public.usage_buckets.tokens + %s <= %s"
             " returning tokens",
-            (chunk, team_id, chunk, token_cap),
+            (team_id, bucket, chunk, chunk, chunk, token_cap),
         ).fetchone()
         if row is None:
-            # Either the hour has no room, or no bucket exists yet — which
-            # cannot happen for a run that was admitted, and refusing is the
-            # safe answer either way.
+            # The hour has no room left.
+            return False
+        if row[0] > token_cap:
+            # The INSERT arm has no `where`, so a first claim larger than the
+            # whole cap would otherwise create the bucket over it. Undo and
+            # refuse, in the same transaction that made it.
+            conn.execute(
+                "update public.usage_buckets set tokens = tokens - %s"
+                " where team_id=%s and bucket=%s", (chunk, team_id, bucket),
+            )
             return False
         conn.execute(
             "update public.agent_runs"

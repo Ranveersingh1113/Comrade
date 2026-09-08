@@ -4,6 +4,7 @@ from pathlib import Path
 import psycopg
 
 from shared.config import settings
+from shared.db import allow_table_owner
 
 
 def apply(root: Path, database_url: str) -> list[str]:
@@ -37,8 +38,22 @@ def apply(root: Path, database_url: str) -> list[str]:
 
 
 def main() -> None:
+    """The one-off migration service.
+
+    This is the only entrypoint that borrows the table owner, and it says so
+    out loud. Everything that serves a request leaves `allow_table_owner`
+    uncalled and cannot reach the credential through shared.db even if the
+    variable is set in its environment.
+    """
+    allow_table_owner()
     root = Path(__file__).resolve().parents[1] / "supabase" / "migrations"
-    ran = apply(root, settings.comrade_db_url_admin)
+    url = settings.comrade_db_url_admin
+    if not url:
+        raise SystemExit(
+            "COMRADE_DB_URL_ADMIN is not set. Migrations run as the table"
+            " owner; give it to this one-off job and to nothing else."
+        )
+    ran = apply(root, url)
     print("applied migrations: " + (", ".join(ran) if ran else "none"))
 
 

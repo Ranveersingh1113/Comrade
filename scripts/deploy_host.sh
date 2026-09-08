@@ -66,11 +66,15 @@ $COMPOSE build
 # 5. Migrate, one-off.
 # ---------------------------------------------------------------------------
 # `run --rm --no-deps`: a one-shot container on the NEW image that does not
-# start the api service as a dependency. Migrating through `exec` would need
-# the new stack already running, which is the ordering this file exists to
-# prevent. Expand/contract means this is safe against the OLD code still
+# start anything else as a dependency. It runs the `migrate` service, which is
+# the ONLY one given COMRADE_DB_URL_ADMIN — the api and both workers have it
+# blanked, so the table owner exists in one short-lived container per release
+# instead of in three processes that run for weeks.
+#
+# Migrating through `exec` would need the new stack already running, which is
+# the ordering this file exists to prevent. Expand/contract means this is safe against the OLD code still
 # serving traffic while it runs.
-$COMPOSE run --rm --no-deps -T api python -m shared.migrations
+$COMPOSE run --rm --no-deps -T migrate
 
 # ---------------------------------------------------------------------------
 # 6. Activate. The first irreversible step.

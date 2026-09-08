@@ -27,7 +27,7 @@ from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
 from shared.db import thread_lock
-from shared.usage import finalize_usage
+from shared.usage import finalize_usage, run_allowance
 from shared.config import settings
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,31 @@ def _finish(
     # estimate must give the balance back or a team slowly loses budget it
     # never spent. finalize_usage is idempotent; this runs on every exit.
     finalize_usage(team_id, run_id, used_input + used_output)
+
+
+def _over_budget(team_id: str, run_id: str | None, spent: int) -> int | None:
+    """The allowance this run has already passed, or None to keep going.
+
+    🔴 Admission reserved an ESTIMATE — 6,000 tokens, measured on a trivial
+    turn — and then let the run make up to `agent_max_llm_calls` (20) model
+    calls with nothing between them checking what they cost. A sweep that
+    reads file after file carries the whole growing context into every call,
+    so one admitted turn could spend several million tokens against a
+    500,000-per-hour cap. `finalize_usage` reconciled the truth when the turn
+    was over, which is accounting, not a brake.
+
+    Nothing is read until a turn passes its own estimate, so an ordinary turn
+    pays nothing for this. Past that the allowance is re-read each time rather
+    than cached: other turns finalize while this one runs and give budget
+    back, and refusing work on a stale number is the failure mode that turns a
+    brake into an outage.
+    """
+    if run_id is None or spent <= settings.agent_tokens_estimate:
+        return None
+    allowance = run_allowance(team_id, run_id)
+    if allowance is None or spent <= allowance:
+        return None
+    return allowance
 
 
 def _usage_from_event(event: Any) -> tuple[int, int]:
@@ -368,6 +393,33 @@ async def stream_turn(
                             )
                             yield {"type": "waiting_for_permission", "run_id": run_id}
                             return
+                    # AFTER this event's steps are recorded and sent, not
+                    # before: the call that just happened cannot be taken back
+                    # and has already been paid for, so throwing away what it
+                    # produced would cost the team the money AND the work. The
+                    # next nineteen calls are what this stops — the same
+                    # boundary, and the same reasoning, as the cancellation
+                    # check above.
+                    allowance = await run_in_threadpool(
+                        _over_budget, team_id, run_id, used_input + used_output,
+                    )
+                    if allowance is not None:
+                        detail = (
+                            "This turn used more than the team's remaining"
+                            f" token budget for the hour ({allowance:,}), so"
+                            " Comrade stopped part-way. What it managed before"
+                            " stopping is above. Ask again next hour, or raise"
+                            " AGENT_TOKENS_PER_HOUR."
+                        )
+                        await run_in_threadpool(
+                            _finish, team_id, run_id, "failed",
+                            used_input, used_output, worker_id, detail,
+                        )
+                        yield {
+                            "type": "over_budget", "run_id": run_id,
+                            "detail": detail,
+                        }
+                        return
                 if all_steps:
                     break
                 logger.warning(
@@ -448,6 +500,14 @@ async def stream_turn(
         yield {"type": "final", "run_id": run_id, "reply": reply}
 
 
+#: Frames that end a turn WITHOUT a `final`. Each leaves a run row (except
+#: `busy`, which never had one), so `run_turn` reports the outcome under its
+#: own name rather than raising on a `final` that will never arrive.
+_STOPS_WITHOUT_A_FINAL = frozenset({
+    "empty", "cancelled", "over_budget", "waiting_for_permission",
+})
+
+
 async def run_turn(
     team_id: str,
     requester_id: str,
@@ -473,7 +533,7 @@ async def run_turn(
         if item.get("type") == "final":
             final = item
             continue
-        if item.get("type") == "busy":
+        if item.get("type") == "busy":  # no run row at all — see below
             # The room lock refused this turn (§4.3). There is no run row and
             # no reply — surface it as itself rather than KeyError-ing on a
             # `final` frame that will never arrive.
@@ -483,22 +543,25 @@ async def run_turn(
                 "steps": [],
                 "busy": item["detail"],
             }
-        if item.get("type") == "empty":
-            # Same trap, second cause: the model returned nothing, so there is
-            # no `final` either and `final["run_id"]` below would raise. The
-            # run row DOES exist here (and is now marked failed), so hand it
-            # back — a caller that wants to look up what happened can.
-            return {
-                "run_id": item["run_id"],
-                "reply": "",
-                "steps": steps,
-                "empty": item["detail"],
-            }
-        if item.get("type") == "waiting_for_permission":
-            return {"run_id": item["run_id"], "reply": "", "steps": steps,
-                    "waiting_for_permission": True}
+        if item.get("type") in _STOPS_WITHOUT_A_FINAL:
+            # 🔴 This used to be a branch per frame, and every new way for a
+            # turn to stop early re-opened the same hole: no `final` arrives,
+            # so `final["run_id"]` raised KeyError. Empty was the second cause
+            # and got its own branch; cancellation (T11) and the budget brake
+            # were the third and fourth and got none. The agent worker drives
+            # turns through `run_turn_sync`, where that exception is a crashed
+            # worker rather than a handled outcome.
+            #
+            # The run row exists on all of these — hand it back, so a caller
+            # that wants to look up what happened can.
+            outcome = {"run_id": item["run_id"], "reply": "", "steps": steps}
+            outcome[item["type"]] = item.get("detail", True)
+            return outcome
         steps.append(item)
-    return {"run_id": final["run_id"], "reply": final["reply"], "steps": steps}
+    # A `final` that never came is a frame this function has not been taught
+    # about. Report the run truthfully rather than raising on the way out.
+    return {"run_id": final.get("run_id", run_id), "reply": final.get("reply", ""),
+            "steps": steps}
 
 
 def run_turn_sync(

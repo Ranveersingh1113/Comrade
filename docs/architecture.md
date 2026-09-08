@@ -77,8 +77,8 @@ RLS is the primary authorization boundary. A FastAPI check is never the only aut
 | `comrade_agent` | Agent-owned writes such as runs, messages, and proposals; reads borrow requester permissions. |
 | `comrade_executor` | Executes an approved, hash-verified action. |
 | `comrade_pipeline` | Parses content, compiles memory, and handles team-scoped pipeline work. |
-| `comrade_control` | Narrow cross-team control-plane actions such as queue claiming. |
-| admin/test connection | Local test seeding and explicitly limited operations; never exposed to the browser. |
+| `comrade_control` | Narrow cross-team control-plane actions such as queue claiming. It runs the queue and cannot read what is in it: `jobs.payload` is not granted to this role, and the worker re-reads the payload as `comrade_pipeline` scoped to the job's own team. `jobs.subject` carries the non-sensitive identity of a job's target for the two sweeps that need it. |
+| table owner | Migrations and the test suite only. Not a runtime credential: `shared.db` refuses it to any process that has not called `allow_table_owner()`, and the compose file blanks `COMRADE_DB_URL_ADMIN` for the API and both workers, leaving it to the one-off `migrate` service. |
 
 `shared/db.py` opens role-specific pools. Team context uses transaction-local settings, preventing pooled connections from carrying one team’s scope into another request.
 

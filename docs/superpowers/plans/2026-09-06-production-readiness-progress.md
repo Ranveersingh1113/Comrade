@@ -1458,6 +1458,144 @@ seeded usage onto the previous hour's bucket for the first five minutes of
 every hour, so it failed on the clock. It had been mistaken for contention
 once already this session.
 
+### T26 — Tighten service secrets, roles, and admission budgets
+
+**Changed:** `supabase/migrations/20260908130000_queue_payload_privacy.sql`,
+`20260908140000_queue_fairness.sql`, `20260908150000_job_subject.sql`,
+`shared/db.py`, `shared/config.py`,
+`shared/migrations.py`, `shared/usage.py`, `pipeline/worker.py`,
+`agent/runtime.py`, `pipeline/repo_sync.py`, `pipeline/repo_env.py`,
+`server/github_connect.py`, `docker-compose.yml`, `scripts/deploy_host.sh`,
+`.env.example`, `tests/conftest.py`, `tests/test_service_isolation.py` (new),
+`tests/test_in_run_budget.py` (new), `tests/test_queue_fairness.py` (new),
+`tests/test_deploy_host_script.py`, `tests/test_ingestion_minimisation.py`.
+
+**Regression — the cross-team role could read every team's queued content.**
+`comrade_control` held `select (payload)` on `jobs`, and it is the ONE role
+deliberately not scoped to a team: `ctl_jobs` is `using (true)`, because a
+single sweeper serves everybody. `enqueue_github_event` queues the whole parsed
+webhook body, so a private repository's pull request descriptions, commit
+messages and review comments sat in a column readable under one credential
+that spans the deployment. T21 moved DOCUMENT bytes out of the payload for
+exactly this reason and left every other payload where it was; `compiler.py`
+even carries the comment "`jobs.payload` — a table `comrade_control` can read".
+
+**Design:** the claim stops returning the payload and the worker re-reads it
+under `comrade_pipeline` scoped to the job's own team, where `pl_jobs` confines
+it to `current_team()`. Same content, through the role that is allowed to see
+that team and only that team. The control plane keeps everything it needs to
+RUN the queue — ids, status, attempts, leases — and none of what is in it.
+
+**Regression — an unset role URL was not "unconfigured", it was "guess".**
+`connect()` refused an empty URL; `team_session()`, which is the path every
+worker actually uses, handed it straight to a pool. An empty conninfo makes
+libpq fill in the blanks from PGHOST/PGUSER, a .pgpass file, or peer auth on
+the local socket — so on a host where peer auth works, forgetting
+COMRADE_CONTROL_DB_URL was a superuser session with no row security, arrived at
+by omission. One `_url()` now resolves every role, and both paths go through it.
+
+**Regression — every service carried the table owner just to boot.**
+`comrade_db_url_admin` had no default, so the API and both workers had to hold
+the RLS-bypassing credential in their environment to import their settings, and
+`_URLS` put it one `connect(Role.ADMIN)` away. The existing guard greps runtime
+source for the literal `Role.ADMIN`, which is a lint, not an enforcement.
+
+Now off by default and turned on by a CALL — `allow_table_owner()` — rather
+than by a variable, because a property of what a process IS should not be
+something a deployment inherits by accident. Migrations and the test suite call
+it; nothing that serves a request does. The deployment half matches: the
+compose file blanks the variable for `api`, `pipeline-worker` and
+`agent-worker`, and a new one-off `migrate` service (behind a profile, so
+`up` never starts it) is the only thing given the real value. The table owner
+now exists in one short-lived container per release instead of in three
+processes that run for weeks.
+
+**Regression — a 20-call turn had no brake, only a receipt.** Admission
+reserved 6,000 tokens — measured on a TRIVIAL turn — and then let the run make
+up to `agent_max_llm_calls` model calls with nothing between them checking the
+cost. A sweep that reads file after file carries the whole growing context into
+every call, so one admitted turn could spend several million tokens against a
+500,000-per-hour cap; `finalize_usage` reconciled the truth afterwards, which
+is accounting, not a brake.
+
+The allowance is deliberately NOT the estimate: a turn that costs more than
+6,000 tokens is ordinary and must not be killed for it. It is what the run
+reserved plus whatever the team still has for the hour, re-read on each check
+rather than cached — other turns finalize while this one runs and give budget
+back, and refusing work on a stale number turns a brake into an outage. Nothing
+is read at all until a turn passes its own estimate, so an ordinary turn pays
+nothing for this. The stop lands on the same boundary as the cancellation check
+for the same reason: the call that just happened cannot be taken back, the next
+nineteen can.
+
+**Also — `run_turn` KeyError-ed on any terminal frame it had not been taught.**
+It ends with `final["run_id"]` and `final` is `{}` until a `final` frame
+arrives, so it enumerated the frames that never send one. Busy was the first,
+empty the second and got its own branch; CANCELLATION (T11) and the budget stop
+were the third and fourth and got none. The agent worker drives turns through
+`run_turn_sync`, where that exception is a crashed worker rather than a handled
+outcome. Fixed once, as a set, with a truthful fallback for the fifth.
+
+**Also — one team's backlog was every other team's outage.** The pipeline claim
+was `order by created_at` across the whole queue with no per-team consideration
+at all. A team that connects a busy repository queues a job per webhook
+delivery and a job per document, and every one of them is older than the next
+team's first job. T12 gave agent turns a per-team ceiling for exactly this
+reason and left the queue whose depth is driven by an EXTERNAL event rate
+first-come-first-served. Now round-robin by the team served longest ago, still
+oldest-first within a team — deliveries about one repository have to be
+ingested in the order they happened.
+
+**Two readers needed a field, not the column.** `sweep_stale_checkouts` and
+the connect screen's failure list both read `payload->>'repo_full_name'` as the
+control role. Restoring the grant to serve them would have handed the payload
+back, so the field they need became `jobs.subject` — the non-sensitive IDENTITY
+of a job's target, never its content. A repository's full name is already
+readable by this role through `github_repos.repo_full_name`, so it exposes
+nothing new, which is the test for whether something belongs in that column;
+a regression test pins it.
+
+**Verified rather than rebuilt.** Two checklist items were already satisfied and
+are now pinned by tests instead of re-implemented: a run whose
+`record_reservation` was lost still charges what it cost on top of the estimate
+(an overcharge, the safe direction for a cap) and never earns free budget; and
+reconciliation is idempotent across all four terminal paths.
+
+**Passing:** 11 service-isolation tests, 17 in-run budget tests, 4 queue
+fairness tests, 6 deploy tests; 1243 backend tests, 6 skipped, 17 deselected,
+0 failed. 210 frontend tests; build and lint green.
+
+**Migration/rollback:** a revoke, a `subject` column with its backfill, and
+two indexes. The revoke is the one thing
+here that is NOT safe against old code still running — the previous worker
+selects `payload` in its claim — so it must land in the same release as the new
+`pipeline/worker.py`, which is what the build → migrate → activate ordering in
+`deploy_host.sh` gives it. Rolling the code back without reverting the revoke
+breaks job claiming.
+
+**Ceiling:** 🔴 A HARD crash between `reserve_turn` and `enqueue_turn` still
+leaks one turn and one estimate onto the team's bucket, with no run row that
+will ever finalize it. Bounded and self-healing — it expires with the hour, and
+it is 1/60th of the turns and 6,000 of 500,000 tokens — so it is recorded
+rather than closed with a durable reservation ledger. 🔴 The in-run brake fires
+BETWEEN calls, so a single call that costs more than the whole hourly budget is
+paid for in full before anything can object; nothing bounds one request's
+context. 🔴 The brake is per-run and does not compose. A running turn's spend
+reaches the bucket only at finalization, so what a concurrent run reads is the
+other run's RESERVATION, not what it has actually spent — two simultaneous
+runaway turns can therefore overshoot the cap together even though neither
+passes its own allowance. Closing it means charging incrementally during the
+run, which is exactly the once-only reconciliation invariant this task was
+asked to preserve, so it is named rather than built. 🔴 The stop is reported to the member through the run's `last_error`
+on the terminal frame, which the room already renders — there is no distinct
+budget affordance, no "resume next hour", and no way to raise the limit from
+the product. 🔴 Per-team limits on UPLOADS are still only the per-file
+`MAX_DOCUMENT_BYTES`; nothing caps how many documents or how much total volume
+one team may push through the compiler. 🔴 Round-robin fairness is by last
+service time, which is fair per JOB and not per unit of work — a team whose
+jobs each take ten minutes still consumes more of the worker than one whose
+jobs take ten seconds.
+
 ---
 
 ## Standing ceilings

@@ -6,7 +6,12 @@ import psycopg
 import pytest
 
 from shared.config import settings
+from shared.db import allow_table_owner
 from tests._seed import cleanup, seed
+
+# The test suite seeds and cleans as the table owner, so it is one of the two
+# processes allowed to. Nothing that serves a request declares this.
+allow_table_owner()
 
 # Git for Windows ships `core.fsmonitor = true` in its SYSTEM gitconfig, so
 # every git command in every repository starts a `git fsmonitor--daemon

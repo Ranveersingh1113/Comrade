@@ -17,6 +17,14 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     env_file: [.env]
+    environment:
+      # The table owner is NOT a runtime credential. shared.db refuses it to
+      # any process that has not called allow_table_owner(), and this blanks it
+      # out of the environment as well — a credential a process cannot use is
+      # still a credential an attacker can read out of it. Migrations run in
+      # the one-off `migrate` service below, which is the only thing that gets
+      # this value.
+      COMRADE_DB_URL_ADMIN: ""
     # NO DOCKER SOCKET, deliberately. The API is the internet-facing process and
     # the one that proxies a team's own code; the socket is root on the host, so
     # granting it here would turn a request-handling bug into a host compromise.
@@ -48,6 +56,9 @@ services:
       dockerfile: docker/app.Dockerfile
     command: ["python", "-m", "pipeline.worker"]
     env_file: [.env]
+    environment:
+      # As above: the table owner is not a runtime credential.
+      COMRADE_DB_URL_ADMIN: ""
     restart: unless-stopped
     volumes:
       # The host Docker daemon later bind-mounts these same checkout paths into
@@ -75,6 +86,9 @@ services:
       dockerfile: docker/app.Dockerfile
     command: ["python", "-m", "agent.worker"]
     env_file: [.env]
+    environment:
+      # As above: the table owner is not a runtime credential.
+      COMRADE_DB_URL_ADMIN: ""
     restart: unless-stopped
     volumes:
       - ${COMRADE_WORKSPACES_ROOT:-/workspaces}:/workspaces
@@ -84,6 +98,21 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     group_add: ["${COMRADE_DOCKER_GID:-999}"]
     stop_grace_period: 300s
+
+  # The one-off migration job, and the ONLY service given the table owner.
+  #
+  # `profiles` keeps it out of `docker compose up`: it is a task, not a
+  # process, and a migrator that restarts with the stack would race the code
+  # it is migrating for. scripts/deploy_host.sh runs it between build and
+  # activate.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    env_file: [.env]
+    profiles: ["migrate"]
+    restart: "no"
+    command: ["python", "-m", "shared.migrations"]
 
   frontend:
     build:

@@ -19,7 +19,7 @@ import threading
 import time
 from typing import Callable
 
-from shared.db import Role, connect
+from shared.db import Role, connect, team_session
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +53,25 @@ _CLAIM_SQL = (
     "  where ((status='pending' and available_at <= now())"
     "         or (status='processing' and lease_expires_at < now()))"
     f"    and attempts < {MAX_ATTEMPTS}"
-    "  order by created_at for update skip locked limit 1"
-    ") returning id, team_id, job_type, payload, attempts"
+    # 🔴 This was `order by created_at` across the WHOLE queue, with no
+    # per-team consideration at all. A team that connects a busy repository
+    # queues one job per webhook delivery and one per document, and every one
+    # of them is older than the next team's first job — so one team's backlog
+    # sat at the head of the queue and everybody else waited behind it. T12
+    # gave agent turns a per-team ceiling for exactly this reason and left
+    # this queue, whose depth is driven by an EXTERNAL event rate rather than
+    # by members typing, first-come-first-served.
+    #
+    # Round-robin by the team served longest ago; a team never served yet
+    # sorts first. Order WITHIN a team is still oldest-first, which is the
+    # ordering that carries meaning — deliveries about the same repository
+    # have to be ingested in the order they happened.
+    "  order by (select max(served.picked_at) from public.jobs served"
+    "            where served.team_id = jobs.team_id"
+    "              and served.picked_at is not null) asc nulls first,"
+    "           created_at"
+    "  for update skip locked limit 1"
+    ") returning id, team_id, job_type, attempts"
 )
 
 
@@ -154,7 +171,27 @@ def run_once(
     if job is None:
         return False
 
-    job_id, team_id, job_type, payload, attempts = job
+    job_id, team_id, job_type, attempts = job
+    # 🔴 The claim used to return the payload, and the claim runs as the CONTROL
+    # role — the one role deliberately not scoped to a team, because a single
+    # sweeper serves every team. `enqueue_github_event` queues the whole parsed
+    # webhook body, so a private repository's pull request descriptions and
+    # review comments were readable under one cross-team credential. Read it
+    # here instead, as the team's own pipeline role, where `pl_jobs` confines
+    # the row to `current_team()`.
+    with team_session(Role.PIPELINE, team_id) as conn:
+        row = conn.execute(
+            "select payload from public.jobs where id=%s", (job_id,)
+        ).fetchone()
+    if row is None:
+        # The row was claimed a moment ago, so the only way it is invisible now
+        # is that the scoping is wrong. Running the handler on an empty payload
+        # would turn that into a confusing KeyError three attempts later;
+        # failing here says what actually happened.
+        _finish(job_id, "failed", "job row not visible to the pipeline role",
+                worker_id=worker_id)
+        return True
+    payload = row[0] or {}   # a NULL payload is legitimate for some job types
     # The claim is held for as long as the handler runs, not for a fixed
     # window guessed in advance.
     done = threading.Event()

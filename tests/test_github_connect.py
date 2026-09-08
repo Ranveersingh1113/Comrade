@@ -303,9 +303,9 @@ def test_a_failed_clone_is_reported_to_the_member(seeded, admin, github, monkeyp
     )
     admin.execute(
         "insert into public.jobs"
-        " (team_id, job_type, payload, status, last_error, finished_at)"
-        " values (%s,'sync_repo',%s,'failed',%s, now())",
-        (TEAM_A, Json({"repo_full_name": "acme/app"}),
+        " (team_id, job_type, payload, subject, status, last_error, finished_at)"
+        " values (%s,'sync_repo',%s,%s,'failed',%s, now())",
+        (TEAM_A, Json({"repo_full_name": "acme/app"}), "acme/app",
          "no GitHub credential reaches acme/app."),
     )
     try:
@@ -328,9 +328,10 @@ def test_a_successful_clone_clears_an_older_failed_clone_from_setup(seeded, admi
     )
     admin.execute(
         "insert into public.jobs"
-        " (team_id, job_type, payload, status, last_error, finished_at)"
-        " values (%s,'sync_repo',%s,'failed',%s, now() - interval '1 minute')",
-        (TEAM_A, Json({"repo_full_name": "acme/app"}), "old workspace permission error"),
+        " (team_id, job_type, payload, subject, status, last_error, finished_at)"
+        " values (%s,'sync_repo',%s,%s,'failed',%s, now() - interval '1 minute')",
+        (TEAM_A, Json({"repo_full_name": "acme/app"}), "acme/app",
+         "old workspace permission error"),
     )
     try:
         assert _sync_failures(TEAM_A) == {}

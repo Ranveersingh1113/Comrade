@@ -149,6 +149,45 @@ def finalize_usage(team_id: str, run_id: str, actual_tokens: int) -> None:
         )
 
 
+def run_allowance(team_id: str, run_id: str) -> int | None:
+    """The most tokens this run may spend IN TOTAL, or None when uncapped.
+
+    🔴 Admission reserved an estimate and then let the turn make up to
+    `agent_max_llm_calls` model calls with nothing between them checking what
+    they cost. A repository sweep carries the whole growing context into every
+    call, so one admitted turn could spend several million tokens against a
+    500,000-per-hour cap; `finalize_usage` reconciled the truth afterwards,
+    which is accounting rather than a brake.
+
+    The allowance is what the run RESERVED plus whatever the team still has
+    left for the hour. Deliberately not the estimate on its own: a turn that
+    costs more than 6,000 tokens is ordinary and must not be killed for it —
+    what it may not do is spend the hour out from under everybody else.
+
+    Read live, so a run near the ceiling sees budget that other turns gave
+    back when they finalized. Never below the reservation: a bucket can be
+    pushed past the cap by a finalization, and a run must not be refused the
+    tokens it already paid for at admission.
+    """
+    _, token_cap = _caps()
+    if token_cap <= 0:
+        return None
+    with team_session(Role.AGENT, team_id) as conn:
+        reserved = conn.execute(
+            "select coalesce(tokens_reserved, 0) from public.agent_runs"
+            " where id=%s and team_id=%s",
+            (run_id, team_id),
+        ).fetchone()
+        spent = conn.execute(
+            "select tokens from public.usage_buckets"
+            " where team_id=%s and bucket=date_trunc('hour', now())",
+            (team_id,),
+        ).fetchone()
+    reserved = reserved[0] if reserved else 0
+    headroom = max(token_cap - (spent[0] if spent else 0), 0)
+    return reserved + headroom
+
+
 def record_reservation(team_id: str, run_id: str, reservation: int) -> None:
     """Remember what this run took, so finalizing can give back the difference.
 

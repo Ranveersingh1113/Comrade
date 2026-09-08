@@ -579,9 +579,9 @@ def test_a_failing_clone_is_not_retried_at_full_speed(
     admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
     admin.execute(
         "insert into public.jobs"
-        " (team_id, job_type, payload, status, last_error, finished_at)"
-        " values (%s,'sync_repo',%s,'failed','no credential', now())",
-        (TEAM_A, Json({"repo_full_name": "acme/broken"})),
+        " (team_id, job_type, payload, subject, status, last_error, finished_at)"
+        " values (%s,'sync_repo',%s,%s,'failed','no credential', now())",
+        (TEAM_A, Json({"repo_full_name": "acme/broken"}), "acme/broken"),
     )
     assert sweep_stale_checkouts() == [], "a just-failed clone was retried immediately"
 

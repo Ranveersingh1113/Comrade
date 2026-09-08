@@ -33,6 +33,51 @@ _URLS: dict[Role, str] = {
     Role.CONTROL: settings.comrade_control_db_url,
 }
 
+#: Whether THIS PROCESS may borrow the table owner.
+#:
+#: 🔴 `comrade_db_url_admin` was a REQUIRED setting, so the API and both
+#: workers had to carry the RLS-bypassing credential in their environment just
+#: to import their settings — and `_URLS` put it one `connect(Role.ADMIN)`
+#: away. tests/test_control_plane.py greps runtime source for `Role.ADMIN`,
+#: which catches the literal and nothing else.
+#:
+#: Off unless a process says otherwise. Migrations and the test suite say so;
+#: nothing that serves a request does.
+_ADMIN_ALLOWED = False
+
+
+def allow_table_owner() -> None:
+    """Declare this process a migration or test runner.
+
+    Deliberately a function call rather than a setting: an environment
+    variable is something a deployment can inherit by accident, and this is a
+    property of what the process IS.
+    """
+    global _ADMIN_ALLOWED
+    _ADMIN_ALLOWED = True
+
+
+def _url(role: Role) -> str:
+    """The connection string for `role`, or a refusal.
+
+    🔴 An empty URL used to reach `psycopg` unchanged on the `team_session`
+    path, and an empty conninfo is not "no connection" — libpq fills it in from
+    PGHOST/PGUSER, a .pgpass file, or peer auth on the local socket. On a host
+    where peer auth works, forgetting COMRADE_CONTROL_DB_URL was a superuser
+    session with no row security. `connect()` already refused; the scoped path
+    that every worker actually uses did not.
+    """
+    if role is Role.ADMIN and not _ADMIN_ALLOWED:
+        raise RuntimeError(
+            "this process may not borrow the table owner — it bypasses RLS."
+            " Call shared.db.allow_table_owner() only from migrations or tests."
+        )
+    url = _URLS[role]
+    if not url:
+        raise RuntimeError(f"COMRADE_{role.value.upper()}_DB_URL is not set")
+    return url
+
+
 # how each worker is recorded in change_log (via app.actor_kind GUC)
 _ACTOR_KIND: dict[Role, str] = {
     Role.AGENT: "ai",
@@ -76,7 +121,7 @@ def max_connections() -> int:
     An operator should not have to reconstruct this from three constants and a
     dict comprehension in order to answer "how many backends do I need".
     """
-    return len(set(_URLS.values())) * _POOL_MAX + _LOCK_POOL_MAX
+    return len({u for u in _URLS.values() if u}) * _POOL_MAX + _LOCK_POOL_MAX
 
 
 def _reset(conn: psycopg.Connection) -> None:
@@ -114,7 +159,7 @@ def _advisory_lock_pool() -> ConnectionPool:
     with _pool_lock:
         if _lock_pool is None:
             pool = ConnectionPool(
-                _URLS[Role.AGENT], min_size=_POOL_MIN, max_size=_LOCK_POOL_MAX,
+                _url(Role.AGENT), min_size=_POOL_MIN, max_size=_LOCK_POOL_MAX,
                 reset=_reset, open=True,
             )
             # A near-zero borrow must still work for the first turn. Warm the
@@ -141,10 +186,7 @@ atexit.register(close_pools)
 @contextmanager
 def connect(role: Role) -> Iterator[psycopg.Connection]:
     """Borrow a connection as the given role. Caller manages transactions."""
-    url = _URLS[role]
-    if not url:
-        raise RuntimeError(f"COMRADE_{role.value.upper()}_DB_URL is not set")
-    with _pool(url).connection() as conn:
+    with _pool(_url(role)).connection() as conn:
         yield conn
 
 
@@ -202,7 +244,7 @@ def team_session(role: Role, team_id: str) -> Iterator[psycopg.Connection]:
     """
     if role is Role.ADMIN:
         raise ValueError("team_session is for worker roles, not ADMIN")
-    with _pool(_URLS[role]).connection() as conn:
+    with _pool(_url(role)).connection() as conn:
         with conn.transaction():
             conn.execute(
                 "select set_config('app.current_team_id', %s, true)", (str(team_id),)

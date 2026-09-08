@@ -12,7 +12,14 @@ class Settings(BaseSettings):
     )
 
     # Direct Postgres connections (RLS-enforced; never service_role).
-    comrade_db_url_admin: str       # tests only — seeds/cleans as table owner
+    # Table owner: BYPASSRLS, and not a runtime credential.
+    #
+    # 🔴 This was required, so every API and worker process had to carry the
+    # RLS-bypassing credential in its environment just to import this module.
+    # It belongs to the migration entrypoint and the test suite, which say so
+    # by calling shared.db.allow_table_owner(); a service that never calls it
+    # is refused the connection even on a host where the variable is present.
+    comrade_db_url_admin: str = ""
     comrade_agent_db_url: str       # agent: reads + proposes + private nudges
     comrade_executor_db_url: str    # executes approved consent actions only
     comrade_pipeline_db_url: str    # document parser + memory compiler

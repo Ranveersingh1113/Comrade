@@ -349,12 +349,16 @@ def enqueue_sync(team_id: str, repo_full_name: str) -> str:
     dedupe_key = f"sync:{repo_full_name}"
     with team_session(Role.PIPELINE, team_id) as conn:
         row = conn.execute(
-            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
-            " values (%s,'sync_repo',%s,%s)"
+            # `subject` repeats the repository name out of the payload so
+            # the two control-plane readers — sweep_stale_checkouts below and
+            # the connect screen's failure list — can find it without being
+            # given the payload, which also carries whole webhook bodies.
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key,"
+            " subject) values (%s,'sync_repo',%s,%s,%s)"
             " on conflict (team_id, job_type, dedupe_key)"
             " where dedupe_key is not null and status in ('pending','processing')"
             " do nothing returning id",
-            (team_id, Json(payload), dedupe_key),
+            (team_id, Json(payload), dedupe_key, repo_full_name),
         ).fetchone()
         if row is None:
             row = conn.execute(
@@ -546,7 +550,7 @@ def sweep_stale_checkouts() -> list[str]:
             "      where j.team_id = r.team_id"
             "        and j.job_type = 'sync_repo'"
             "        and j.status = 'failed'"
-            "        and j.payload->>'repo_full_name' = r.repo_full_name"
+            "        and j.subject = r.repo_full_name"
             "        and j.finished_at > now() - make_interval(secs => %s))"
             " order by r.last_cloned_at nulls first limit %s",
             (CHECKOUT_STALE_SECONDS, SYNC_RETRY_BACKOFF_SECONDS, SYNC_BATCH),

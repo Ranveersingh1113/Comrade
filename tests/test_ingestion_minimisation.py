@@ -95,19 +95,35 @@ def test_the_control_role_can_still_run_the_queue_without_reading_documents(seed
     from pipeline.compiler import enqueue_document
     from shared.db import Role, connect
 
+    import psycopg
+    import pytest
+
+    from shared.db import team_session
+
     document_id = _document()
     enqueue_document(TEAM_A, document_id, "text", storage_path="team/report.txt")
 
+    # T26 went further than this test asked for. Keeping document CONTENT out
+    # of the payload left the payload itself readable by a role that spans
+    # every team, and `ingest_github` queues whole webhook bodies through the
+    # same column. The control role now cannot read the column at all.
     with connect(Role.CONTROL) as conn:
         conn.autocommit = True
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("select payload from public.jobs").fetchall()
+        # ...and still has everything it needs to run the queue.
+        assert conn.execute(
+            "select count(*) from public.jobs where job_type='parse_document'"
+            " and team_id=%s", (TEAM_A,),
+        ).fetchone()[0] >= 1
+
+    # The original property, checked through the role that may look: a
+    # reference, never the bytes.
+    with team_session(Role.PIPELINE, TEAM_A) as conn:
         payloads = conn.execute(
             "select payload from public.jobs where job_type='parse_document'"
-            " and team_id=%s",
-            (TEAM_A,),
+            " and team_id=%s", (TEAM_A,),
         ).fetchall()
-
-    # The seed leaves one parse_document job with a NULL payload; a row that
-    # carries nothing obviously carries no document.
     assert payloads, "no jobs to check"
     for (payload,) in payloads:
         assert not payload or "content" not in payload

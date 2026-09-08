@@ -324,15 +324,16 @@ def _sync_failures(team_id: str) -> dict[str, str]:
     """
     with connect(Role.CONTROL) as conn:
         rows = conn.execute(
-            "select distinct on (payload->>'repo_full_name')"
-            "       payload->>'repo_full_name', last_error"
+            # `subject`, not `payload`: this role must not be able to read
+            # what a job CARRIES (20260908130000), only what it is about.
+            "select distinct on (j.subject) j.subject, j.last_error"
             "  from public.jobs j"
             "  left join public.github_repos r"
             "    on r.team_id = j.team_id"
-            "   and r.repo_full_name = j.payload->>'repo_full_name'"
+            "   and r.repo_full_name = j.subject"
             " where j.team_id = %s and job_type = 'sync_repo' and status = 'failed'"
             "   and (r.last_cloned_at is null or j.finished_at > r.last_cloned_at)"
-            " order by payload->>'repo_full_name', finished_at desc",
+            " order by j.subject, j.finished_at desc",
             (team_id,),
         ).fetchall()
     return {name: (err or "the clone failed")[:300] for name, err in rows if name}

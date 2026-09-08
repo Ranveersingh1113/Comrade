@@ -137,13 +137,13 @@ def enqueue_build(team_id: str, repo_full_name: str) -> str | None:
 
     with team_session(Role.PIPELINE, team_id) as conn:
         row = conn.execute(
-            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
-            " values (%s,'build_environment',%s,%s)"
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key,"
+            " subject) values (%s,'build_environment',%s,%s,%s)"
             " on conflict (team_id, job_type, dedupe_key)"
             " where dedupe_key is not null and status in ('pending','processing')"
             " do nothing returning id",
             (team_id, Json({"repo_full_name": repo_full_name}),
-             f"env:{repo_full_name}"),
+             f"env:{repo_full_name}", repo_full_name),
         ).fetchone()
     return str(row[0]) if row else None
 

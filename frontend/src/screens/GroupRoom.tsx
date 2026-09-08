@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   startTurn, followRun, cancelRun, ACTIVE_RUN_STATUSES, agentErrorText,
+  AgentApiError, failureReference,
   getThreadRuns, rememberMessage, suppressObservation,
 } from '../lib/agentApi';
 import type { StreamFrame } from '../lib/agentApi';
@@ -24,6 +25,29 @@ import { AgentActivity } from '../components/AgentActivity';
 import type { AgentStep } from '../lib/agentApi';
 
 type RoomLayout = 'classic' | 'split' | 'board';
+
+/** Is this worth reconnecting for?
+ *
+ *  🔴 (fix.md F10) Nothing asked. `followRun` returns `aborted` when the
+ *  signal fired and `truncated` when the body ended cleanly, so everything
+ *  that reached the catch arm was the connection actually DYING — a TypeError
+ *  out of fetch or the body reader, no status, no frame. That is the
+ *  commonest interruption there is, and it was the only one that never
+ *  retried: the indicator went out, "No connection to Comrade" appeared, and
+ *  the run carried on answering nobody.
+ *
+ *  A server ANSWER is different. 401/403/404 are decisions — the session
+ *  expired, access was revoked, the run is not there — and reconnecting
+ *  cannot change any of them. 5xx is worth another try.
+ */
+function reconnectable(e: unknown): boolean {
+  return !(e instanceof AgentApiError) || e.status >= 500;
+}
+
+/** How long to wait before each reconnect. Short, because someone is watching
+ *  a live answer arrive; growing, because a network that has just failed
+ *  usually needs more than no time at all. */
+const RECONNECT_MS = [200, 400, 800, 1600];
 
 export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread; allowTeamMessages?: boolean }) {
   const narrow = useIsNarrow();
@@ -99,6 +123,14 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
    *  durable and keeps working; leaving a room must not quietly kill a turn a
    *  teammate is waiting on. */
   const followRef = useRef<AbortController | null>(null);
+  /** The run that watch is FOR.
+   *
+   *  A second follow of the same run reattaches at `after_seq=-1` and replays
+   *  every step card already on screen. That was theoretical until the
+   *  composer was released mid-run (fix.md F09): a correction typed during a
+   *  run is steering, and the server answers steering with the id of the run
+   *  already in flight. */
+  const followingRef = useRef<string | null>(null);
   /** The attempt id of a send not yet confirmed accepted.
    *
    *  Retained across a retry of the SAME text, which is what makes the retry
@@ -160,12 +192,18 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
    *  could not tell a finished turn from an abandoned one, while the run
    *  itself carried on perfectly well, leased and durable, answering nobody. */
   const follow = useCallback(async (runId: string, mine = true, fromSeq = -1) => {
+    // Already on it. Every caller can now ask for a run that may already be
+    // watched — a steering send, the mount-time resume, a resolved consent
+    // card — and restarting the stream would duplicate what is on screen.
+    if (followingRef.current === runId) return;
     followRef.current?.abort();
     const control = new AbortController();
     followRef.current = control;
+    followingRef.current = runId;
     setActiveRun({ id: runId, mine });
     setAiTyping(true);
     let cursor = fromSeq;
+    let lost = false;
     // Bounded. A server that keeps cutting the stream is a thing to report,
     // not a thing to hammer.
     for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -176,18 +214,44 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
           handleFrame(f);
         }, { afterSeq: cursor, signal: control.signal });
       } catch (e) {
-        setSendError(agentErrorText(e));
-        break;
+        // 🔴 This was `setSendError(...); break` — every throw ended the
+        // watch. See `reconnectable` above: the throws are the dropped
+        // connections, which are exactly the ones worth resuming.
+        if (control.signal.aborted) return;
+        if (!reconnectable(e)) {
+          setSendError(agentErrorText(e));
+          break;
+        }
+        // Logged even though it is being retried: a turn that reconnected
+        // four times still had four failures worth knowing about.
+        failureReference(e);
+        if (attempt === 4) {
+          lost = true;
+          break;
+        }
+        await new Promise((r) => { setTimeout(r, RECONNECT_MS[attempt]); });
+        // The wait is long enough for the member to have left the room.
+        if (control.signal.aborted) return;
+        // `cursor` already holds the last sequence that arrived, so the
+        // reconnect asks for what follows it rather than the whole run.
+        continue;
       }
       // Navigated away. Leave every piece of state alone: this room is going.
       if (outcome === 'aborted') return;
       if (outcome !== 'truncated') break;
-      if (attempt === 4) {
-        setSendError('Lost the connection to this turn - reload to catch up.');
-      }
+      if (attempt === 4) lost = true;
+    }
+    if (lost) {
+      // NOT "the turn failed". The run is leased and durable and is most
+      // likely still working; what was lost is this browser's view of it.
+      setSendError(
+        'Lost the connection to this turn - it may still be running.'
+        + ' Reload to catch up.',
+      );
     }
     if (control.signal.aborted) return;
     followRef.current = null;
+    followingRef.current = null;
     setActiveRun(null);
     setStopping(false);
     setAiTyping(false);
@@ -211,7 +275,10 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
   }, [activeRun, teamId]);
 
   // Dropping the subscription is the ONLY thing leaving a thread does.
-  useEffect(() => () => followRef.current?.abort(), [thread.id]);
+  useEffect(() => () => {
+    followRef.current?.abort();
+    followingRef.current = null;
+  }, [thread.id]);
 
   useEffect(() => {
     if (!teamId) return;
@@ -346,10 +413,6 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       // Server persists both the user message and the AI reply; Realtime
       // (or the post-call refresh) delivers them — no optimistic insert.
       setAiTyping(true);
-      setPending('');
-      setStep('');
-      activityRequest.current += 1;
-      setActivity([]);
       const requestId = attemptId(text);
       let accepted;
       try {
@@ -366,7 +429,24 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
       }
       // Accepted. The next send is a new attempt, even with identical text.
       attemptRef.current = null;
-      await follow(accepted.run_id, true);
+      // 🔴 This was awaited, and `sending` was held until it returned — so the
+      // composer was disabled for the WHOLE run, minutes on a tool-using turn.
+      // The person most likely to need to speak during a run is the one who
+      // started it ("not that file", "stop after the tests"), and the backend
+      // has accepted exactly that as steering since T15. The only way to type
+      // again was a reload, which also looks like abandoning the turn.
+      //
+      // The guard belongs on admission — the window a double click lands in —
+      // not on the stream's lifetime, so the follow runs on its own.
+      if (followingRef.current === accepted.run_id) return;
+      // A NEW run, so the tool activity of the previous one is history. Reset
+      // here rather than before the POST: steering shares the run in flight,
+      // and clearing its activity would erase the turn the member is watching.
+      setPending('');
+      setStep('');
+      activityRequest.current += 1;
+      setActivity([]);
+      void follow(accepted.run_id, true);
     } else {
       const { error: err } = await supabase.from('messages').insert({
         team_id: teamId,

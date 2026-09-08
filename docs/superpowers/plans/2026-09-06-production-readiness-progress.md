@@ -2069,6 +2069,86 @@ image and the real generated script but bypassed the proxy, so the egress
 policy itself is still only unit-tested.
 
 
+### A04, and the provider decision · `c8f03c6`
+
+**A04 — an oversized preview response finished successfully.** The streaming
+body counted bytes correctly and then, past the cap, did `return`. Returning
+from an async generator is how a body ENDS NORMALLY: the server sends the
+terminating chunk and the transfer completes, carrying the upstream's status —
+usually 200. A browser asking for a JavaScript bundle past the cap therefore
+received a *successfully completed* resource missing its second half, and
+failed later, somewhere else, in a way nobody traces back to a size limit.
+
+The generator's own docstring claimed the opposite — "the connection ends
+without a clean close, which a browser reports as a failed load instead of
+rendering half a file as though it were whole". That was the intention.
+`return` is not how it is spelled. The transfer now aborts, because once the
+headers are gone there is no status left to send; that is the whole difficulty
+of the case, and a body that merely stops is a body that completed. A declared
+content-length still gets a proper refusal with a status, before anything is
+sent.
+
+The test drives real sockets on both ends — a raw HTTP upstream, uvicorn
+serving the app — because the defect is not in the counting. It is in what the
+ASGI server does when the generator finishes, and an in-process TestClient
+never runs that code: it hands back whatever was yielded and calls it a
+response.
+
+**One of my own tests was deleted rather than kept.** A `tracemalloc` check for
+"the overflow is not buffered" measured a process running both the app and the
+HTTP client, so it read httpx's client-side buffering as though it were the
+proxy's — it reported 54 MB and would have gone on reporting it after any fix.
+It would have looked like evidence. What replaced it counts bytes across the
+socket, which is the property the cap is actually for.
+
+**Provider decision (owner, 2026-09-09): ASCII Box.** F17 — wiring the existing
+`BoxClient` into execution, dependency setup and the preview lifecycle — is
+approved and is the next task. It is NOT started here: the owner also chose to
+close out and hand over, and F17's acceptance cannot be satisfied from this
+machine in any case. It requires provider-side evidence of Box execution in a
+disposable Box, and fix.md is explicit that a locally installed `box.exe`
+proves nothing about the deployed backend.
+
+**F02 stays confirmed and unfixed, on purpose.** Measured directly: a container
+on an `--internal` network reaches another member on port 8000 and gets a
+response, because `--internal` blocks egress and not lateral traffic, and the
+preview proxy sits on every preview network. Under Docker the fix is a
+per-preview transport container — which the Box decision may make moot, which
+is exactly why fix.md orders the reassessment after the provider choice.
+F05–F08 were repaired regardless, because Docker is the configured backend
+today and those paths are not retired.
+
+**Gate:** `scripts/gates.sh`, commit `c8f03c6`, all lanes green — backend
+1521 passed / 7 skipped / 17 deselected in 10:04; frontend build; lint (3
+pre-existing fast-refresh warnings); frontend unit + component 224 in 33 files;
+frontend integration 21 in 6 files; **browser journeys 8 passed**; real GitHub
+2 skipped, "no GitHub credential configured".
+
+🔴 **The first run of that gate exited 0 with a lane that never ran.** It
+printed "the API on :8000 is not answering; the browser journeys need it" and
+then reported success anyway. Recording it as green would have been precisely
+the false pass this whole exercise is about. The numbers above are from a
+re-run with `uvicorn server.app:app --port 8000` up, which is what actually
+executed the eight journeys. **A06 asks for unavailable lanes to be kept
+explicit; a gate that exits 0 when it skips one cannot do that, and that is
+worth fixing before the gate is trusted for release.**
+
+**Where this leaves fix.md.** Every reproduced defect is fixed except F02.
+Closed: F01, F03, F04, F05–F16, F18–F34, and A04. Open: F02 (gated on the Box
+boundary), F17 (approved, not started), and the acceptance programme
+A01–A03 and A05–A12, which is feature and validation work rather than repair.
+
+**Ceiling:** 🔴 A03 needs local DNS/TLS and A05 needs a disposable Linux Compose
+host; neither exists here, and both remain recorded missing proofs rather than
+passing lanes. 🔴 F06's own acceptance wants the install path driven through the
+real setup container with its registry egress proxy. The end-to-end runs used
+the real image and the real generated script — npm, pnpm, uv and poetry each
+installing a locked project, then imported by the run phase with the network
+off — but bypassed the proxy, so the egress policy itself is still only
+unit-tested. 🔴 A01, A02, A07–A12 are untouched; several are acknowledged in
+earlier entries as known limitations and remain so.
+
+
 ---
 
 ## Standing ceilings

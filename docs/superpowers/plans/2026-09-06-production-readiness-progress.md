@@ -1933,6 +1933,142 @@ doing: running targeted tests against the same database while a full run was
 live produced three failures that were pure contention, and I nearly read them
 as real.
 
+### Second pass — F12–F16, F18, F21, F23, F28–F30, F09, F10, F05–F08
+
+**Closed: 32 of 34.** Commits `0fc854e`, `b410943`, `a7553a1`, `98207e7`,
+`aa2380a`, `5d53f3d`, `181206e`, `f58602b`, `6b076a4`, `0225609`, `aac8f4e`. Same method throughout: reproduce first, implement, then
+mutate the fix back and confirm the new tests go red.
+
+#### What the reproductions actually showed
+
+**F16 — the hole was measured, not argued.** With a summary through message 40
+and a thread at 61, the replay started at message 42 and message 41 was
+invisible to the turn. Compaction advances the summary in jumps of
+`MIN_COMPACT_MESSAGES` (40) while the runtime replayed the last
+`agent_history_turns` (20), and nothing made the two windows meet. T19 exists
+because a constraint stated a hundred messages ago was lost; it fixed the far
+end and left a moving hole just behind the replay window, which is where a
+constraint stated ten minutes ago lives. `replay_for_turn` now composes the
+summary cursor and the replay in ONE place — two callers assembling "what does
+a turn see" separately is how they came to disagree.
+
+**F09 — the composer was locked for the whole run, and the backend had
+supported the alternative since T15.** `enqueue_agent_turn` answers a send made
+during a live run with `disposition = 'steering'`. The room could not reach it,
+because `sending` was held until `follow()` finished watching the run. Releasing
+it exposed the second half: steering returns the id of the run ALREADY being
+followed, so re-following would reattach at `after_seq=-1` and replay every step
+card on screen. `follow` is now idempotent for the run it is on.
+
+**F10 — only the tidy interruption reconnected.** `followRun` returns `aborted`
+for a signal and `truncated` for a clean end, so everything reaching the catch
+arm was the connection actually dying — the commonest interruption there is,
+and the only one that never retried.
+
+#### The sandbox batch (F05–F08)
+
+**F05 measured 33.5 MB held for a 16 MB flood.** `run_setup` was the last
+`capture_output=True`, on the one phase with the network on, running
+`pip install`'s setup.py and npm's postinstall scripts for up to ten minutes.
+Clipping afterwards protects the log, not the worker. Moving it to `run_bounded`
+brought the peak to 3.2 MB — and took **57 seconds**, because `BoundedOutput`
+fed its tail a byte at a time into a `deque(maxlen=…)` of boxed ints: about a
+megabyte per stream to store 128 KB, and a loop iteration per byte. The
+safeguard was its own denial of service. Chunk-wise: same bound, 5 seconds,
+2 MB peak.
+
+**F06 — four of the seven advertised recipes could not work.** The image was
+`python:3.12-slim`, so `npm`, `pnpm` and `npx` were absent and all three node
+recipes died on "npm: not found" inside the sync pipeline, where nobody sees
+it. `npm ci --prefix /deps` does not redirect output — `--prefix` IS the
+project root, so npm looked for `/deps/package.json` and found nothing, while
+the manifests sat in the read-only checkout where `node_modules` could not have
+been written anyway. `uv sync --project /workspace` targets
+`/workspace/.venv`, the same read-only mount.
+
+Verified against the real image rather than the argv: npm, pnpm, uv and poetry
+each install a small locked project through the actual generated script, and
+the run phase — network off, deps read-only, uid 10001 — imports what was
+installed. That verification found something a test would not have: **`uv sync`
+uninstalled uv and poetry from the venv it was executing out of**, because both
+tools SYNC. uv survived as a static binary already running; poetry is pure
+Python and imports as it goes, so it would have deleted its own dependencies
+mid-install. The installers now live in `/deps/tools`, apart from what they
+build. `poetry install --sync` also became `poetry sync`: the flag is
+deprecated and slated for removal, and the installer is fetched fresh on every
+setup, so its disappearance is a question of when.
+
+**F07 — the one state the design was built to survive was the one nothing could
+act on.** T06 reserves the container NAME before `docker run` precisely so a
+crash before the id write-back leaves evidence. Every reclaimer then filtered on
+the id: `reconcile`, `stop`, the expiry sweep, and the delete trigger alike. The
+second half was a distinction never made — `_inspect_state` returned None both
+for "no such container" and for "the daemon would not answer", and the caller
+writes "the container is gone" for None, so a daemon restart rewrote every live
+preview as failed and dropped the ids that made them findable.
+
+**F08 — the queue that could not empty.** The drain removed each network with a
+bare `docker network rm` while the preview proxy's endpoint was still attached,
+which Docker refuses every time, for as long as a proxy exists. Rows therefore
+failed permanently, and `order by requested_at limit 50` keeps a failing row at
+the FRONT of that order — so fifty stuck rows consumed every pass and nothing
+behind them was ever reclaimed. Ordering by attempts fixes the starvation; a
+`next_attempt_at` backoff stops that fix becoming a hot loop.
+
+#### Two tests were asserting defects as requirements
+
+`test_validate_rejects_unknown_action` asserted the normalised action `== "add"`
+for input the compiler could not understand, and
+`test_a_revision_with_no_expectation_still_works` argued in its docstring that a
+missing version "must not become an error". Both were rewritten to the contract
+rather than the behaviour.
+
+#### Two tests the batch exposed rather than broke
+
+`test_changing_the_recipe_invalidates_every_environment` monkeypatched
+`RECIPE_VERSION` to the literal `"2"` to prove a changed version changes the
+key. Bumping the real version to `"2"` for the new layout made it compare a key
+against itself — the assertion had been comparing two identical strings and
+passing on `!=` only because the value happened not to have reached the literal
+yet. It now derives the other value from the current one, so it cannot collide
+again.
+
+`test_a_command_that_will_not_stop_is_actually_killed` failed once in a full
+run and passes every time alone. It counts `comrade-run-*` containers
+GLOBALLY — which is the only way to see a container the caller has lost track
+of, and the whole point of the test — so a sibling test's container still
+shutting down reads as this one having survived. That is a race with the
+neighbours, not a fact about the kill. It now waits for the count to settle;
+a container that really survived loops forever, so the window cannot hide the
+failure the test exists to catch.
+
+#### One column grant was missing, and that was correct
+
+Recording the recovered container id failed with `permission denied for table
+sandbox_processes`: the control role has per-column grants, and `container_id`
+was readable but not writable. Granted explicitly
+(`20260908290000`) rather than widened — the role stays metadata-only, which is
+why the grants are per-column at all.
+
+**Passing:** 1516 backend tests, 7 skipped, 17 deselected, 0 failed. 224
+frontend tests (33 files); typecheck and build green. Sandbox image rebuilt with Node 22,
+npm 10.9.8 and pnpm 9.15.4; pytest, ruff, mypy and uid 10001 unchanged.
+
+**Ceiling:** 🔴 **F02 and F17 remain open, and they are the same decision.**
+F02 is confirmed by measurement — a container on an `--internal` network
+reaches another member on port 8000, because `--internal` blocks egress and not
+lateral traffic — and its fix is a per-preview transport container that F17 may
+make moot. F17 asks for ASCII Box to be wired into execution and preview; that
+is a product decision about which sandbox provider ships, not a defect to
+repair, and fix.md itself says to reassess F02 and F05–F08 after it. F05–F08
+were done anyway because Docker is the configured backend today and those paths
+are not retired. 🔴 All twelve acceptance items A01–A12 remain. 🔴 F06's own
+acceptance asks for the install path exercised through the real setup container,
+which needs the registry egress proxy; the end-to-end runs above used the real
+image and the real generated script but bypassed the proxy, so the egress
+policy itself is still only unit-tested.
+
+
 ---
 
 ## Standing ceilings

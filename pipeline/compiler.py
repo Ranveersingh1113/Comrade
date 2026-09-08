@@ -609,6 +609,18 @@ def excerpt_is_supported(conn, team_id: str, source, excerpt: str) -> bool | Non
     """
     if not excerpt:
         return False
+    if source is None:
+        # 🔴 (fix.md F13) This fell through to `_source_text`, which returns
+        # None for a missing source — and None means "could not check", so the
+        # quarantine (which fires on False) let it past and the claim became an
+        # ACTIVE fact. A candidate with no citation is not an uncertain case:
+        # there is nothing to check it against, and a claim with no source is
+        # not supported by one.
+        #
+        # In chat this is exactly the fabricated-quote path: the model returns
+        # a `source_index` that is missing or out of range, the mapping
+        # degrades it to "no citation", and the fact published anyway.
+        return False
     text = _source_text(conn, team_id, source)
     if text is None:
         return None

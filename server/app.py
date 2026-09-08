@@ -1410,6 +1410,16 @@ def document_reingest(
 #: streaming a video. Bounded because the body is buffered, and an unbounded
 #: buffer is a memory exhaustion vector any repository could trigger.
 PREVIEW_MAX_BYTES = 25 * 1024 * 1024
+
+
+class PreviewOverflow(Exception):
+    """A response passed the cap after its headers had already gone.
+
+    Raised from inside the streaming body so the transfer ABORTS. There is no
+    status left to send by then, and a body that merely stops is a body that
+    completed — which is exactly the truncated-file-served-as-whole that the
+    cap exists to prevent (fix.md A04).
+    """
 PREVIEW_TIMEOUT = 30.0
 
 
@@ -1534,10 +1544,23 @@ async def _serve_preview(request: Request, host: str, process_id: str) -> Respon
 
         aiter_raw, not aiter_bytes: the body is forwarded undecoded and its
         content-encoding header travels with it, which is the only arrangement
-        that cannot contradict itself. A chunked response with no declared
-        length is cut off at the cap rather than buffered — the connection ends
-        without a clean close, which a browser reports as a failed load instead
-        of rendering half a file as though it were whole.
+        that cannot contradict itself.
+
+        🔴 Past the cap this used to `return`, and the docstring claimed that
+        "the connection ends without a clean close". It does not. Returning
+        from an async generator is how a body ENDS NORMALLY: the server sends
+        the terminating chunk and the transfer completes, carrying whatever
+        status the upstream sent — usually 200. The browser received a
+        successfully completed resource that was missing its second half. Half
+        a JavaScript bundle, delivered with every appearance of success, which
+        then fails somewhere else entirely (fix.md A04).
+
+        Raising is the only way to say "this response is void" once the
+        headers are gone. There is no status left to send — that is the whole
+        difficulty of the case — so the transfer is ABORTED instead, and the
+        client observes a protocol error rather than a short file. A declared
+        content-length never reaches here: `enforce_response_limit` above
+        refuses that properly, with a status, before anything is sent.
         """
         total = 0
         try:
@@ -1545,12 +1568,14 @@ async def _serve_preview(request: Request, host: str, process_id: str) -> Respon
                 total += len(chunk)
                 if total > PREVIEW_MAX_BYTES:
                     logger.info(
-                        "preview response for %s passed %d bytes; cutting off",
-                        process_id, PREVIEW_MAX_BYTES,
+                        "preview response for %s passed %d bytes; aborting the"
+                        " transfer", process_id, PREVIEW_MAX_BYTES,
                     )
-                    return
+                    raise PreviewOverflow(process_id)
                 yield chunk
         finally:
+            # Both, always. An aborted transfer that leaked the upstream
+            # connection would make one oversized response poison the preview.
             await upstream.aclose()
             await client.aclose()
 

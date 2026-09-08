@@ -1749,6 +1749,98 @@ is wired to anything — `docs/operations.md` defines the conditions and the
 first action for each, and connecting them to a pager is a deployment decision
 this repository does not make.
 
+### T28 — Rehearse recovery and document release operations
+
+**Changed:** `scripts/backup.py` (new), `tests/test_restore_drill.py` (new),
+`docs/operations.md`, `docs/deployment.md`.
+
+**Regression — a `pg_dump` of this database is not a backup of this system.**
+The only backup guidance in the repository was one line in `docs/deployment.md`
+— "Maintain database backups and rehearse restoration, including recreation of
+worker login roles" — and nothing implemented it or rehearsed it.
+
+Roles are CLUSTER-level objects and `pg_dump` is DATABASE-level. Measured on
+this schema: the dump references `comrade_agent`, `comrade_executor`,
+`comrade_pipeline`, `comrade_control` and `comrade_authenticator` in **115**
+GRANT and CREATE POLICY statements and creates **none** of them. Restored into
+a fresh cluster it fails on the first grant; restored with errors ignored it
+produces a database whose row-level security policies name roles that do not
+exist — which is not the smaller problem, because the entire authorization
+model of this product is those five roles and those policies.
+
+The local version of the same split had already bitten this codebase:
+`scripts/restore_local_roles.py` exists because `supabase db reset` drops the
+roles and leaves the schema behind. Nobody had drawn the line to production.
+
+**Design:** a backup is TWO artifacts and `create()` refuses to produce one
+without the other — it reads the globals dump back and raises if any required
+role is missing from it. A missing-globals backup looks complete: it is the
+bigger file, and it restores without complaint into a cluster that still has
+the roles. It is worthless in the one case backups exist for.
+
+**The drill runs, rather than being described.** `tests/test_restore_drill.py`
+dumps, creates a scratch database, restores into it, and then checks the thing
+that actually matters: not "are the rows there" — anyone can check that — but
+**is the boundary still enforced**. RLS still enabled, the policies present, a
+member of one team unable to read another team's threads, a teammate unable to
+read a restricted thread they are not in, and a member who still belongs able
+to read their own.
+
+Both directions, deliberately: an empty restored table satisfies every denial
+check on its own. The first version of those assertions DID pass vacuously —
+the module fixture dumped before any test had seeded, so the snapshot had no
+rows — and the fix was to seed and create the restricted thread before taking
+the backup.
+
+**Verified by mutation.** With the restore intact a non-member counts 0 of
+another team's threads; with `row level security` disabled on that one table in
+the restored copy, the same query returns 2. The drill detects a restore that
+loses row-level security.
+
+**Also — the rollback register, enforced.** "No automatic downgrade of
+irreversible schema" is only a rule if something checks it. Migrations here are
+expand-then-contract, so the previous image runs against the migrated schema
+and a rollback is "deploy the old commit"; a migration that REMOVES or NARROWS
+something breaks that and the operator finds out during an incident. A test now
+requires every migration that revokes a privilege from a `comrade_*` role, or
+drops a column or table, to appear in a register in `docs/operations.md` —
+ten of them do, and the one whose consequence was actually traced
+(`queue_payload_privacy`, which breaks job claiming) has its by-hand reversal
+written out.
+
+The guard is narrow on purpose. The first version matched any `revoke`, which
+flagged 33 migrations — almost all of them the `revoke all on function … from
+public, anon, authenticated` hardening idiom sitting next to a `create
+function`. A guard that flags 33 files is one somebody deletes within a week.
+
+**Also — retention, export and deletion, stated rather than assumed.** Nothing
+is erased: deleting a message sets `deleted_scope` and leaves the row, so
+"delete" in this product means *withdraw from view*, not *destroy*, and the
+text is still in every backup taken since. There is no retention window on
+anything. There is no export. The only true erasure path is `on delete
+cascade` from a `teams` row — 61 of them — which has no UI, which is the safe
+way round. All four are written down as gaps rather than described as
+features.
+
+**Passing:** 13 restore-drill tests; full suite below.
+
+**Migration/rollback:** none. Tooling and documentation only.
+
+**Ceiling:** 🔴 THE DRILL RESTORES INTO THE SAME CLUSTER, so it exercises the
+database half and not the roles half — the roles are already there. What it
+checks about globals is that the ARTIFACT contains `CREATE ROLE` for each of
+the five; a genuinely fresh cluster has not been tried. 🔴 The measured
+numbers — backup 1.2s, restore 6.8s on a 1.3 MB dump — are from a near-empty
+development database. They establish the method and the ratio, not a
+production RTO, and the runbook says so. 🔴 Storage objects are not backed up
+by any of this: `database.sql` holds the paths and Supabase Storage's own
+backups hold the bytes, and the two are not taken together, so a restore can
+produce documents whose files are missing. 🔴 The rollback drill is a register
+and a rule, not an exercise: no previous image has actually been deployed over
+a migrated schema here. 🔴 Six of the ten register entries say "consequence not
+traced" — they are historical, and a consequence nobody verified is not
+written down as if it had been.
+
 ---
 
 ## Standing ceilings

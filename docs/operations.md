@@ -263,6 +263,163 @@ Cost in currency is deliberately null unless `GEMINI_INPUT_USD_PER_MTOK` and
 `GEMINI_OUTPUT_USD_PER_MTOK` are set, because a price that differs per
 deployment should not be guessed on someone else's behalf.
 
+## Backup and restore
+
+**A `pg_dump` of this database is not a backup of this system.**
+
+Roles are cluster-level objects and `pg_dump` is database-level. The database
+dump references `comrade_agent`, `comrade_executor`, `comrade_pipeline`,
+`comrade_control` and `comrade_authenticator` in over a hundred `GRANT` and
+`CREATE POLICY` statements and creates none of them. Restored into a fresh
+cluster it fails on the first grant; restored with errors ignored it produces a
+database whose row-level security policies name roles that do not exist — which
+is not the smaller problem, because the whole authorization model of this
+product is those five roles and those policies.
+
+So a backup is **two artifacts**, and `scripts/backup.py` refuses to write one
+without the other:
+
+```bash
+python -m scripts.backup /var/backups/comrade/$(date -u +%Y-%m-%dT%H%M)
+```
+
+| File | Contains | Restore |
+|---|---|---|
+| `globals.sql` | role definitions **and their password hashes** | first, into the cluster |
+| `database.sql` | schema, data, grants, RLS policies | second, into the database |
+
+`globals.sql` is a credential store. Treat it as one: same handling as the
+`.env`, never in the application's own object storage, never in a repository.
+
+### Restoring
+
+```bash
+psql -f globals.sql                  # roles first, or every grant below fails
+psql -d comrade -f database.sql
+```
+
+`tests/test_restore_drill.py` runs this round trip against a scratch database
+and checks the thing that matters afterwards — not "are the rows there", which
+anyone can see, but **is the boundary still enforced**: RLS still enabled, the
+policies present, and a member of one team still unable to read another team's
+threads in the restored copy. Run it before trusting a backup schedule, and
+after any change to roles or policies.
+
+### Recovery targets
+
+| What | Recovery point | Recovery time | How |
+|---|---|---|---|
+| Database (threads, memory, consent, audit) | your dump interval | measured by the drill — see below | the two files above |
+| Storage (uploaded documents) | provider-dependent | provider-dependent | Supabase Storage's own backups; `database.sql` holds only the paths |
+| Repository checkouts, **clean** | n/a | one clone | re-cloned on the next turn; nothing to back up |
+| Repository checkouts, **with uncommitted work** | **NONE** | **NONE** | see below |
+
+**The recovery time is measured, not estimated.** `test_the_drill_is_timed`
+prints what the round trip actually cost; run the drill with `-s` to see it:
+
+```bash
+python -m pytest tests/test_restore_drill.py -q -s
+#   [drill] backup 1.2s / restore 6.8s (1.3 MB)
+```
+
+Those figures are from a near-empty development database. They establish the
+*method* and the ratio — restore costs several times what the dump does — not a
+production number. Re-run the drill against a copy the size of your real
+deployment before quoting an RTO to anyone, because the honest answer to "how
+long would recovery take" is "however long it took the last time we tried it".
+
+**Uncommitted work in a workspace is not recoverable and is not backed up.**
+A checkout is a copy of something GitHub still has, which is what makes
+eviction and loss safe — but only while it is clean. Work the agent has written
+and not committed exists in exactly one place, on that host's disk.
+`enforce_disk_cap` already refuses to evict a workspace with uncommitted
+changes for this reason. Nothing else protects it: a host loss loses it, and no
+database restore brings it back. If that matters for a deployment, the answer
+is committing to a branch more eagerly, not a backup.
+
+### Retention, export and deletion
+
+Stated plainly, because what this system does is not what a member is likely to
+assume.
+
+**Nothing is erased.** Deleting a message sets `deleted_scope` and leaves the
+row: the screen stops rendering it, the agent stops reading it
+(`agent/history.py` and `agent/tools.py` both filter on it), and the text is
+still in the table and in every backup taken since. The same is true of
+`documents.deleted_at`. This is deliberate — a tombstone keeps an audit
+truthful where a hard delete would silently rewrite it — but it means
+"delete" in the product is *withdraw from view*, not *destroy*.
+
+**There is no retention window.** Nothing ages anything out: not messages, not
+runs, not steps, not `change_log`, not compiled memory. A team's first day is
+still queryable on its thousandth. The tables that grow without bound are
+`messages`, `agent_steps`, `change_log` and `jobs`; only `jobs` has any pruning
+pressure at all, and that is retry cleanup rather than retention.
+
+**There is no export.** No endpoint produces a team's data in a portable form.
+The backup above is the whole-deployment answer and is not per-team, so
+honouring a member's request today means writing SQL by hand.
+
+**Cascades are the one real deletion.** `on delete cascade` appears 61 times;
+deleting a `teams` row removes that team's threads, messages, memory,
+documents, consent history and audit trail with it. That is the only true
+erasure path in the system and it has no UI, which is the safe way round.
+
+| | Today | What using this in anger would need |
+|---|---|---|
+| Member deletes a message | tombstoned, still stored | a hard-delete path, and a decision about what it does to the audit |
+| Team asks for its data | nothing | a per-team export |
+| Team asks to be forgotten | delete the `teams` row by hand; cascades do the rest | the same thing behind a confirmation, and Storage objects removed too |
+| Old data | kept forever | a retention window per table, and a statement of it |
+
+**Backup access.** `globals.sql` carries role password hashes and
+`database.sql` carries every team's content, so the backup set is the most
+sensitive artifact this system produces — more so than any single credential,
+because it is all of them plus the data. Store it where the `.env` is stored,
+not in the application's own object storage and never in a repository. Access
+to it is access to everything; treat a request for a copy the way you would
+treat a request for the database password.
+
+### Rollback
+
+Migrations are written expand-then-contract, so the previous image runs against
+the migrated schema — that is what makes `deploy_host.sh`'s build → migrate →
+activate ordering safe. To roll back, deploy the previous commit; do not try to
+un-apply a migration.
+
+The exception is a migration that **removes or narrows** something an older
+image relied on. Deploying the previous commit past one of those is not a
+rollback, it is an outage with a different shape. **There is no automatic
+downgrade** — the reversal is written by hand, deliberately, and a migration
+that needs one is listed here before it ships.
+
+`tests/test_restore_drill.py` enforces that: any migration that revokes a
+privilege from a `comrade_*` role, or drops a column or table, must appear in
+the register below. The check is narrow on purpose — `revoke all on function
+… from public, anon, authenticated` next to a `create function` is hardening at
+creation, not a hazard, and a guard that flagged those would be deleted within
+a week.
+
+#### Register of narrowing migrations
+
+| Migration | What it takes away | Rolling back past it |
+|---|---|---|
+| `20260908130000_queue_payload_privacy.sql` | `select (payload)` on `jobs` from `comrade_control` | **breaks job claiming.** The worker before that release selects `payload` in its claim. Restore the grant by hand first: `grant select (payload) on public.jobs to comrade_control;` |
+| `20260612120000_action_consent.sql` | narrows a worker-role grant | predates this register; consequence not traced |
+| `20260829093000_revoke_executor_messages.sql` | `messages` access from `comrade_executor` | predates this register; consequence not traced |
+| `20260829094000_agent_read_scope.sql` | narrows the agent's read scope | predates this register; consequence not traced |
+| `20260830090000_close_agent_runs_leak.sql` | narrows `agent_runs` access | predates this register; consequence not traced |
+| `20260904131000_permission_grants.sql` | narrows a worker-role grant | predates this register; consequence not traced |
+| `20260715100000_drop_vector_retrieval.sql` | drops the retrieval tables | the code that used them was deleted in the same change |
+| `20260829092000_remove_t3.sql` | drops the T3 consent tier | predates this register; consequence not traced |
+| `20260904100000_threads_contract.sql` | the contract half of the threads expand/contract | the expand half shipped a release earlier, which is what makes it safe |
+| `20260904132000_inline_consent_contract.sql` | the contract half of the inline-consent expand/contract | as above |
+
+Rows marked *"consequence not traced"* are historical: they are listed because
+an operator rolling back past them needs to know to look, and a consequence
+nobody has verified is not written down as if it had been. Anything added from
+here on gets a real entry — the test refuses the migration otherwise.
+
 ## Incident switches
 
 **Stopping a worker is the safest general-purpose switch.** Work queues rather

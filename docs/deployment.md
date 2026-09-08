@@ -34,6 +34,25 @@ Secrets are stored on the deployment host and are not committed to Git. They inc
 - GitHub App identifiers, private key, OAuth client settings, and webhook secret.
 - CORS origin, public host name, workspace root, and sandbox provider settings.
 
+### Prerequisites, and who owns them
+
+| | Needed before | Owned by | Notes |
+|---|---|---|---|
+| **Stable domain** | inviting anyone outside the pilot | whoever holds DNS | `nip.io` is fine to try the product and is not a durable identity; changing it later invalidates GitHub App callbacks and every saved link |
+| **DNS + TLS** | first external user | same | Caddy obtains and renews certificates automatically; the `caddy_data` volume holds them and losing it re-issues, which Let's Encrypt rate-limits |
+| **Preview subdomain** | enabling previews | same | `COMRADE_PREVIEW_DOMAIN` must be a **different site** from the app's own origin, or a preview's JavaScript can read the member's session |
+| **Custom SMTP** | relying on passwordless login | whoever holds the mail domain | Supabase's default sender is rate-limited hard enough to look like an outage |
+| **GitHub App** | connecting any repository | whoever administers the org | callback URLs are per-domain: setting a real domain means updating the App's callback and webhook URLs, and a stale webhook URL fails silently |
+| **Webhook secret** | any repository ingestion | deployment owner | empty refuses every delivery by design |
+| **Backups** | any real data | deployment owner | two artifacts, see above |
+| **Secret rotation** | routine | deployment owner | `/ready`'s `roles` check is what catches a half-finished one; see [operations.md](operations.md#roles) |
+
+**Rotating a database role** is: change the password in Postgres, update that
+role's `COMRADE_*_DB_URL`, restart the services that use it. Until both halves
+are done `/ready` reports `roles` as failing and names the role — that check
+exists because a rotation that stopped half way used to leave the deployment
+green while every turn in it failed.
+
 The browser build receives only browser-safe `VITE_*` values. Database role URLs, model credentials, GitHub private material, and sandbox credentials remain server-side.
 
 ## Initial deployment sequence
@@ -84,7 +103,13 @@ Useful production checks:
 
 - Use a real domain before broad rollout; the current `nip.io` address is suitable for a pilot, not a durable public identity.
 - Configure custom SMTP before depending on passwordless-login email at scale; default Supabase email has restrictive rate limits.
-- Maintain database backups and rehearse restoration, including recreation of worker login roles.
+- Take backups with `python -m scripts.backup <dir>` and rehearse restoring them.
+  A plain `pg_dump` is **not** a backup of this system: roles are cluster-level
+  and the dump references the five `comrade_*` roles in over a hundred grants and
+  policies while creating none of them. `tests/test_restore_drill.py` runs the
+  round trip and checks the boundary still holds afterwards. See
+  [operations.md](operations.md#backup-and-restore) for the full procedure,
+  recovery targets, and what no backup covers.
 - Monitor costs, queue depth, errors, and sandbox usage before inviting untrusted teams.
 - Treat dependency-environment setup as privileged: it executes a repository’s dependency graph with necessary package-registry network access, even though it receives no Comrade credentials.
 - Use GitHub branch protection on `master`; Comrade proposes pull requests and must not be relied on as the sole review gate.

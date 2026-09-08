@@ -188,6 +188,18 @@ class _Consolidation(BaseModel):
     decisions: list[Decision]
 
 
+class SourceWithdrawn(RuntimeError):
+    """The source stopped being publishable while it was being compiled.
+
+    🔴 (fix.md F21) Deletion and purpose were checked before the work started,
+    and `compile_document` then makes TWO model calls — extraction and
+    consolidation — before it applies anything. Minutes, during which a member
+    can delete the document or demote it from `team_knowledge` to
+    `turn_context`. Neither stopped the facts being published into the team
+    wiki, because nothing looked again.
+    """
+
+
 class StaleConsolidation(RuntimeError):
     """The wiki moved while this compile was deciding what to do with it.
 
@@ -756,6 +768,12 @@ def compile_document(team_id: str, document_id: str, marked_text: str) -> dict:
     ]
 
     with team_session(Role.PIPELINE, team_id) as conn:
+        # 🔴 The state that made this work publishable was last checked before
+        # two model calls. Checked again HERE, in the transaction that applies
+        # the facts, and with `for update` so a deletion or demotion racing
+        # this either lands first and is seen, or waits behind it. A check in a
+        # different transaction from the write it guards is not a guard.
+        _require_publishable(conn, document_id)
         return apply_compilation(conn, team_id, candidates, decisions, sources)
 
 
@@ -803,6 +821,30 @@ def _fail_document(team_id: str, document_id: str, reason: str) -> None:
             "update public.documents set status='failed', parse_error=%s"
             " where id=%s",
             (reason[:1000], document_id),
+        )
+
+
+def _require_publishable(conn, document_id: str) -> None:
+    """Refuse to publish from a source that has been withdrawn.
+
+    `for update` is the load-bearing part. Without the row lock this is a
+    check in one transaction guarding a write in another, which is the shape
+    the defect had: true when it was asked, false by the time it mattered.
+    """
+    row = conn.execute(
+        "select purpose from public.documents"
+        " where id=%s and deleted_at is null for update",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        raise SourceWithdrawn(
+            "this document was deleted while it was being compiled, so nothing"
+            " from it was added to the team's knowledge."
+        )
+    if row[0] != "team_knowledge":
+        raise SourceWithdrawn(
+            "this document was made private while it was being compiled, so"
+            " nothing from it was added to the team's knowledge."
         )
 
 
@@ -920,8 +962,11 @@ def handle_document_job(team_id: str, payload: dict) -> None:
         # document_read must re-spotlight when it hands this to the model, and
         # storing the marked form would corrupt the text for every other reader.
         conn.execute(
+            # 🔴 No deletion guard: a document deleted while it was being
+            # parsed came back as `ready` with its text stored, which is a
+            # deleted row restored to a live state by a background job.
             "update public.documents set status='ready', parsed_text=%s"
-            " where id=%s",
+            " where id=%s and deleted_at is null",
             (text, document_id),
         )
 

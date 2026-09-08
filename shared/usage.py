@@ -149,43 +149,67 @@ def finalize_usage(team_id: str, run_id: str, actual_tokens: int) -> None:
         )
 
 
-def run_allowance(team_id: str, run_id: str) -> int | None:
-    """The most tokens this run may spend IN TOTAL, or None when uncapped.
+def claimed_tokens(team_id: str, run_id: str) -> int | None:
+    """How much of the hour this run has taken so far. None when uncapped.
 
-    🔴 Admission reserved an estimate and then let the turn make up to
-    `agent_max_llm_calls` model calls with nothing between them checking what
-    they cost. A repository sweep carries the whole growing context into every
-    call, so one admitted turn could spend several million tokens against a
-    500,000-per-hour cap; `finalize_usage` reconciled the truth afterwards,
-    which is accounting rather than a brake.
-
-    The allowance is what the run RESERVED plus whatever the team still has
-    left for the hour. Deliberately not the estimate on its own: a turn that
-    costs more than 6,000 tokens is ordinary and must not be killed for it —
-    what it may not do is spend the hour out from under everybody else.
-
-    Read live, so a run near the ceiling sees budget that other turns gave
-    back when they finalized. Never below the reservation: a bucket can be
-    pushed past the cap by a finalization, and a run must not be refused the
-    tokens it already paid for at admission.
+    This is `tokens_reserved`, which now means "claimed", not "estimated at
+    admission" — the admission estimate is simply the first claim.
     """
     _, token_cap = _caps()
     if token_cap <= 0:
         return None
     with team_session(Role.AGENT, team_id) as conn:
-        reserved = conn.execute(
+        row = conn.execute(
             "select coalesce(tokens_reserved, 0) from public.agent_runs"
             " where id=%s and team_id=%s",
             (run_id, team_id),
         ).fetchone()
-        spent = conn.execute(
-            "select tokens from public.usage_buckets"
-            " where team_id=%s and bucket=date_trunc('hour', now())",
-            (team_id,),
+    return row[0] if row else 0
+
+
+def claim_budget(team_id: str, run_id: str, chunk: int | None = None) -> bool:
+    """Take another slice of the hour for this run, or refuse.
+
+    🔴 (fix.md F30) The in-run brake used to ASK how much room the team had
+    and let every active run treat the answer as its own. A run's real spend
+    only reaches the bucket when it finalizes, so with a 500,000 cap and two
+    turns holding 6,000 reservations, the bucket read 12,000 and each run was
+    told it could spend 494,000. Both could, and the team spent 980,000.
+
+    The brake was never wrong about ONE turn. It was wrong that a shared
+    budget can be divided by reading it. Headroom has to be CLAIMED, in the
+    same atomic conditional update admission already uses: the cap lives in the
+    WHERE clause, so two runs asking at once serialise on the row lock and only
+    one of them can take the last slice.
+
+    Both statements are one transaction. A claim that charged the team and
+    failed to record itself against the run would be budget spent by nobody.
+    """
+    _, token_cap = _caps()
+    if token_cap <= 0:
+        return True
+    chunk = settings.agent_tokens_estimate if chunk is None else chunk
+    with team_session(Role.AGENT, team_id) as conn:
+        row = conn.execute(
+            "update public.usage_buckets set tokens = tokens + %s"
+            " where team_id=%s and bucket=date_trunc('hour', now())"
+            # The cap, in the statement that spends against it.
+            "   and tokens + %s <= %s"
+            " returning tokens",
+            (chunk, team_id, chunk, token_cap),
         ).fetchone()
-    reserved = reserved[0] if reserved else 0
-    headroom = max(token_cap - (spent[0] if spent else 0), 0)
-    return reserved + headroom
+        if row is None:
+            # Either the hour has no room, or no bucket exists yet — which
+            # cannot happen for a run that was admitted, and refusing is the
+            # safe answer either way.
+            return False
+        conn.execute(
+            "update public.agent_runs"
+            "   set tokens_reserved = coalesce(tokens_reserved, 0) + %s"
+            " where id=%s and team_id=%s",
+            (chunk, run_id, team_id),
+        )
+    return True
 
 
 def record_reservation(team_id: str, run_id: str, reservation: int) -> None:

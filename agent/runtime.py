@@ -28,7 +28,7 @@ from pipeline.parsers import spotlight
 from shared.agent_runs import append_step, finish_run, pause_for_permission, start_run
 from shared.db import thread_lock
 from shared.observability import bind, log_context
-from shared.usage import finalize_usage, run_allowance
+from shared.usage import claim_budget, claimed_tokens, finalize_usage
 from shared.config import settings
 
 logger = logging.getLogger(__name__)
@@ -102,28 +102,41 @@ def _finish(
 
 
 def _over_budget(team_id: str, run_id: str | None, spent: int) -> int | None:
-    """The allowance this run has already passed, or None to keep going.
+    """What this run may spend in total, once it has spent more than that.
+
+    Returns None to keep going, or the amount the run is limited to when it
+    cannot claim any more.
 
     🔴 Admission reserved an ESTIMATE — 6,000 tokens, measured on a trivial
     turn — and then let the run make up to `agent_max_llm_calls` (20) model
     calls with nothing between them checking what they cost. A sweep that
     reads file after file carries the whole growing context into every call,
     so one admitted turn could spend several million tokens against a
-    500,000-per-hour cap. `finalize_usage` reconciled the truth when the turn
-    was over, which is accounting, not a brake.
+    500,000-per-hour cap.
 
-    Nothing is read until a turn passes its own estimate, so an ordinary turn
-    pays nothing for this. Past that the allowance is re-read each time rather
-    than cached: other turns finalize while this one runs and give budget
-    back, and refusing work on a stale number is the failure mode that turns a
-    brake into an outage.
+    🔴 And the first fix for that ASKED how much room the team had, which let
+    every concurrent run treat the same headroom as its own: two turns with
+    6,000 reservations were each told they could spend 494,000 of a 500,000
+    cap. A shared budget cannot be divided by reading it. This CLAIMS instead,
+    in chunks, through the same atomic conditional update admission uses — so
+    two runs asking at once serialise, and only one takes the last slice.
+
+    Nothing is read or claimed until a turn passes its own estimate, so an
+    ordinary turn pays nothing for this.
     """
     if run_id is None or spent <= settings.agent_tokens_estimate:
         return None
-    allowance = run_allowance(team_id, run_id)
-    if allowance is None or spent <= allowance:
-        return None
-    return allowance
+    claimed = claimed_tokens(team_id, run_id)
+    if claimed is None:
+        return None                      # the team is uncapped
+    # Claim in chunks until this run has covered what it has already spent.
+    # Bounded so a wildly expensive call cannot spin here: each refusal is the
+    # answer, and each grant moves `claimed` forward by a whole chunk.
+    while spent > claimed:
+        if not claim_budget(team_id, run_id):
+            return claimed
+        claimed += settings.agent_tokens_estimate
+    return None
 
 
 def _usage_from_event(event: Any) -> tuple[int, int]:

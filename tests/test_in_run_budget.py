@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import psycopg
 
 from shared.config import settings
-from shared.usage import run_allowance
+from shared.usage import claim_budget, claimed_tokens
 from tests._seed import A1, TEAM_A
 
 
@@ -60,35 +60,26 @@ def _run(reserved: int) -> str:
 
 # ---------------------------------------------------------------------------
 
-def test_a_run_may_spend_its_reservation_plus_what_the_team_has_left(seeded):
-    """The allowance is not the estimate. A turn that costs more than 6,000
-    tokens is normal and must not be killed for it — what it may not do is
-    spend the hour out from under everybody else."""
+def test_a_run_starts_with_what_admission_claimed_for_it(seeded):
+    """`tokens_reserved` is what this run has CLAIMED, and the admission
+    estimate is simply its first claim."""
     _bucket(settings.agent_tokens_estimate)
     run_id = _run(settings.agent_tokens_estimate)
 
-    allowance = run_allowance(TEAM_A, run_id)
-
-    headroom = settings.agent_tokens_per_hour - settings.agent_tokens_estimate
-    assert allowance == settings.agent_tokens_estimate + headroom
+    assert claimed_tokens(TEAM_A, run_id) == settings.agent_tokens_estimate
 
 
-def test_a_run_on_an_exhausted_hour_may_spend_only_its_reservation(seeded):
-    """Everything else in the hour is already committed to other work."""
+def test_a_run_on_an_exhausted_hour_cannot_claim_more(seeded):
+    """Everything else in the hour is already committed to other work.
+
+    🔴 This used to read the headroom and hand the SAME number to every
+    concurrent run, so two turns were each told they could spend nearly the
+    whole cap. Claiming is the fix: there is nothing left to take.
+    """
     _bucket(settings.agent_tokens_per_hour)
     run_id = _run(settings.agent_tokens_estimate)
 
-    assert run_allowance(TEAM_A, run_id) == settings.agent_tokens_estimate
-
-
-def test_an_overspent_bucket_never_makes_the_allowance_negative(seeded):
-    """Finalization can push a bucket past the cap — the estimate is a
-    reservation, and the truth arrives later. A run must still be allowed the
-    tokens it reserved rather than being refused its own first call."""
-    _bucket(settings.agent_tokens_per_hour * 3)
-    run_id = _run(settings.agent_tokens_estimate)
-
-    assert run_allowance(TEAM_A, run_id) == settings.agent_tokens_estimate
+    assert claim_budget(TEAM_A, run_id) is False
 
 
 def test_an_uncapped_team_has_no_ceiling(seeded, monkeypatch):
@@ -96,16 +87,18 @@ def test_an_uncapped_team_has_no_ceiling(seeded, monkeypatch):
     monkeypatch.setattr(settings, "agent_turns_per_hour", 0)
     run_id = _run(settings.agent_tokens_estimate)
 
-    assert run_allowance(TEAM_A, run_id) is None
+    assert claimed_tokens(TEAM_A, run_id) is None
+    assert claim_budget(TEAM_A, run_id) is True
 
 
-def test_a_run_that_reserved_nothing_still_gets_the_hourly_headroom(seeded):
+def test_a_run_that_claimed_nothing_can_still_claim(seeded):
     """`record_reservation` is written after the run exists and can be lost.
     That must overcharge, never refuse the run its first model call."""
     _bucket(0)
     run_id = _run(0)
 
-    assert run_allowance(TEAM_A, run_id) == settings.agent_tokens_per_hour
+    assert claimed_tokens(TEAM_A, run_id) == 0
+    assert claim_budget(TEAM_A, run_id) is True
 
 
 # ---------------------------------------------------------------------------

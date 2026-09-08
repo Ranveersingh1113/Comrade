@@ -23,10 +23,26 @@ from tests._seed import A1, TEAM_A, as_user
 
 
 def _drain(team_id: str, run_id: str, **kwargs) -> list[dict]:
-    async def go() -> list[str]:
-        return [line async for line in _run_frames(team_id, run_id, **kwargs)]
+    # The viewer is required now: `_run_frames` revalidates access before it
+    # emits anything, so a stream cannot outlive the permission that opened it
+    # (fix.md F04). These tests are about cursors, polling and framing, so the
+    # check is stubbed to a yes and the authorization itself is covered by
+    # tests/test_stream_revocation.py.
+    import server.app as app_module
 
-    return [json.loads(line) for line in asyncio.run(go()) if line.strip()]
+    original = app_module._may_watch
+    app_module._may_watch = lambda *_a, **_k: True
+
+    async def go() -> list[str]:
+        return [
+            line async for line in
+            _run_frames(team_id, run_id, viewer_id=A1, **kwargs)
+        ]
+
+    try:
+        return [json.loads(line) for line in asyncio.run(go()) if line.strip()]
+    finally:
+        app_module._may_watch = original
 
 
 def _run(status: str, steps: list[dict]) -> dict:

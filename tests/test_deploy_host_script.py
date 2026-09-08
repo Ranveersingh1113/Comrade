@@ -10,7 +10,9 @@ ROOT = Path(__file__).parents[1]
 SH = shutil.which("sh") or "C:/Program Files/Git/bin/sh.exe"
 
 
-@pytest.mark.parametrize("failure", ["", "build", "migration", "lock"])
+@pytest.mark.parametrize("failure",
+                         ["", "build", "migration", "lock",
+                          "proxyconfig", "proxydown"])
 def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
     """Run the real shell script; fake only external host operations."""
     fake_bin = tmp_path / "bin"
@@ -24,14 +26,26 @@ def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
             + ("echo 999\n" if command == "stat" else "")
             + ("[ \"$FAILURE\" != lock ] || exit 9\n" if command == "flock" else "")
             + ('''case "$*" in
+  *"config --services")
+    # The prod overlay has a caddy service, so the release's proxy checks
+    # must actually run here rather than being skipped.
+    printf 'api\\nfrontend\\ncaddy\\n'; exit 0 ;;
   *" build") [ "$FAILURE" != build ] || exit 7 ;;
   *" -T migrate") [ "$FAILURE" != migration ] || exit 8 ;;
+  *"validate --config"*) [ "$FAILURE" != proxyconfig ] || exit 6 ;;
+  *"exec -T caddy"*) [ "$FAILURE" != proxydown ] || exit 5 ;;
 esac
 ''' if command == "docker" else "")
             + "exit 0\n",
             encoding="utf-8", newline="\n",
         )
         executable.chmod(0o755)
+    # Not logged, and not real: the release retries readiness 24 times and the
+    # proxy 12 times, five seconds apart, so an unfaked `sleep` turns a failure
+    # case into a test timeout rather than a result.
+    nap = fake_bin / "sleep"
+    nap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
+    nap.chmod(0o755)
     log = tmp_path / "commands.log"
     result = subprocess.run(
         [SH, str(ROOT / "scripts/deploy_host.sh"), "abc123"],
@@ -43,6 +57,12 @@ esac
     calls = log.read_text().splitlines()
     if failure:
         assert result.returncode != 0, calls
+        if failure == "proxydown":
+            # 🔴 This is the case that used to report success. The proxy is
+            # down AFTER activation, which the previous check could not see
+            # because it spoke to the api container's own localhost.
+            assert any("exec -T caddy" in call for call in calls), calls
+            return
         assert not any(" up " in call for call in calls), calls
         if failure == "lock":
             assert not any(call.startswith("git ") for call in calls), calls
@@ -57,6 +77,12 @@ esac
     # container per release rather than in three weeks-long processes.
     assert "run --rm --no-deps -T migrate" in calls[migration]
     assert any("exec -T api" in call and "/ready" in call for call in calls)
+    # 🔴 Validated BEFORE activation, and checked through the public path
+    # AFTER it. Neither existed: an ordinary deployment could not parse its
+    # Caddyfile, and the release printed "deployed" over the resulting outage.
+    validate = next(i for i, call in enumerate(calls) if "validate --config" in call)
+    proxy = next(i for i, call in enumerate(calls) if "exec -T caddy" in call)
+    assert validate < up < proxy, calls
     assert "git checkout --detach --force abc123" in calls
 
 

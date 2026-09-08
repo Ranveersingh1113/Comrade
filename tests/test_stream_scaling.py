@@ -178,11 +178,16 @@ def test_the_stream_asks_only_for_what_it_has_not_sent(seeded, monkeypatch):
         }
 
     monkeypatch.setattr(app_module, "get_run", _fake_get_run)
+    # See fix.md F04: the stream revalidates before it emits.
+    # These tests use a fabricated run id and are about polling
+    # cost, so the check is stubbed; tests/test_stream_revocation.py
+    # covers the check itself.
+    monkeypatch.setattr(app_module, "_may_watch", lambda *_a, **_k: True)
     monkeypatch.setattr(app_module, "POLL_START_SECONDS", 0.0)
     monkeypatch.setattr(app_module, "POLL_MAX_SECONDS", 0.0)
 
     async def _go():
-        return [line async for line in app_module._run_frames(TEAM_A, "run-1")]
+        return [line async for line in app_module._run_frames(TEAM_A, "run-1", viewer_id=A1)]
 
     asyncio.run(_go())
 
@@ -212,11 +217,15 @@ def test_a_quiet_run_is_polled_less_often_than_a_busy_one(monkeypatch):
         "attempts": 1, "worker_id": "w", "lease_expires_at": None,
         "finished_at": None, "last_error": None, "steps": [],
     })
+    # See fix.md F04: the stream revalidates access before it emits anything.
+    # This run id and thread are fabricated, and these tests are about polling
+    # cost; tests/test_stream_revocation.py covers the check itself.
+    monkeypatch.setattr(app_module, "_may_watch", lambda *_a, **_k: True)
 
     async def _go():
         with_frames = []
         try:
-            async for line in app_module._run_frames(TEAM_A, "run-1"):
+            async for line in app_module._run_frames(TEAM_A, "run-1", viewer_id=A1):
                 with_frames.append(line)
         except RuntimeError:
             pass
@@ -246,11 +255,15 @@ def test_a_quiet_run_still_sends_a_heartbeat(monkeypatch):
         "attempts": 1, "worker_id": "w", "lease_expires_at": None,
         "finished_at": None, "last_error": None, "steps": [],
     })
+    # See fix.md F04: the stream revalidates access before it emits anything.
+    # This run id and thread are fabricated, and these tests are about polling
+    # cost; tests/test_stream_revocation.py covers the check itself.
+    monkeypatch.setattr(app_module, "_may_watch", lambda *_a, **_k: True)
 
     async def _go():
         lines = []
         try:
-            async for line in app_module._run_frames(TEAM_A, "run-1"):
+            async for line in app_module._run_frames(TEAM_A, "run-1", viewer_id=A1):
                 lines.append(line)
         except RuntimeError:
             pass

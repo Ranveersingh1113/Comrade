@@ -16,6 +16,13 @@ services:
       COMRADE_HOST: ${COMRADE_HOST}
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Optional site fragments, imported by a glob that may match nothing.
+      # 🔴 The preview site used to live in the Caddyfile unconditionally while
+      # previews are off by default, so an ordinary deployment rendered `*.` as
+      # a site address and Caddy refused the entire file — the public site went
+      # down and the release check, which spoke to the API container directly,
+      # reported success. See docker/caddy.conf.d/README.md.
+      - ./docker/caddy.conf.d:/etc/caddy/conf.d:ro
       - caddy_data:/data      # certificates. Losing this re-issues them, and
       - caddy_config:/config  # Let's Encrypt rate-limits that, so keep it.
     depends_on: [api, frontend]

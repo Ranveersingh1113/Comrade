@@ -1,0 +1,41 @@
+# Previews: one hostname per process, on a separate domain.
+#
+# NOT loaded by default. Copy it into docker/caddy.conf.d/ to enable previews,
+# and read that directory's README first — this needs a Caddy image with a DNS
+# provider module, which the stock one does not have.
+#
+# 🔴 This lived in Caddyfile unconditionally. Previews are off by default, so
+# the ordinary deployment rendered `*.` as a site address and `dns` with no
+# arguments, and the real image refused the entire file: "wrong argument count
+# or unexpected line ending after 'dns'". Caddy exited, the public site went
+# down, and the release check passed anyway because it talked to the API
+# container directly rather than through the proxy.
+#
+# COMRADE_PREVIEW_DOMAIN must be a DIFFERENT site from COMRADE_HOST, and that is
+# a security boundary rather than tidiness: a preview served on the app's origin
+# can read a member's Supabase session out of localStorage, and no amount of
+# header stripping changes that, because the boundary a browser enforces is the
+# origin.
+#
+# A wildcard certificate, NOT on-demand issuance. On-demand would ask Let's
+# Encrypt for a certificate for whatever hostname a caller invented, which is an
+# unauthenticated request amplifier pointed at a rate-limited service. A
+# wildcard is issued once, over DNS, and covers every process.
+*.{$COMRADE_PREVIEW_DOMAIN} {
+	tls {
+		dns {$COMRADE_DNS_PROVIDER} {$COMRADE_DNS_TOKEN}
+	}
+
+	# EVERYTHING on this domain goes to the API's preview handler, including
+	# /__comrade/launch. The API decides from the Host header which process
+	# this is and whether the caller may reach it; Caddy routes and does not
+	# authorize.
+	reverse_proxy api:8000 {
+		flush_interval -1
+		header_up X-Comrade-Preview-Host {host}
+		transport http {
+			read_timeout 600s
+			write_timeout 600s
+		}
+	}
+}

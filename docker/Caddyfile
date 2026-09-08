@@ -38,33 +38,22 @@
 }
 
 # ---------------------------------------------------------------------------
-# Previews: one hostname per process, on a separate domain.
+# Optional sites.
 # ---------------------------------------------------------------------------
 #
-# A wildcard certificate, NOT on-demand issuance. On-demand would ask Let's
-# Encrypt for a certificate for whatever hostname a caller invented, which is
-# an unauthenticated request amplifier pointed at a rate-limited service. A
-# wildcard is issued once, over DNS, and covers every process.
+# 🔴 The preview site used to sit here unconditionally, and previews are OFF by
+# default. With COMRADE_PREVIEW_DOMAIN unset the site address rendered as `*.`
+# and the tls block as `dns` with no arguments, and the real caddy:2-alpine
+# image refused the whole file:
 #
-# That means a DNS provider module and a credential — see docs/deployment.md.
-# Without both, leave COMRADE_PREVIEW_DOMAIN unset: previews then fail closed
-# with a message saying so, which is correct, rather than falling back to the
-# unsafe same-origin arrangement.
-*.{$COMRADE_PREVIEW_DOMAIN} {
-	tls {
-		dns {$COMRADE_DNS_PROVIDER} {$COMRADE_DNS_TOKEN}
-	}
-
-	# EVERYTHING on this domain goes to the API's preview handler, including
-	# /__comrade/launch. The API decides from the Host header which process
-	# this is and whether the caller may reach it; Caddy routes and does not
-	# authorize.
-	reverse_proxy api:8000 {
-		flush_interval -1
-		header_up X-Comrade-Preview-Host {host}
-		transport http {
-			read_timeout 600s
-			write_timeout 600s
-		}
-	}
-}
+#   Error: adapting config using caddyfile: parsing caddyfile tokens for 'tls':
+#   wrong argument count or unexpected line ending after 'dns'
+#
+# Caddy then exits and the public site is down — on an ordinary deployment that
+# had simply not turned previews on. Nothing caught it, because the release
+# readiness check talked to the API container directly and never through the
+# proxy.
+#
+# A glob that matches nothing is not an error, so an empty conf.d is the
+# supported default. See docker/caddy.conf.d/README.md to enable previews.
+import /etc/caddy/conf.d/*.caddy

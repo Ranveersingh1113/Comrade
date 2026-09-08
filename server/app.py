@@ -519,7 +519,8 @@ POLL_GROWTH = 1.5
 HEARTBEAT_SECONDS = 15.0
 
 
-async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
+async def _run_frames(team_id: str, run_id: str, *, viewer_id: str,
+                     after_seq: int = -1):
     """Replay durable steps from a cursor until the run stops producing them.
 
     `after_seq` is the highest sequence the browser has already rendered.
@@ -528,6 +529,14 @@ async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
     member is already looking at. It is also what is asked of the DATABASE:
     the read starts after the cursor rather than fetching the whole run and
     filtering afterwards.
+
+    🔴 `viewer_id` was not here at all. Membership and thread visibility were
+    checked once, when the connection opened, and every read after that was
+    privileged and unattributed — the generator asked the database for the run
+    by id and streamed whatever came back. A member removed from the team, or
+    removed from a restricted thread's participants, kept receiving new private
+    steps for as long as they left the tab open, which on a long turn is the
+    whole turn. Revocation has to reach a stream that is already running.
     """
     seen = after_seq + 1
     status: str | None = None
@@ -537,6 +546,24 @@ async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
         run = await run_in_threadpool(get_run, team_id, run_id, seen - 1)
         if run is None:
             yield json.dumps({"type": "error", "detail": "run not found"}) + "\n"
+            return
+        # Guarding DISCLOSURE rather than every poll. Fetching is a privileged
+        # read the viewer never sees; what needs authorizing is the yield. Most
+        # polls of a live run produce nothing — that is what the backoff is for
+        # — so checking only when there is something to send costs nothing on
+        # the idle path and still leaves no window: no batch is emitted after
+        # access ends, not even the one already in hand.
+        has_news = (
+            status is None
+            or run["status"] != status
+            or any(step["seq"] >= seen for step in run["steps"])
+        )
+        if has_news and not await run_in_threadpool(
+            _may_watch, team_id, viewer_id, run_id
+        ):
+            yield json.dumps({
+                "type": "error", "detail": "access to this run has ended",
+            }) + "\n"
             return
         sent = False
         if status is None:
@@ -579,6 +606,24 @@ async def _run_frames(team_id: str, run_id: str, *, after_seq: int = -1):
         await asyncio.sleep(wait)
 
 
+def _may_watch(team_id: str, user_id: str, run_id: str) -> bool:
+    """Whether this viewer may still see this run, right now.
+
+    The boolean form of `_visible_run`, for the streaming path: a generator
+    mid-flight wants to close cleanly rather than raise an HTTPException into
+    a response whose headers were sent long ago.
+    """
+    try:
+        _visible_run(team_id, user_id, run_id)
+    except HTTPException:
+        return False
+    try:
+        require_membership(user_id, team_id)
+    except HTTPException:
+        return False
+    return True
+
+
 def _visible_run(team_id: str, user_id: str, run_id: str) -> None:
     run = get_run(team_id, run_id)
     if run is None:
@@ -594,7 +639,10 @@ async def agent_turn_stream(req: TurnRequest, user_id: CurrentUserId):
     # streaming endpoints, which are the ones a room holds open.
     await run_in_threadpool(require_membership, user_id, req.team_id)
     turn = await run_in_threadpool(_admit_turn, req, user_id)
-    return StreamingResponse(_run_frames(req.team_id, str(turn)), media_type="application/x-ndjson")
+    return StreamingResponse(
+        _run_frames(req.team_id, str(turn), viewer_id=user_id),
+        media_type="application/x-ndjson",
+    )
 
 
 @app.get("/agent/runs/{run_id}/stream")
@@ -610,7 +658,7 @@ async def agent_run_stream(
     await run_in_threadpool(require_membership, user_id, team_id)
     await run_in_threadpool(_visible_run, team_id, user_id, run_id)
     return StreamingResponse(
-        _run_frames(team_id, run_id, after_seq=after_seq),
+        _run_frames(team_id, run_id, viewer_id=user_id, after_seq=after_seq),
         media_type="application/x-ndjson",
     )
 
@@ -1446,6 +1494,21 @@ async def preview_origin(request: Request, call_next):
 PREVIEW_WS_SECONDS = 60 * 30
 
 #: How often an open socket re-asks whether its holder still may be here.
+#: The most memory ONE upstream message may make the API allocate.
+#:
+#: 🔴 This connection was opened with `max_size=None`, which turns the limit
+#: off entirely. The far side of a preview socket is a development server
+#: written by a model and running a team's own unreviewed code, and the reader
+#: assembles a complete message before handing it over — so one frame declared
+#: large enough exhausts the internet-facing process, whatever the HTTP body
+#: limits elsewhere say.
+#:
+#: 4 MB: a Vite hot-reload update for a large module graph is tens of
+#: kilobytes, so this is generous for the traffic it carries and small enough
+#: that several concurrent previews cannot take the process down. The reverse
+#: direction is bounded by uvicorn's own `--ws-max-size` (16 MB by default),
+#: and that side is the member's browser rather than the team's code.
+PREVIEW_WS_MAX_BYTES = 4 * 1024 * 1024
 PREVIEW_WS_RECHECK_SECONDS = 60
 
 
@@ -1483,7 +1546,8 @@ async def preview_websocket(websocket: WebSocket, path: str) -> None:
 
     try:
         async with websockets.connect(
-            target, open_timeout=10, close_timeout=5, max_size=None,
+            target, open_timeout=10, close_timeout=5,
+            max_size=PREVIEW_WS_MAX_BYTES,
         ) as upstream:
             await _pump_websocket(websocket, upstream, host, grant)
     except (OSError, websockets.exceptions.WebSocketException) as exc:

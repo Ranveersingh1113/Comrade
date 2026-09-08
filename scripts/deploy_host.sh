@@ -63,6 +63,29 @@ fi
 $COMPOSE build
 
 # ---------------------------------------------------------------------------
+# 4b. Validate the proxy configuration, using the image that will run it.
+# ---------------------------------------------------------------------------
+#
+# 🔴 Nothing checked this, and the ordinary deployment could not parse it. The
+# preview site lived in the Caddyfile unconditionally while previews are OFF by
+# default, so `COMRADE_PREVIEW_DOMAIN` unset rendered `*.` as a site address
+# and `dns` with no arguments:
+#
+#   Error: adapting config using caddyfile: parsing caddyfile tokens for 'tls':
+#   wrong argument count or unexpected line ending after 'dns'
+#
+# Caddy exits, the public site is down, and step 7 below still passed — it
+# talked to the API container directly and never through the proxy. A release
+# reported success with the product unreachable.
+#
+# Validation happens HERE, before activation, so an incomplete or unsupported
+# proxy configuration fails while the healthy stack is still serving.
+if $COMPOSE config --services | grep -qx caddy; then
+  $COMPOSE run --rm --no-deps --entrypoint caddy caddy \
+    validate --config /etc/caddy/Caddyfile --adapter caddyfile
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Migrate, one-off.
 # ---------------------------------------------------------------------------
 # `run --rm --no-deps`: a one-shot container on the NEW image that does not
@@ -89,11 +112,38 @@ $COMPOSE up -d
 for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
   if $COMPOSE exec -T api python -c \
     "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=10)"; then
-    echo "deployed $COMMIT"
-    exit 0
+    ready=yes
+    break
   fi
   sleep 5
 done
 
-echo "Comrade did not become ready; the previous images are still tagged for rollback" >&2
-exit 1
+if [ "${ready:-}" != yes ]; then
+  echo "Comrade did not become ready; the previous images are still tagged for rollback" >&2
+  exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 8. And through the PUBLIC path, which is the one members use.
+# ---------------------------------------------------------------------------
+#
+# 🔴 The check above runs inside the api container against localhost, so it
+# says nothing about the proxy in front of it. A Caddy that refused its
+# configuration and exited left the site unreachable while this script printed
+# "deployed". Skipped when there is no caddy service — the base compose file
+# publishes the API directly and there is no second hop to check.
+if $COMPOSE config --services | grep -qx caddy; then
+  for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    if $COMPOSE exec -T caddy wget -q -O /dev/null --no-check-certificate \
+      "https://localhost/api/health" 2>/dev/null; then
+      echo "deployed $COMMIT"
+      exit 0
+    fi
+    sleep 5
+  done
+  echo "the API is ready but the public proxy is not serving it" >&2
+  exit 1
+fi
+
+echo "deployed $COMMIT"
+exit 0

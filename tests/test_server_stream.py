@@ -10,7 +10,7 @@ from shared.config import settings
 from tests._seed import A1, B1, TEAM_A, as_user
 
 
-async def _fake_frames(team_id, run_id):
+async def _fake_frames(team_id, run_id, **_kwargs):
     for frame in (
         {"type": "run", "run_id": run_id},
         {"seq": 0, "type": "tool_call", "tool": "team_get_state", "args": {}},

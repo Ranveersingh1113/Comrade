@@ -16,6 +16,7 @@ compile_document() orchestrates extract -> consolidate -> apply, and
 handle_document_job() is the worker handler (parse -> spotlight -> compile).
 """
 import base64
+import hashlib
 import logging
 import re
 
@@ -770,6 +771,22 @@ def _parse_by_kind(kind: str, content: str) -> str:
     return content  # text / link
 
 
+def _record_source_digest(team_id: str, document_id: str, digest: str, *,
+                          verified: bool) -> None:
+    """Note which bytes were actually compiled, and whether that was checked.
+
+    `verified` is the honest half. A job enqueued before the digest existed has
+    no expectation to compare against, and a row that recorded the observed
+    hash without saying so would imply a check that never happened.
+    """
+    with team_session(Role.PIPELINE, team_id) as conn:
+        conn.execute(
+            "update public.documents set content_sha256=%s,"
+            " content_verified=%s where id=%s",
+            (digest, verified, document_id),
+        )
+
+
 def _fail_document(team_id: str, document_id: str, reason: str) -> None:
     """Record why, where the member can see it.
 
@@ -847,6 +864,29 @@ def handle_document_job(team_id: str, payload: dict) -> None:
         except DocumentTooLarge as exc:
             _fail_document(team_id, document_id, str(exc))
             raise PermanentJobError(str(exc)) from exc
+
+        # 🔴 `content_sha256` was recorded at enqueue and never compared with
+        # anything. T21 moved the bytes out of the job payload and put a
+        # reference in their place, which is right — but a reference is only as
+        # good as the check that it still points at what was meant. Replacing
+        # the object at the same path between enqueue and fetch silently
+        # compiled different input into the wiki, under the citation of the
+        # file somebody had actually reviewed.
+        observed = hashlib.sha256(raw).hexdigest()
+        expected = payload.get("content_sha256")
+        if expected and expected != observed:
+            reason = (
+                "the stored file changed after this document was queued, so"
+                " this job is about bytes that no longer exist. Upload it"
+                " again to compile the current version."
+            )
+            _fail_document(team_id, document_id, reason)
+            raise PermanentJobError(reason)
+        # Recorded whether or not it was checked, and the two are distinguished
+        # on the row: a job enqueued before this existed carries no expectation,
+        # and saying so is not the same as saying it was verified.
+        _record_source_digest(team_id, document_id, observed,
+                              verified=bool(expected))
         encoded = (
             base64.b64encode(raw).decode("ascii")
             if (kind or "text") in ("pdf", "docx")

@@ -22,6 +22,8 @@ from psycopg.types.json import Json
 
 logger = logging.getLogger(__name__)
 
+from shared.errors import safe_error
+
 from shared.db import Role, team_session, user_session
 
 
@@ -619,16 +621,32 @@ def _exec_repo_open_pr(conn, team_id, requester_id, args) -> dict:
         " where team_id=%s and action_hash=%s order by created_at desc limit 1",
         (team_id, action_hash),
     ).fetchone()
-    try:
-        record_pull_request(
-            team_id, args["repo_full_name"], int(result["number"]),
-            branch_for(action_hash),
-            thread_id=str(thread_id[0]) if thread_id and thread_id[0] else None,
-            action_hash=action_hash,
-            head_sha=result.get("head_sha"),
+    number = result.get("number")
+    if number is None:
+        # 🔴 This used to be `int(result["number"])` against an adapter that
+        # returned no number at all, so every call raised KeyError into the
+        # `except` below and NOTHING was ever correlated. Named rather than
+        # swallowed: a missing number means the adapter changed shape, and a
+        # silent log is how that goes unnoticed for a release.
+        logger.error(
+            "the pull request adapter returned no number, so this work cannot"
+            " be correlated with its thread: keys=%s", sorted(result)
         )
-    except Exception:  # noqa: BLE001 - the pull request is open either way
-        logger.exception("could not record the pull request for %s", team_id)
+    else:
+        try:
+            record_pull_request(
+                team_id, args["repo_full_name"], int(number),
+                branch_for(action_hash),
+                thread_id=str(thread_id[0]) if thread_id and thread_id[0] else None,
+                action_hash=action_hash,
+                head_sha=result.get("head_sha"),
+            )
+        except Exception as exc:  # noqa: BLE001 - the PR is open either way
+            # Recoverable without opening a second pull request: opening one is
+            # idempotent, so a later attempt returns the same PR through the
+            # already-exists path and writes the mapping then.
+            logger.error("could not record the pull request for %s: %s",
+                         team_id, safe_error(exc))
     return result
 
 

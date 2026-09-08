@@ -262,6 +262,34 @@ def enqueue_chat_compile(
     return str(row[0])
 
 
+#: What capture will actually look at, as SQL.
+#:
+#: 🔴 `/metrics` had its own idea of this and compared EVERY message to the
+#: compilation cursor — private threads, the agent's own messages, deleted
+#: ones. A team whose conversation is entirely private reported a steadily
+#: growing compiler backlog that no amount of working pipeline could clear,
+#: because there was nothing to capture. Two definitions of the same word is
+#: how a metric ends up measuring something nobody asked about.
+#:
+#: Expects `m` (messages) and `th` (threads) in scope.
+CAPTURABLE_SQL = (
+    " th.visibility='team'"
+    " and m.sender_kind='user'"
+    " and m.deleted_scope is null"
+)
+
+#: How far capture has actually got for a team. `status='done'` matters: a
+#: compilation that is still running, or that failed, has captured nothing, and
+#: treating its `chat_through` as progress hides a real backlog.
+#:
+#: Expects a `%(team)s`-style team expression substituted in.
+CAPTURED_THROUGH_SQL = (
+    " coalesce((select max(c.chat_through) from public.memory_compilations c"
+    "            where c.team_id = {team} and c.chat_through is not null"
+    "              and c.status='done'), '-infinity'::timestamptz)"
+)
+
+
 def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
     """Enqueue a chat compile for every team with enough unswept group chatter.
 
@@ -295,13 +323,8 @@ def sweep_chat_compiles(min_messages: int = MIN_CHAT_MESSAGES) -> list[str]:
             "   select count(*) as n, min(m.created_at) as oldest"
             "     from public.messages m"
             "   join public.threads th on th.id=m.thread_id and th.team_id=m.team_id"
-            "    where m.team_id = t.id and th.visibility='team'"
-            "      and m.sender_kind='user' and m.deleted_scope is null"
-            "      and m.created_at > coalesce(("
-            "            select max(c.chat_through)"
-            "              from public.memory_compilations c"
-            "             where c.team_id = t.id and c.chat_through is not null"
-            "               and c.status='done'), '-infinity'::timestamptz)"
+            "    where m.team_id = t.id and" + CAPTURABLE_SQL +
+            "      and m.created_at >" + CAPTURED_THROUGH_SQL.format(team="t.id") +
             # The prefilter has to agree with the authoritative check in
             # enqueue_chat_compile, or the sweep never calls it and the age
             # rule is unreachable.

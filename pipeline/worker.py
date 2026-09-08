@@ -21,6 +21,7 @@ from typing import Callable
 
 from shared.db import Role, connect, team_session
 from shared.errors import redact, safe_error
+from shared.heartbeat import Beater
 
 from shared import observability
 
@@ -429,8 +430,14 @@ def main() -> None:
     import pipeline.repo_sync  # noqa: F401
 
     _drain_on_signal()
+    # 🔴 Readiness used to infer this worker's existence from queue AGE, so on
+    # a quiet deployment a stopped worker looked exactly like a healthy idle
+    # one. It says so itself now, on its own clock (fix.md F33).
+    beater = Beater("pipeline")
+    beater.maybe()
     logger.info("worker up: polling every %.0fs", POLL_SECONDS)
     while not _stopping.is_set():
+        beater.maybe()
         if tick() == 0:
             _stopping.wait(POLL_SECONDS)
     logger.info("worker drained")

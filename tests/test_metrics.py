@@ -283,3 +283,120 @@ def test_the_token_is_compared_in_constant_time(seeded, client):
     assert "compare_digest" in source, (
         "the token is compared with ==, which leaks its prefix to a timer"
     )
+
+
+# ---------------------------------------------------------------------------
+# Lag has to mean the same thing capture means
+# ---------------------------------------------------------------------------
+
+def _clear_compilations():
+    conn = _admin()
+    try:
+        conn.execute("delete from public.memory_compilations")
+    finally:
+        conn.close()
+
+
+def _say(thread_id, *, sender_kind="user", deleted=None, days=2, sender=A1):
+    conn = _admin()
+    try:
+        conn.execute(
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body, deleted_scope, created_at) values"
+            " (%s,%s,%s,%s,'something', %s, now() - make_interval(days => %s))",
+            (TEAM_A, thread_id, sender_kind,
+             sender if sender_kind == "user" else None, deleted, days),
+        )
+    finally:
+        conn.close()
+
+
+def _thread(visibility="team", title="General"):
+    conn = _admin()
+    try:
+        if visibility == "team":
+            return conn.execute(
+                "select id from public.threads where team_id=%s and title=%s",
+                (TEAM_A, title),
+            ).fetchone()[0]
+        thread_id = conn.execute(
+            "insert into public.threads (team_id, title, visibility, kind,"
+            " created_by) values (%s,%s,%s,'discussion',%s) returning id",
+            (TEAM_A, title, visibility, A1),
+        ).fetchone()[0]
+        conn.execute(
+            "insert into public.thread_participants (thread_id, team_id,"
+            " user_id, added_by) values (%s,%s,%s,%s)",
+            (thread_id, TEAM_A, A1, A1),
+        )
+        return thread_id
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("kind", ["private", "ai", "deleted"])
+def test_activity_capture_ignores_does_not_move_the_lag(seeded, client, kind):
+    """🔴 The metric compared EVERY message to the compilation cursor, while
+    capture only ever looks at undeleted user messages in team-visible
+    threads. A team whose conversation is entirely private, or entirely the
+    agent talking, reported a steadily growing compiler backlog that no amount
+    of working pipeline could ever clear.
+
+    Measured as a DELTA rather than an absolute zero: the seed leaves real
+    capturable messages behind, so "the number is zero" would be a claim about
+    the fixture. What matters is that adding something capture ignores does
+    not move it — and the message added here is far older than anything the
+    seed has, so it would dominate the maximum if it counted at all.
+    """
+    _clear_compilations()
+    before = _metrics(client)["pipeline"]["compiler_lag_seconds"]
+
+    if kind == "private":
+        _say(_thread("restricted", "Security review"), days=90)
+    elif kind == "ai":
+        _say(_thread(), sender_kind="ai", days=90)
+    else:
+        _say(_thread(), deleted="everyone", days=90)
+
+    after = _metrics(client)["pipeline"]["compiler_lag_seconds"]
+    # A BOUNDED delta, not equality and not an absolute. The reported lag is
+    # an age, so both readings creep forward by the seconds between the two
+    # requests; and the seed leaves genuinely capturable messages of its own,
+    # so the absolute number is a fact about the fixture. What must not happen
+    # is the 90-day-old ignored message becoming the maximum.
+    assert after - before < 60, (
+        f"a message capture ignores became the reported backlog: {before}s ->"
+        f" {after}s"
+    )
+
+
+def test_a_real_uncaptured_message_still_reports_its_age(seeded, client):
+    """The other half. A guard that ignored everything would pass every case
+    above and report a healthy pipeline through any outage."""
+    _clear_compilations()
+    before = _metrics(client)["pipeline"]["compiler_lag_seconds"]
+
+    _say(_thread(), days=90)
+
+    after = _metrics(client)["pipeline"]["compiler_lag_seconds"]
+    assert after > before, "a genuinely uncaptured message did not register"
+    assert after > 89 * 24 * 3600, after
+
+
+def test_only_a_finished_compilation_moves_the_cursor(seeded, client):
+    """A compilation that is still running, or failed, has not captured
+    anything — treating its `chat_through` as progress hides a real backlog."""
+    _clear_compilations()
+    _say(_thread(), days=3)
+    conn = _admin()
+    try:
+        conn.execute(
+            "insert into public.memory_compilations (team_id, status, trigger,"
+            " chat_through) values (%s,'running','scheduled', now())", (TEAM_A,),
+        )
+    finally:
+        conn.close()
+
+    assert _metrics(client)["pipeline"]["compiler_lag_seconds"] > 2 * 24 * 3600, (
+        "a compilation that has not finished was treated as progress"
+    )

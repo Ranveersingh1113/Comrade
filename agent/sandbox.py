@@ -410,6 +410,46 @@ def _docker_run_argv(
     ]
 
 
+def probe_capabilities() -> dict:
+    """What this worker can actually execute with, right now.
+
+    🔴 `/ready` could not answer this and could not learn it: the API holds no
+    Docker socket on purpose — granting one to the internet-facing process
+    would turn a request-handling bug into a host compromise — so "is the
+    sandbox usable" was simply unchecked. Dead Docker meant every repository
+    tool failed behind a green deployment.
+
+    The process that HOLDS the socket reports instead, and readiness reads the
+    report. Honest about what it does not support: a backend other than docker
+    is reported as unavailable rather than assumed fine, because nothing here
+    has been proven against one.
+    """
+    backend = settings.comrade_sandbox_backend
+    capability = {"sandbox_backend": backend}
+    if backend != "docker":
+        capability["sandbox"] = "unsupported"
+        return capability
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell string
+            ["docker", "version", "--format", "{{.Server.Version}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except FileNotFoundError:
+        capability["sandbox"] = "docker is not installed"
+        return capability
+    except subprocess.TimeoutExpired:
+        capability["sandbox"] = "the docker daemon did not answer"
+        return capability
+    if proc.returncode != 0:
+        # NOT the stderr: a daemon error can quote paths and hostnames, and
+        # this string is read by an unauthenticated readiness endpoint.
+        capability["sandbox"] = "the docker daemon refused"
+        return capability
+    capability["sandbox"] = "ok"
+    capability["docker_version"] = proc.stdout.strip()[:32]
+    return capability
+
+
 def run_contained(
     argv: list[str],
     *,

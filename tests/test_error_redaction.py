@@ -28,6 +28,22 @@ def _admin():
     return conn
 
 
+def real_error(sql: str, params=None) -> psycopg.Error:
+    """Make Postgres raise, and hand back what it raised.
+
+    Constructed exceptions have no `diag`, and `diag` is where the safe half of
+    a database error lives. A test built on a hand-made exception cannot tell
+    whether the structural path works.
+    """
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        try:
+            conn.execute(sql, params)
+        except psycopg.Error as exc:
+            conn.rollback()
+            return exc
+    raise AssertionError("the statement was supposed to fail: " + sql)
+
+
 #: A real one, produced by Postgres rather than invented. The parenthesised
 #: tail is the entire row.
 _PG_DETAIL = (
@@ -54,12 +70,44 @@ def test_a_failing_row_is_not_part_of_the_error():
     assert "Failing row contains" not in message
 
 
-def test_what_actually_broke_still_survives():
+def test_what_actually_broke_still_survives(seeded):
     """A redaction that removes the diagnosis is a worse bug than the leak.
-    The constraint name is the thing an operator acts on."""
-    message = safe_error(psycopg.errors.CheckViolation(_PG_DETAIL))
+    The constraint name is the thing an operator acts on, and Postgres reports
+    it separately from the message — which is what makes it safe to keep."""
+    exc = real_error(
+        "insert into public.agent_runs (team_id, thread_id, requester_id,"
+        " status, trigger_type) values (gen_random_uuid(), gen_random_uuid(),"
+        " gen_random_uuid(), 'running', 'the staging password is hunter2')"
+    )
+
+    message = safe_error(exc)
 
     assert "agent_runs_trigger_type_check" in message
+    assert "hunter2" not in message
+
+
+def test_a_value_in_the_primary_message_does_not_survive_either(seeded):
+    """🔴 Stripping DETAIL and CONTEXT was not enough. PostgreSQL puts values
+    in the PRIMARY message too — `invalid input syntax for type uuid: "…"` —
+    so a malformed identifier from a model, a document or a member landed
+    intact in `jobs.last_error`, which the cross-team control role reads."""
+    exc = real_error("select 1 from public.teams where id = %s",
+                     ("PRIVATE_DOCUMENT_SENTINEL",))
+
+    message = safe_error(exc)
+
+    assert "PRIVATE_DOCUMENT_SENTINEL" not in message
+    assert "22P02" in message, "the failure kind has to survive: " + message
+
+
+def test_a_database_error_reports_no_message_text_at_all(seeded):
+    """The rule, stated as a test: for database errors the output is built
+    from the class, the SQLSTATE and Postgres' identifier fields. Nothing
+    textual is carried across, because no pattern can be trusted to recognise
+    a filename or a sentence."""
+    exc = real_error("select 1 from public.teams where id = %s", ("not-a-uuid",))
+
+    assert "invalid input syntax" not in safe_error(exc)
 
 
 def test_a_connection_string_loses_its_password():
@@ -147,7 +195,12 @@ def test_a_failing_job_does_not_record_the_row_it_failed_on(seeded):
         ).fetchone()[0]
 
     def _explode(team_id, payload):
-        raise psycopg.errors.CheckViolation(_PG_DETAIL)
+        raise real_error(
+            "insert into public.agent_runs (team_id, thread_id, requester_id,"
+            " status, trigger_type) values (gen_random_uuid(),"
+            " gen_random_uuid(), gen_random_uuid(), 'running',"
+            " 'the staging password is hunter2')"
+        )
 
     while worker.run_once(handlers={"ingest_github": _explode},
                           worker_id="redaction-test"):
@@ -221,8 +274,6 @@ def test_our_own_exceptions_keep_the_sentence_somebody_wrote():
 
 
 def test_a_library_exception_still_keeps_its_class():
-    """The distinction: nobody wrote `CheckViolation`'s message for a person,
-    and its type is most of the diagnosis."""
-    message = safe_error(psycopg.errors.CheckViolation("constraint blew up"))
-
-    assert message.startswith("CheckViolation:")
+    """The distinction: nobody wrote a library exception's message for a
+    person, and its type is most of the diagnosis."""
+    assert safe_error(TimeoutError("took too long")).startswith("TimeoutError:")

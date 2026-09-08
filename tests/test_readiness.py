@@ -57,13 +57,38 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _workers_are_alive():
+    """A deployment with no worker is not ready, which is the point of F33 —
+    so every test about something ELSE has to say that both are here.
+
+    The tests that are about worker presence clear this themselves.
+    """
+    conn = psycopg.connect(settings.comrade_db_url_admin)
+    conn.autocommit = True
+    try:
+        for kind in ("agent", "pipeline"):
+            conn.execute(
+                "insert into public.worker_heartbeats (worker_kind, worker_id,"
+                " capabilities) values (%s,%s,'{\"sandbox\": \"ok\"}'::jsonb)"
+                " on conflict (worker_kind, worker_id) do update"
+                "   set last_seen_at = now(),"
+                "       capabilities = excluded.capabilities",
+                (kind, f"fixture-{kind}"),
+            )
+        yield
+        conn.execute("delete from public.worker_heartbeats")
+    finally:
+        conn.close()
+
+
 def test_ready_reports_each_check_by_name(seeded, client):
     """One boolean would tell an operator that something is wrong and nothing
     about which thing — at 3am that is the whole difference."""
     body = client.get("/ready").json()
     assert body["status"] == "ready", body
     for name in ("database", "migrations", "roles", "agent_queue",
-                 "pipeline_queue", "expired_leases"):
+                 "pipeline_queue", "expired_leases", "workers", "sandbox"):
         assert body["checks"][name] == "ok", (name, body["checks"][name])
 
 
@@ -130,7 +155,7 @@ def test_readiness_needs_no_authentication(seeded, client):
     # end of this file pin.
     assert set(body["checks"]) <= {
         "database", "migrations", "roles", "agent_queue", "pipeline_queue",
-        "expired_leases",
+        "expired_leases", "workers", "sandbox",
     }
 
 
@@ -152,9 +177,21 @@ def test_both_workers_stop_after_the_item_in_hand():
 
 
 def test_a_drained_agent_worker_claims_nothing_more(monkeypatch):
-    """The loop must check the flag, not merely own one."""
-    import agent.worker as worker
+    """The loop must check the flag, not merely own one.
 
+    ONE slot, pinned. The worker runs `comrade_agent_concurrency` slots and
+    each is an independent loop, so with the default of two this asserted
+    something about thread scheduling rather than about draining: both threads
+    can pass their `_stopping` check before either has set it, and each then
+    legitimately claims once. That is correct behaviour for two slots and it
+    made the count a coin flip — it started failing the moment an unrelated
+    change added a database round trip to the top of the loop and widened the
+    window.
+    """
+    import agent.worker as worker
+    from shared.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "comrade_agent_concurrency", 1)
     claims = []
 
     def _claim(worker_id):
@@ -396,3 +433,123 @@ def test_the_runbook_quotes_the_real_recovery_windows():
         )
     assert f"| {worker.LEASE_INTERVAL} |" in runbook
     assert f"| {run_queue.LEASE_INTERVAL} |" in runbook
+
+
+# ---------------------------------------------------------------------------
+# Is anybody here
+# ---------------------------------------------------------------------------
+
+def _beat(kind: str, *, age_seconds: int = 0, capabilities: str = '{"sandbox": "ok"}'):
+    conn = _admin_conn()
+    try:
+        conn.execute(
+            "insert into public.worker_heartbeats (worker_kind, worker_id,"
+            " last_seen_at, capabilities) values"
+            " (%s,%s, now() - make_interval(secs => %s), %s::jsonb)"
+            " on conflict (worker_kind, worker_id) do update"
+            "   set last_seen_at = excluded.last_seen_at,"
+            "       capabilities = excluded.capabilities",
+            (kind, f"test-{kind}", age_seconds, capabilities),
+        )
+    finally:
+        conn.close()
+
+
+def _clear_beats():
+    conn = _admin_conn()
+    try:
+        conn.execute("delete from public.worker_heartbeats")
+    finally:
+        conn.close()
+
+
+def test_an_empty_queue_with_no_workers_is_not_ready(seeded, client):
+    """🔴 It was ready. Every check answered "is work stuck", and on a quiet
+    deployment nothing is stuck — so a stack with BOTH WORKERS STOPPED was
+    indistinguishable from a healthy idle one, and the first member to send a
+    message found out."""
+    _clear_beats()
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["workers"] != "ok"
+
+
+def test_a_stale_heartbeat_is_not_a_live_worker(seeded, client):
+    """A process that stopped an hour ago left its row behind. Presence is
+    about recency, not about a row existing."""
+    _clear_beats()
+    _beat("agent", age_seconds=3600)
+    _beat("pipeline", age_seconds=3600)
+
+    assert client.get("/ready").json()["checks"]["workers"] != "ok"
+
+
+def test_both_workers_reporting_is_ready(seeded, client):
+    _clear_beats()
+    _beat("agent")
+    _beat("pipeline")
+
+    assert _checks(client)["workers"] == "ok"
+
+
+def test_a_missing_worker_is_named(seeded, client):
+    """"Something is wrong" sends an operator to read source at 3am. Which
+    one is missing is the whole message."""
+    _clear_beats()
+    _beat("agent")
+
+    assert "pipeline" in _checks(client)["workers"]
+
+
+def test_the_sandbox_is_reported_by_the_worker_that_holds_the_socket(seeded, client):
+    """🔴 Unchecked, and uncheckable from here: the API deliberately has no
+    Docker socket, so dead Docker meant every repository tool failed behind a
+    green deployment. The execution worker reports; readiness reads."""
+    _clear_beats()
+    _beat("pipeline")
+    _beat("agent", capabilities='{"sandbox": "the docker daemon did not answer"}')
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert "docker daemon" in response.json()["checks"]["sandbox"]
+
+
+def test_an_unsupported_backend_is_reported_honestly(seeded, client):
+    """Selecting a provider nothing here has been proven against must read as
+    unavailable, not as fine."""
+    _clear_beats()
+    _beat("pipeline")
+    _beat("agent", capabilities='{"sandbox": "unsupported"}')
+
+    assert _checks(client)["sandbox"] == "unsupported"
+
+
+def test_an_expired_agent_run_lease_is_reported(seeded, client):
+    """🔴 The lease check counted JOBS only. An agent run holds a lease the
+    same way, and a member watching a turn that stopped mid-flight is a louder
+    failure than an unparsed document."""
+    _clear_beats()
+    _beat("agent")
+    _beat("pipeline")
+    conn = _admin_conn()
+    try:
+        thread_id = conn.execute(
+            "select id from public.threads where team_id=%s and title='General'",
+            (TEAM_A,),
+        ).fetchone()[0]
+        conn.execute(
+            "insert into public.agent_runs (team_id, thread_id, requester_id,"
+            " status, trigger_type, worker_id, lease_expires_at) values"
+            " (%s,%s,%s,'running','user','gone', now() - interval '2 hours')",
+            (TEAM_A, thread_id, A1),
+        )
+        response = client.get("/ready")
+    finally:
+        conn.execute("delete from public.agent_runs where team_id=%s", (TEAM_A,))
+        conn.close()
+
+    assert response.status_code == 503
+    assert "agent run" in response.json()["checks"]["expired_leases"]

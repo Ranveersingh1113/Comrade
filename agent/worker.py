@@ -16,7 +16,9 @@ from agent.run_queue import (
 )
 from agent.runtime import run_turn_sync
 from shared.config import settings
+from agent.sandbox import probe_capabilities
 from shared.errors import safe_error
+from shared.heartbeat import Beater
 from shared.db import Role, team_session
 
 from shared import observability
@@ -118,6 +120,12 @@ def run_once(worker_id: str | None = None) -> bool:
     return True
 
 
+#: Shared by the slots: one process, one heartbeat. Each slot has its own
+#: claim identity, but they are all the same worker as far as "is anybody
+#: here" is concerned.
+_beater = Beater("agent", role=Role.AGENT)
+
+
 def _loop(worker_id: str) -> None:
     """One claim slot, for the life of the process.
 
@@ -127,6 +135,12 @@ def _loop(worker_id: str) -> None:
     """
     while not _stopping.is_set():
         try:
+            # Alive, and what it can actually execute with. The API holds no
+            # Docker socket by design, so this is the only process that can
+            # answer the second half (fix.md F33). The probe is passed
+            # UNCALLED: it shells out, and a beat happens once every thirty
+            # seconds while this loop runs constantly.
+            _beater.maybe(probe_capabilities)
             if not run_once(worker_id):
                 _stopping.wait(POLL_SECONDS)
         except Exception:  # noqa: BLE001 - a slot must outlive its surprises

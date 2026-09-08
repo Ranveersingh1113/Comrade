@@ -51,15 +51,17 @@ from server.github_connect import (
 from server import previews
 from server.auth import CurrentUserId, require_membership
 from server.invites import invite_member
-from pipeline.ci import CHECK_EVENTS, record_check_result
 from server.webhooks import verify_signature
 from shared.config import settings
 from shared.consent import (
     ConsentError, approve_consent, edit_and_approve, propose_action,
     reject_consent, revoke_permission_grant,
 )
+from pipeline import chat
 from shared import observability
 from shared.errors import safe_error
+from shared.heartbeat import STALE_SECONDS as WORKER_STALE_SECONDS
+from shared.heartbeat import live_workers
 from shared.db import Role, connect, runtime_urls, team_session, user_session
 from shared.agent_runs import get_thread_runs
 from shared.usage import (
@@ -215,6 +217,12 @@ def ready(response: Response) -> dict:
         # sweeps are supposed to reclaim these; a pile of them means the sweep
         # itself is not running, which no queue-depth check would show.
         checks["expired_leases"] = _lease_check()
+        # 🔴 Everything above answers "is work stuck". None of it answers "is
+        # anybody here": on a quiet deployment both queues are empty, so a
+        # stack with BOTH WORKERS STOPPED reported itself ready and the first
+        # member to send a message found out (fix.md F33).
+        checks["workers"] = _worker_check()
+        checks["sandbox"] = _sandbox_check()
 
     ok = all(v == "ok" for v in checks.values())
     if not ok:
@@ -275,17 +283,25 @@ def metrics(authorization: str = Header(default="")) -> dict:
         # How far behind the wiki is from the conversation. Nothing FAILS when
         # this grows; the product just quietly stops knowing things.
         #
-        # 🔴 This compared against `max(chat_through)` across ALL teams, so one
-        # team compiling five minutes ago made every older message everywhere
-        # look already-compiled. The team whose pipeline has been broken for a
-        # week — the only one this metric exists to find — was the one it could
-        # not see. Per team, then the worst of them.
+        # 🔴 Two defects here. It compared against `max(chat_through)` across
+        # ALL teams, so one team compiling five minutes ago made every older
+        # message everywhere look already-compiled — the team whose pipeline
+        # had been broken for a week was the one it could not see. And it
+        # counted every message, while capture only ever looks at undeleted
+        # USER messages in TEAM-VISIBLE threads, so a team whose conversation
+        # is entirely private reported a backlog that no working pipeline
+        # could ever clear.
+        #
+        # Per team, over what capture would actually take, using capture's own
+        # definition (pipeline/chat.py) so the two cannot drift.
         lag = conn.execute(
             "select coalesce(max(extract(epoch from now() - m.created_at)), 0)"
             "  from public.messages m"
-            " where m.created_at > coalesce("
-            "   (select max(c.chat_through) from public.memory_compilations c"
-            "     where c.team_id = m.team_id), 'epoch'::timestamptz)"
+            "  join public.threads th"
+            "    on th.id = m.thread_id and th.team_id = m.team_id"
+            " where " + chat.CAPTURABLE_SQL +
+            "   and m.created_at >" + chat.CAPTURED_THROUGH_SQL.format(
+                team="m.team_id")
         ).fetchone()[0]
 
         # Summed here rather than listed per team: an operations endpoint
@@ -369,19 +385,76 @@ def _queue_check(sql: str, complaint: str) -> str:
     return f"{stalled} " + complaint.format(mins=READY_STALL_MINUTES)
 
 
+def _worker_check() -> str:
+    """Both workers, present and recent, whether or not there is work."""
+    try:
+        live = live_workers()
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown: {safe_error(exc)}"
+    missing = [kind for kind in ("agent", "pipeline") if not live.get(kind)]
+    if missing:
+        return (
+            f"no {' or '.join(missing)} worker has reported in the last"
+            f" {WORKER_STALE_SECONDS}s"
+        )
+    return "ok"
+
+
+def _sandbox_check() -> str:
+    """What the execution worker says it can run code with.
+
+    Reported BY the worker rather than probed here: the API holds no Docker
+    socket on purpose, so it cannot find this out for itself, and giving it one
+    to answer a health check would turn a request-handling bug into a host
+    compromise.
+    """
+    try:
+        agents = live_workers().get("agent") or []
+    except Exception as exc:  # noqa: BLE001
+        return f"unknown: {safe_error(exc)}"
+    if not agents:
+        return "unknown: no agent worker is reporting"
+    states = {
+        (worker["capabilities"] or {}).get("sandbox", "unreported")
+        for worker in agents
+    }
+    if states == {"ok"}:
+        return "ok"
+    # Named honestly, including "unsupported" for a backend nothing here has
+    # been proven against.
+    return "; ".join(sorted(states))
+
+
 def _lease_check() -> str:
+    """Work a dead worker is holding that nobody is doing.
+
+    🔴 This counted JOBS only. An agent run holds a lease the same way and is
+    recovered by the same kind of sweep, and a member watching a turn that
+    stopped mid-flight is a louder failure than a document that has not been
+    parsed — yet it was the half that went unchecked.
+    """
     try:
         with connect(Role.CONTROL) as conn:
-            stuck = conn.execute(
+            jobs = conn.execute(
                 "select count(*) from public.jobs where status='processing'"
+                " and lease_expires_at < now() - make_interval(mins => %s)",
+                (READY_STALL_MINUTES,),
+            ).fetchone()[0]
+            runs = conn.execute(
+                "select count(*) from public.agent_runs where status='running'"
                 " and lease_expires_at < now() - make_interval(mins => %s)",
                 (READY_STALL_MINUTES,),
             ).fetchone()[0]
     except Exception as exc:  # noqa: BLE001
         return f"unknown: {safe_error(exc)}"
+    stuck = []
+    if jobs:
+        stuck.append(f"{jobs} job(s)")
+    if runs:
+        stuck.append(f"{runs} agent run(s)")
     if not stuck:
         return "ok"
-    return (f"{stuck} job(s) held past an expired lease for over"
+    return (" and ".join(stuck) + " held past an expired lease for over"
             f" {READY_STALL_MINUTES}m — is the recovery sweep running?")
 
 
@@ -1180,14 +1253,18 @@ async def github_webhook(request: Request) -> dict:
     # BEFORE acknowledging. A check result that is only queued is a check
     # result that a worker crash loses, and the thread whose work failed never
     # hears about it — which is the whole defect this closes.
-    if event in CHECK_EVENTS:
-        try:
-            await run_in_threadpool(
-                record_check_result, team_id, full_name, event, body,
-                request.headers.get("X-GitHub-Delivery"),
-            )
-        except Exception:  # noqa: BLE001 - never fail a delivery on bookkeeping
-            logger.exception("could not record a check result for %s", full_name)
+    # 🔴 TWO defects lived here. The delivery id was passed as a fifth
+    # POSITIONAL argument to a keyword-only parameter, so every check event
+    # raised TypeError, was swallowed by a broad `except`, and the delivery was
+    # acknowledged with no result recorded — the feature T25 built never ran
+    # once, and its tests called the helper directly so they stayed green over
+    # it. And the reasoning for doing it inline was wrong: "a result that is
+    # only queued is one a worker crash loses" is not true of a QUEUED JOB,
+    # which is a durable row with retries and backoff. Logging and continuing
+    # is what actually lost results.
+    #
+    # The job below IS the durable record. Correlation happens in its handler,
+    # where a failure is retried instead of written to a log nobody reads.
 
     job_id = await run_in_threadpool(
         enqueue_github_event,

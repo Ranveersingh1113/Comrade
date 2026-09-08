@@ -105,7 +105,10 @@ def enqueue_github_event(
     possibly in a test) disables dedup for that one job rather than colliding
     every such job together under a shared '' key.
     """
-    payload = {"event": event, "body": body}
+    # `delivery_id` is in the payload as well as the dedupe key: the handler
+    # needs it to make the check-result write idempotent across redeliveries,
+    # and the dedupe key only stops a SECOND JOB while the first is active.
+    payload = {"event": event, "body": body, "delivery_id": delivery_id}
     dedupe_key = delivery_id or None
     with team_session(Role.PIPELINE, team_id) as conn:
         row = conn.execute(
@@ -267,6 +270,35 @@ _EXTRACTORS: dict[str, Callable[[dict], dict]] = {
 }
 
 
+#: Deferred, because pipeline.ci imports from here.
+def _check_events() -> tuple[str, ...]:
+    from pipeline.ci import CHECK_EVENTS
+
+    return CHECK_EVENTS
+
+
+class _CheckEvents:
+    """`event in _CHECK_EVENTS` without importing pipeline.ci at module load."""
+
+    def __contains__(self, event: object) -> bool:
+        return event in _check_events()
+
+
+_CHECK_EVENTS = _CheckEvents()
+
+
+def _record_check(team_id: str, payload: dict, body: dict) -> None:
+    from pipeline.ci import record_check_result
+
+    record_check_result(
+        team_id,
+        (body.get("repository") or {}).get("full_name") or "",
+        payload.get("event") or "",
+        body,
+        delivery_id=payload.get("delivery_id"),
+    )
+
+
 def handle_github_job(team_id: str, payload: dict) -> None:
     """Worker handler for 'ingest_github' jobs.
 
@@ -281,10 +313,23 @@ def handle_github_job(team_id: str, payload: dict) -> None:
     proof the repo still belongs to this team, not the route's earlier say-so.
     """
     event = payload.get("event")
+    body = payload.get("body") or {}
+
+    # Which thread's work this result is about. Done HERE rather than in the
+    # webhook route: the route passed the delivery id positionally to a
+    # keyword-only parameter, so every check event raised TypeError into a
+    # broad `except` and was acknowledged with nothing recorded. In the handler
+    # a failure leaves the job pending for another attempt, which is the
+    # durable path the route was trying and failing to provide.
+    #
+    # Before the extractor check, because check events are not wiki activity
+    # and would return early.
+    if event in _CHECK_EVENTS:
+        _record_check(team_id, payload, body)
+
     extractor = _EXTRACTORS.get(event)
     if extractor is None:
         return
-    body = payload.get("body") or {}
     extracted = extractor(body)
     full_name = (body.get("repository") or {}).get("full_name")
     author_login = extracted["author_login"]

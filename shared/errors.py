@@ -19,6 +19,8 @@ the failing statement's shape all stay, and the values do not.
 """
 import re
 
+import psycopg
+
 #: What an operator can act on without seeing a row.
 MAX_ERROR_CHARS = 600
 
@@ -67,6 +69,42 @@ def redact(text: str) -> str:
 #: Packages whose exceptions are raised with a sentence somebody wrote.
 _OURS = ("agent.", "pipeline.", "server.", "shared.")
 
+#: The parts of a database error that are SCHEMA rather than DATA. Every one of
+#: these is an identifier the developer chose; none can carry a row value.
+_DIAG_FIELDS = (
+    ("constraint", "constraint_name"),
+    ("table", "table_name"),
+    ("column", "column_name"),
+    ("datatype", "datatype_name"),
+)
+
+
+def database_error(exc: psycopg.Error) -> str:
+    """A database failure described structurally, with no message text at all.
+
+    🔴 Stripping DETAIL and CONTEXT was not enough. PostgreSQL puts values in
+    the PRIMARY message too — `invalid input syntax for type uuid: "…"`,
+    `invalid input value for enum …` — so a malformed identifier from a model,
+    a document, or a member landed intact in `jobs.last_error`, which the
+    cross-team control role can read, and in the log. The regexes above cannot
+    help: a filename or a sentence is not shaped like a secret.
+
+    So for database errors nothing textual survives. The exception class, the
+    SQLSTATE, and the identifiers Postgres reports separately are the whole
+    output — all of them schema, none of them data, and between them they say
+    what an operator needs: which kind of failure, and which constraint or
+    column it was about.
+    """
+    parts = [type(exc).__name__]
+    if exc.sqlstate:
+        parts.append(f"[{exc.sqlstate}]")
+    diag = exc.diag
+    for label, attribute in _DIAG_FIELDS:
+        value = getattr(diag, attribute, None)
+        if value:
+            parts.append(f"{label}={value}")
+    return " ".join(parts)
+
 
 def safe_error(exc: BaseException) -> str:
     """`exc` as a line that is safe to store in a table and ship to a log.
@@ -82,7 +120,15 @@ def safe_error(exc: BaseException) -> str:
     `jobs.last_error` is what the connect screen renders when a clone fails. A
     Python class name in front of "no GitHub credential reaches acme/app" helps
     nobody and makes the product look broken in a different way than it is.
+
+    A DATABASE exception keeps no message text at all: `database_error` builds
+    the whole line from the class, the SQLSTATE and Postgres' own identifier
+    fields, because the primary message carries values that no pattern can be
+    trusted to recognise.
     """
+    if isinstance(exc, psycopg.Error):
+        # Structural, not textual. See `database_error`.
+        return database_error(exc)
     message = redact(str(exc))
     if not message:
         return type(exc).__name__

@@ -151,6 +151,27 @@ def default_branch(team_id: str, repo_full_name: str) -> str:
         raise PullRequestError(str(exc)) from exc
 
 
+def _pr_identity(data: dict, *, created: bool) -> dict:
+    """What a caller needs to talk about this pull request afterwards.
+
+    🔴 This used to be `{"pr_url", "created"}`. `shared/consent.py` reads
+    `result["number"]` to record which thread the work came from, so every
+    call raised KeyError into a broad `except`, and no pull request Comrade
+    opened was ever correlated with anything. The feature T25 built had no
+    input.
+
+    `head_sha` matters for the same reason: without it a check result cannot be
+    told apart from one about a commit the branch has moved past, so the stale
+    marking that exists to stop old failures driving decisions could never fire.
+    """
+    return {
+        "pr_url": data["html_url"],
+        "created": created,
+        "number": data.get("number"),
+        "head_sha": (data.get("head") or {}).get("sha"),
+    }
+
+
 def _create_pr(
     repo_full_name: str, head: str, base: str, title: str, body: str, token: str
 ) -> dict:
@@ -173,8 +194,7 @@ def _create_pr(
         timeout=30.0,
     )
     if resp.status_code == 201:
-        data = resp.json()
-        return {"pr_url": data["html_url"], "created": True}
+        return _pr_identity(resp.json(), created=True)
 
     # 422 with "already exists" is the retry path, not a failure: the branch is
     # pushed and a PR is open, which is exactly the state we were trying to
@@ -188,7 +208,10 @@ def _create_pr(
         )
         items = existing.json() if existing.status_code == 200 else []
         if items:
-            return {"pr_url": items[0]["html_url"], "created": False}
+            # The already-open path needs the identity just as much: it is the
+            # RETRY path, and a retry is exactly when the correlation record is
+            # missing and needs writing.
+            return _pr_identity(items[0], created=False)
     raise PullRequestError(
         f"GitHub refused the pull request ({resp.status_code}):"
         f" {resp.text[:300]}"

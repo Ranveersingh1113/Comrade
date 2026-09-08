@@ -90,8 +90,13 @@ product keeps answering turns while it is broken — the agent queue is separate
 
 ### `expired_leases`
 
-Jobs still marked `processing` whose lease expired more than
-`READY_STALL_MINUTES` ago. Work a dead worker is holding that nobody is doing.
+Jobs — **and agent runs** — still marked as being worked on whose lease expired
+more than `READY_STALL_MINUTES` ago. Work a dead worker is holding that nobody
+is doing.
+
+This counted jobs only until T27's follow-up. An agent run holds a lease the
+same way, and a member watching a turn that stopped mid-flight is a louder
+failure than a document that has not been parsed.
 
 The recovery sweeps are supposed to reclaim these. A pile of them means the
 sweep itself is not running, which no queue-depth check would show.
@@ -145,6 +150,41 @@ What to read it for:
 * **`runs_by_status`** over the last 24 hours. A rising `failed` share is the
   first sign of a model or credential problem; a rising
   `waiting_for_permission` share means consent cards are piling up unanswered.
+
+### `workers`
+
+No agent worker, or no pipeline worker, has reported a heartbeat recently.
+
+**This is the check that notices a stopped worker on a QUIET deployment.**
+Every other check here answers "is work stuck", and on an idle system nothing
+is stuck — so before this existed, a stack with both workers stopped reported
+itself ready, and the first member to send a message found out. Workers write a
+row every 30 seconds whether or not there is anything to do; three missed beats
+is presumed gone.
+
+**Do:** the message names which kind is missing. `docker compose ps` and the
+relevant worker's logs. A worker that is running but cannot reach the database
+will also show here, and `checks.roles` will say so too.
+
+### `sandbox`
+
+What the execution worker says it can run a team's code with.
+
+Reported BY the worker, not probed here: the API deliberately holds no Docker
+socket — granting one to the internet-facing process would turn a
+request-handling bug into a host compromise — so it cannot find this out for
+itself. The agent worker probes its own provider and publishes the answer with
+its heartbeat.
+
+Values are `ok`, `docker is not installed`, `the docker daemon did not answer`,
+`the docker daemon refused`, or `unsupported` for a configured backend that
+nothing here has been proven against.
+
+**Do:** dead Docker means every repository tool fails while the rest of the
+product looks fine. Check the daemon on the worker host and that the worker's
+socket mount is intact. `unsupported` means `COMRADE_SANDBOX_BACKEND` names
+something other than `docker`; that is reported honestly rather than assumed to
+work.
 
 ## Logs
 

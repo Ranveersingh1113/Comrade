@@ -1,0 +1,13 @@
+-- Readiness has to be able to see a lease it is reporting on.
+--
+-- 🔴 `/ready` gained a check for agent runs held past an expired lease — work a
+-- dead worker is holding that nobody is doing — and the control role could not
+-- read the column, so the check reported
+-- `unknown: InsufficientPrivilege [42501]` and the deployment was never ready.
+-- A check that cannot run is worse than no check: it fails loudly for the
+-- wrong reason and teaches an operator to ignore the endpoint.
+--
+-- A lease expiry is operational metadata about WORK, the same class as the
+-- `status` and `created_at` this role already reads. It says nothing about
+-- what the run is doing or whose it is.
+grant select (lease_expires_at, worker_id) on public.agent_runs to comrade_control;

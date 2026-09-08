@@ -412,32 +412,80 @@ def _note_edit(tool_context: ToolContext) -> None:
     state[_EDIT_GEN] = state.get(_EDIT_GEN, 0) + 1
 
 
+class MeasurementFailed(RuntimeError):
+    """The working tree's identity could not be established.
+
+    🔴 (fix.md F27) The old code ignored git's exit status. A failing
+    `git diff HEAD` returns empty stdout, so a failed measurement hashed
+    `b"" + b"\x00" + b""` — a perfectly ordinary-looking digest, and the SAME
+    one every time. Record a "verification" while git is broken, propose while
+    git is still broken, and the two match: the gate passes on a change nothing
+    checked. The exception path was no better, returning `unreadable:{id(root)}`,
+    which is also stable for the same object.
+
+    Unmeasurable is not an identity. It is an error, and both recording and
+    proposing refuse on it.
+    """
+
+
 def _patch_digest(root) -> str:
     """A stable identity for what this working tree is proposing.
 
-    The diff against HEAD plus the untracked files, hashed. That is the thing
-    a pull request actually carries, so binding verification to it answers the
-    question the gate is really asking: was THIS change checked.
+    The diff against HEAD plus every untracked file's PATH AND CONTENTS,
+    hashed. That is the thing a pull request actually carries, so binding
+    verification to it answers the question the gate is really asking: was THIS
+    change checked.
+
+    🔴 (fix.md F26) It used to hash `git ls-files --others`, which is the
+    untracked FILENAMES. Create a new file, run a check, rewrite that file
+    under the same name, propose: same diff, same name list, same digest, gate
+    satisfied — and the patch capture then carried contents nothing had run.
+    A file's name is not its contents, and the whole point of the digest is to
+    notice a change.
     """
     import hashlib
     import subprocess
 
     if root is None:
-        return ""
-    try:
-        diff = subprocess.run(  # noqa: S603 - fixed argv
-            ["git", "-C", str(root), "diff", "HEAD"],
-            capture_output=True, timeout=30,
-        ).stdout
-        untracked = subprocess.run(  # noqa: S603 - fixed argv
-            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"],
-            capture_output=True, timeout=30,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        # Unknowable is not verified. Returning a unique value makes the gate
-        # refuse rather than wave the change through on a failed measurement.
-        return f"unreadable:{id(root)}"
-    return hashlib.sha256(diff + b"\x00" + untracked).hexdigest()
+        raise MeasurementFailed("no working tree to measure")
+
+    def _git(*args: str) -> bytes:
+        try:
+            done = subprocess.run(  # noqa: S603 - fixed argv
+                ["git", "-C", str(root), *args],
+                capture_output=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise MeasurementFailed(f"git {args[0]} could not run") from exc
+        if done.returncode != 0:
+            # Checked, not assumed. This is the branch that used to produce a
+            # valid-looking digest out of an empty stdout.
+            raise MeasurementFailed(
+                f"git {args[0]} exited {done.returncode}"
+            )
+        return done.stdout
+
+    digest = hashlib.sha256()
+    digest.update(_git("diff", "HEAD"))
+
+    # -z, so a filename containing a newline cannot split one path into two.
+    listing = _git("ls-files", "--others", "--exclude-standard", "-z")
+    for raw in sorted(part for part in listing.split(b"\x00") if part):
+        digest.update(b"\x00")
+        digest.update(raw)
+        digest.update(b"\x00")
+        path = Path(root) / raw.decode("utf-8", "surrogateescape")
+        try:
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        except FileNotFoundError:
+            # Listed and then removed between the two calls. Its absence is
+            # part of the identity, and the next measurement will not list it.
+            digest.update(b"<gone>")
+        except OSError as exc:
+            raise MeasurementFailed(f"could not read {raw!r}") from exc
+    return digest.hexdigest()
 
 
 def _note_verified(tool_context: ToolContext, argv: list[str], *, root) -> None:
@@ -450,13 +498,20 @@ def _note_verified(tool_context: ToolContext, argv: list[str], *, root) -> None:
     check vouching for a tree that no longer existed.
     """
     state = tool_context.state
+    try:
+        # Taken AFTER the command ran, so a check that mutates the tree records
+        # the tree it left behind rather than the one it started with.
+        digest = _patch_digest(root)
+    except MeasurementFailed as exc:
+        # 🔴 A failed measurement used to become a digest — an empty stdout
+        # hashed to a perfectly ordinary value, the same one every time. Record
+        # nothing instead: a verification nobody could measure is not a
+        # verification, and leaving the slot empty makes the gate refuse.
+        logger.warning("could not record a verification: %s", exc)
+        state.pop(_VERIFICATION, None)
+        return
     state[_VERIFIED_GEN] = state.get(_EDIT_GEN, 0)
-    state[_VERIFICATION] = {
-        "command": " ".join(argv),
-        # Taken AFTER the command ran, so a check that mutates the tree
-        # records the tree it left behind rather than the one it started with.
-        "digest": _patch_digest(root),
-    }
+    state[_VERIFICATION] = {"command": " ".join(argv), "digest": digest}
 
 
 def _unverified(tool_context: ToolContext, *, root) -> bool:
@@ -481,7 +536,14 @@ def _unverified(tool_context: ToolContext, *, root) -> bool:
         # Edited and never checked.
         return True
     # Edited, checked — but is the checked thing the proposed thing?
-    return record.get("digest") != _patch_digest(root)
+    try:
+        return record.get("digest") != _patch_digest(root)
+    except MeasurementFailed as exc:
+        # 🔴 Unmeasurable used to compare EQUAL to a previous unmeasurable, so
+        # a broken git waved the change through. It cannot be established that
+        # this is what was checked, and that is a refusal.
+        logger.warning("refusing a proposal that cannot be measured: %s", exc)
+        return True
 
 
 def _unverified_legacy(tool_context: ToolContext) -> bool:

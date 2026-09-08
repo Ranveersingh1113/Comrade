@@ -98,57 +98,117 @@ class ContextFormatter(logging.Formatter):
         return f"{base} {tail}" if tail else base
 
 
-class RedactingFilter(logging.Filter):
-    """Run every record through `shared.errors.redact` before it is emitted.
+class RedactingFormatter(logging.Formatter):
+    """Wrap another formatter and redact whatever it produces.
 
-    On the FORMATTED record — message, arguments and traceback together —
-    because a credential arrives through any of the three. `logger.exception`
-    is the common one: the traceback carries the exception's own text, and that
-    is exactly where a DSN with a password ends up.
+    🔴 The first version of this mutated the RECORD — it rendered the message,
+    redacted the text, and set `record.args = ()`. That works for a plain
+    Formatter and breaks any formatter that reads the arguments itself.
+    uvicorn's `AccessFormatter` does exactly that: it builds the request line
+    from `record.args`, so an emptied tuple made every access log call raise,
+    and each raise printed a traceback to stdout. Under a captured pipe that
+    filled the buffer and WEDGED THE SERVER — a privacy fix that stopped the
+    product answering requests.
+    #
+    Redacting the finished string instead is both safer and more general: it
+    does not care what built the text, it covers the traceback that
+    `Formatter.format` already appended, and it cannot disagree with the
+    formatter it wraps about what the arguments mean.
+    """
+
+    def __init__(self, inner: logging.Formatter) -> None:
+        super().__init__()
+        self.inner = inner
+
+    def format(self, record: logging.LogRecord) -> str:
+        return redact(self.inner.format(record))
+
+
+class RequestLineFilter(logging.Filter):
+    """Strip the query string out of an access-log line.
+
+    🔴 A query string is where VALUES live — a document name, a search term, a
+    token somebody pasted into a URL — and the redactor cannot help with most
+    of them, because they are not shaped like secrets. The route is the part an
+    operator needs; the arguments are the part that should never have been
+    written down.
+
+    uvicorn's access records carry
+    `(client_addr, method, full_path, http_version, status_code)` and its
+    formatter builds the request line from them, so the path is rewritten in
+    place rather than by parsing the finished string.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            rendered = record.getMessage()
-        except Exception:  # noqa: BLE001 - a bad format string must not kill logging
-            return True
-        cleaned = redact(rendered)
-        if record.exc_info or record.exc_text:
-            cleaned = f"{cleaned}\n{redact(_traceback(record))}"
-            record.exc_info = None
-            record.exc_text = None
-        if cleaned != rendered or record.args:
-            record.msg = cleaned
-            record.args = ()
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            path = args[2]
+            if isinstance(path, str) and "?" in path:
+                # Rewritten in place and kept a 5-tuple: uvicorn's
+                # AccessFormatter reads these positionally, and handing it a
+                # different shape is how the redaction above once wedged the
+                # server.
+                record.args = (*args[:2], path.split("?", 1)[0] + "?…", *args[3:])
         return True
 
 
-def _traceback(record: logging.LogRecord) -> str:
-    if record.exc_text:
-        return record.exc_text
-    formatter = logging.Formatter()
-    return formatter.formatException(record.exc_info)
-
-
 def configure(handler: logging.Handler) -> logging.Handler:
-    """Give a handler the formatter and the filter. Both, always — a formatted
-    line with no redaction is the leak this module exists to close."""
-    handler.setFormatter(ContextFormatter(
+    """Give a handler correlation fields and redaction. Both, always — a
+    formatted line with no redaction is the leak this module exists to close."""
+    handler.setFormatter(RedactingFormatter(ContextFormatter(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"
-    ))
-    handler.addFilter(RedactingFilter())
+    )))
     return handler
 
 
+def redact_handler(handler: logging.Handler) -> None:
+    """Make an EXISTING handler redact, keeping how it already formats.
+
+    For the handlers somebody else configured — uvicorn's, chiefly — where the
+    formatting is theirs and only the leak is ours.
+    """
+    if isinstance(handler.formatter, RedactingFormatter):
+        return
+    handler.setFormatter(RedactingFormatter(
+        handler.formatter or logging.Formatter()
+    ))
+
+
+#: Loggers that carry request lines rather than application messages.
+ACCESS_LOGGERS = ("uvicorn.access", "gunicorn.access", "hypercorn.access")
+
+
 def setup(service: str, level: int = logging.INFO) -> None:
-    """Install the root handler for a service process.
+    """Install the redacting handler everywhere this process logs.
 
     Called by the API and both workers instead of `logging.basicConfig`, which
-    installs a handler with neither of the above.
+    installs a handler with neither the formatter nor the filter.
+
+    🔴 This used to replace ROOT's handlers and stop, and root is not where
+    uvicorn logs. The `uvicorn` CLI applies its packaged LOGGING_CONFIG before
+    it imports the app, and that gives `uvicorn.access` its own handler with
+    `propagate: false` — so every request line and query string went to stdout
+    without ever passing the redactor. A filter attached to one handler is not
+    a property of the process.
+
+    So: root gets ours, and every logger that already has handlers of its own
+    gets the same filter attached to them. Ordering is why this works — by the
+    time an app module imports, uvicorn has already configured itself.
     """
     root = logging.getLogger()
     root.setLevel(level)
     for existing in list(root.handlers):
         root.removeHandler(existing)
     root.addHandler(configure(logging.StreamHandler()))
+
+    for name, logger in list(logging.root.manager.loggerDict.items()):
+        if not isinstance(logger, logging.Logger):
+            continue          # a PlaceHolder for an unconfigured parent
+        for handler in logger.handlers:
+            redact_handler(handler)
+            if name in ACCESS_LOGGERS and not any(
+                isinstance(f, RequestLineFilter) for f in handler.filters
+            ):
+                handler.addFilter(RequestLineFilter())
+
     bind(service=service)

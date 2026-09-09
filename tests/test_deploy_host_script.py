@@ -661,7 +661,16 @@ def test_the_release_reads_caddys_environment_and_parses_nothing():
                      if not line.lstrip().startswith("#"))
 
     assert "exec -T caddy printenv COMRADE_HOST" in code
-    assert ".env" not in code, "the release reads .env itself again"
+    # 🔴 The HOSTNAME must not come from `.env`, which is the finding. Not "the
+    # word .env never appears": the release also writes the resolved docker
+    # socket group there, so Compose has it on a later `up -d`, and a blanket
+    # ban made that legitimate write look like the defect. Scoped to the block
+    # that decides the hostname, which is what F35 was about.
+    start = code.index("caddy_host=$(")
+    end = code.index('proxy_check.sh "$COMRADE_HOST"')
+    assert ".env" not in code[start:end], (
+        f"the hostname block reads .env again: {code[start:end]}"
+    )
     # `config --services` asks a yes/no question about which services exist.
     # Any OTHER use of `config` means the resolved model is being read, and
     # every env_file service carries a COMRADE_HOST that is not caddy's.
@@ -671,3 +680,47 @@ def test_the_release_reads_caddys_environment_and_parses_nothing():
         "the release is reading Compose's resolved model again; caddy's value"
         f" is not the first one in it: {scrapes}"
     )
+
+
+def test_the_socket_group_is_persisted_for_later_compose_invocations(tmp_path):
+    """🔴 THE DEFECT (found post-deployment). Exporting COMRADE_DOCKER_GID covers
+    this script's own `up -d` and nothing else.
+
+    `.env` is what Compose reads, so an operator running `docker compose up -d`
+    or `compose run` afterwards — after a reboot, to restart one service, to look
+    at something — gets the `:-999` default back and the workers silently lose
+    the daemon. Measured on the pilot host: `compose run agent-worker` failed
+    with "permission denied while trying to connect to the docker API" while the
+    containers the deploy had created were fine.
+
+    Rewritten from the socket every deploy, so `.env` is a cache of the socket
+    rather than a second opinion about it.
+    """
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
+    (tmp_path / ".env").write_text("POSTGRES_PASSWORD=x\n",
+                                   encoding="utf-8", newline="\n")
+    _double(tmp_path / "bin" / "stat", "stat",
+            ['case "$*" in', '  *"%g"*) echo 4242 ;;', '  *) echo 999 ;;', 'esac'])
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    written = (tmp_path / ".env").read_text()
+    assert "COMRADE_DOCKER_GID=4242" in written, written
+
+
+def test_a_stale_socket_group_in_the_env_is_replaced(tmp_path):
+    """The socket is the source of truth. A value left in `.env` by an earlier
+    deploy, on a host whose group has since changed, must not win."""
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
+    (tmp_path / ".env").write_text("COMRADE_DOCKER_GID=999\nPOSTGRES_PASSWORD=x\n",
+                                   encoding="utf-8", newline="\n")
+    _double(tmp_path / "bin" / "stat", "stat",
+            ['case "$*" in', '  *"%g"*) echo 4242 ;;', '  *) echo 999 ;;', 'esac'])
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    written = (tmp_path / ".env").read_text()
+    assert "COMRADE_DOCKER_GID=4242" in written, written
+    assert "COMRADE_DOCKER_GID=999" not in written, written

@@ -77,6 +77,28 @@ fi
 export COMRADE_DOCKER_GID
 echo "docker socket group: $COMRADE_DOCKER_GID"
 
+# 🔴 PERSISTED, not only exported. Exporting it covers this script's own
+# `up -d`, and nothing else: `.env` is what Compose reads, so an operator
+# running `docker compose up -d` or `compose run` later — after a reboot, to
+# restart one service, to look at something — gets the `:-999` default back and
+# the workers silently lose the daemon. Measured: `compose run agent-worker`
+# without this failed with "permission denied while trying to connect to the
+# docker API", while the containers this script had created were fine.
+#
+# Rewritten every deploy from the socket, so it cannot drift: the socket stays
+# the source of truth and `.env` is a cache of it.
+if [ -f .env ]; then
+  if grep -q '^COMRADE_DOCKER_GID=' .env; then
+    sed -i "s/^COMRADE_DOCKER_GID=.*/COMRADE_DOCKER_GID=$COMRADE_DOCKER_GID/" .env
+  else
+    printf '
+# Resolved from /var/run/docker.sock by scripts/deploy_host.sh.
+' >> .env
+    printf 'COMRADE_DOCKER_GID=%s
+' "$COMRADE_DOCKER_GID" >> .env
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Build the candidate. Nothing is activated yet.
 # ---------------------------------------------------------------------------

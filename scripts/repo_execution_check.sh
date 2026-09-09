@@ -172,7 +172,6 @@ if ! docker logs "$PROXY" 2>&1 | grep -q "Accepting HTTP Socket"; then
   docker logs "$PROXY" 2>&1 | tail -8; exit 1
 fi
 
-D=postgresql://u:p@127.0.0.1:5432/none
 app() {  # run python in the app image, wired the way a worker is
   docker run --rm --group-add "$GID" \
     -v /var/run/docker.sock:/var/run/docker.sock \

@@ -49,3 +49,16 @@ create trigger keep_usage_owner
 -- guessing one would be worse than admitting it. They stay NULL, which under
 -- the new predicate means only an identity-less caller can settle them — the
 -- same treatment as a queued cancellation, and a safe direction for a cap.
+
+-- 🔴 (fix.md F50, added later.) The paragraph above is right about
+-- `finalize_usage`, whose predicate this migration was written for, and WRONG
+-- as a general statement. `settle_from_checkpoint` arrived afterwards and read
+-- a NULL owner as "nothing ever executed this run", which for an unbackfilled
+-- legacy row means only "nobody has written this column yet" — and it released
+-- the whole reservation of a run that really had executed.
+--
+-- A column added today cannot testify about last week. That predicate now asks
+-- `attempts = 0`, which is NOT NULL, defaulted to 0 and incremented by the
+-- claim, and so has said the same thing about every row since the queue
+-- existed. Nothing about THIS migration changes; the note is here because the
+-- reasoning above is what invited the mistake.

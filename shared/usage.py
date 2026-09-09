@@ -223,11 +223,20 @@ def settle_from_checkpoint(team_id: str, run_id: str) -> None:
 
     So the row also has to say its record is COMPLETE:
 
-      * `usage_owner is null` — nothing ever executed this run, so zero is not
-        a stale number, it is the true one;
+      * `attempts = 0` — no worker has ever claimed this run, so zero is not a
+        stale number, it is the true one;
       * `usage_checkpoint_at is not null` — a worker wrote its totals and gave
         up execution in the same statement (`pause_for_permission`), and no
         claim has invalidated that since.
+
+    🔴 (fix.md F50) The first of those was `usage_owner is null` and that was
+    wrong for exactly the same reason as the bug above it. Both settlement
+    columns are unbackfilled, so on a run that executed before those migrations
+    a NULL owner means "nobody has written this column yet" — and it was read as
+    "nothing ever executed". `attempts` is NOT NULL and has been incremented by
+    the claim since the queue existed, so it can testify about rows that predate
+    every column added since. Absence of evidence twice over is what this
+    finding kept turning out to be.
 
     A lease-recovered run has neither, so its reservation is HELD until the
     worker that spent the tokens accounts for them. Holding costs the team
@@ -260,7 +269,21 @@ def settle_cancelled(conn, team_id: str, run_id: str) -> None:
         "   and status not in ('queued','running','waiting_for_permission',"
         "                      'waiting_for_user')"
         "   and worker_id is null"
-        "   and (usage_owner is null or usage_checkpoint_at is not null)"
+        # 🔴 (fix.md F50) `attempts = 0`, not `usage_owner is null`. Both
+        # settlement columns are nullable and deliberately unbackfilled, so a
+        # run that executed and lost its lease BEFORE those migrations has a
+        # NULL owner meaning "nobody has written this column yet" — and the
+        # predicate read it as "nothing ever executed this run, so zero is the
+        # true number" and released the whole reservation.
+        #
+        # `attempts` is NOT NULL, defaulted to 0, and incremented by the claim
+        # — the only path that starts execution. It has said this about every
+        # row since the queue existed, which is what a column added yesterday
+        # can never do. The owner check stays beside it: a run that was never
+        # claimed cannot have had an owner, and a shape where it does is one
+        # nothing here should be settling.
+        "   and ((attempts = 0 and usage_owner is null)"
+        "        or usage_checkpoint_at is not null)"
         " returning coalesce(tokens_reserved, 0),"
         "           coalesce(usage_bucket, date_trunc('hour', created_at)),"
         #  What the run itself recorded, not what any caller believes.

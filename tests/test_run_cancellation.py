@@ -6,6 +6,8 @@ wrong question, or watched a turn head somewhere expensive, could only wait it
 out. The one thing that noticed cancellation at all was `claim_effect`, and
 only for a run something else had already marked cancelled.
 """
+from pathlib import Path
+
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
@@ -517,6 +519,143 @@ def test_a_retry_does_not_settle_a_lease_recovered_run(seeded):
     client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
 
     client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    _, _, finalized = _usage(run_id)
+    assert not finalized
+    assert _bucket_tokens() == 6000
+
+# ---------------------------------------------------------------------------
+# F50 — a column added yesterday cannot testify about last week
+# ---------------------------------------------------------------------------
+
+MIGRATIONS = Path(__file__).parents[1] / "supabase" / "migrations"
+OWNERSHIP = MIGRATIONS / "20260909130000_settlement_ownership.sql"
+CHECKPOINT = MIGRATIONS / "20260909160000_settlement_checkpoint.sql"
+
+
+@pytest.fixture
+def pre_upgrade_schema():
+    """agent_runs as it stood before the two settlement migrations.
+
+    The columns are really dropped and the migrations really re-applied, rather
+    than a row being hand-shaped to what I believe they leave behind. That
+    belief is the thing under test: the finding is that unbackfilled NULLs are
+    indistinguishable from "never executed", and a fixture built from my
+    assumption would agree with my assumption.
+    """
+    def _apply():
+        with psycopg.connect(settings.comrade_db_url_admin, autocommit=True) as conn:
+            conn.execute(OWNERSHIP.read_text(encoding="utf-8"))
+            conn.execute(CHECKPOINT.read_text(encoding="utf-8"))
+
+    with psycopg.connect(settings.comrade_db_url_admin, autocommit=True) as conn:
+        conn.execute("drop trigger if exists keep_usage_owner on public.agent_runs")
+        conn.execute(
+            "drop trigger if exists expire_usage_checkpoint on public.agent_runs")
+        conn.execute(
+            "alter table public.agent_runs"
+            " drop column if exists usage_owner,"
+            " drop column if exists usage_checkpoint_at")
+    try:
+        yield _apply
+    finally:
+        # Idempotent by construction — `add column if not exists`, `create or
+        # replace`, `drop trigger if exists` — so this restores the schema
+        # whether or not the test already applied it.
+        _apply()
+
+
+def test_a_legacy_executed_run_is_not_settled_as_if_it_never_ran(
+    seeded, pre_upgrade_schema,
+):
+    """🔴 THE DEFECT (fix.md F50). Both settlement columns are nullable and
+    deliberately unbackfilled, so a run that executed and lost its lease BEFORE
+    the migrations has attempts > 0, worker_id NULL, usage_owner NULL and no
+    checkpoint marker.
+
+    The predicate read that NULL owner as "nothing ever executed this run, so
+    zero is the true number". It means no such thing: it means nobody has
+    written the column yet. Cancelling such a run finalized its stale zero and
+    released the whole reservation — the opposite of what the migration's own
+    comment promises about unknown state.
+
+    The run below executes and is recovered while the columns DO NOT EXIST, so
+    its NULLs are the migration's, not the test's.
+    """
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "an old expensive turn"))
+    claim_next_run("old-worker")
+    _reserve(run_id, 6000)
+    _expire_lease(run_id)
+    from agent.run_queue import recover_expired_runs
+    recover_expired_runs()
+
+    pre_upgrade_schema()          # the upgrade lands on a row already like this
+
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        legacy = conn.execute(
+            "select attempts, worker_id, usage_owner, usage_checkpoint_at"
+            " from public.agent_runs where id=%s", (run_id,)).fetchone()
+    assert legacy == (1, None, None, None), legacy
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    _, _, finalized = _usage(run_id)
+    assert not finalized, (
+        "an unbackfilled legacy row was read as proof that nothing ever"
+        " executed, and its reservation released as zero"
+    )
+    assert _bucket_tokens() == 6000
+
+
+def test_a_legacy_run_that_was_never_claimed_is_still_refunded(
+    seeded, pre_upgrade_schema,
+):
+    """The other half, and the reason the rule is `attempts`, not a new column.
+
+    A run that was never claimed really did spend nothing, and its whole
+    estimate must still go back. `attempts` is written by the claim itself and
+    has been NOT NULL since the queue existed, so it says this about rows that
+    predate every column added since.
+    """
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "never started"))
+    _reserve(run_id, 6000)
+
+    pre_upgrade_schema()
+
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        assert conn.execute(
+            "select attempts from public.agent_runs where id=%s",
+            (run_id,)).fetchone()[0] == 0
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    assert _bucket_tokens() == 0
+
+
+def test_a_claim_that_never_incremented_attempts_is_still_refused(seeded):
+    """Belt and braces on the new evidence itself.
+
+    `attempts = 0` is trustworthy because the claim is the only thing that
+    starts execution and it always increments. If some future path ever hands a
+    run to a worker without doing so, this run would look never-claimed while
+    having an owner — and settling it would be the same mistake in a new
+    costume. Refused on the owner as well.
+    """
+    from shared.usage import settle_cancelled
+    from shared.db import Role, team_session
+
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "impossible shape"))
+    _reserve(run_id, 6000)
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        conn.execute(
+            "update public.agent_runs set status='cancelled', finished_at=now(),"
+            " attempts=0, worker_id=null, usage_owner='ghost' where id=%s",
+            (run_id,))
+
+    with team_session(Role.AGENT, TEAM_A) as conn:
+        settle_cancelled(conn, TEAM_A, run_id)
 
     _, _, finalized = _usage(run_id)
     assert not finalized

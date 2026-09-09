@@ -3194,6 +3194,8 @@ easy to observe and treated it as the property that mattered.
   * F51 → the schema restored observed; "the database is unharmed" assumed.
   * and in the paragraph that reported F51 fixed: an empty count observed
     afterwards; "nothing was destroyed" assumed. Retracted above.
+  * F53 → the exception gone observed; "the context is correct" assumed. The
+    test written to prove that fix measured a place the bug could not reach.
 
 The fix each time was to find evidence that predates the question being asked —
 `attempts`, a value rather than a definition, a database nothing else uses. The
@@ -3362,6 +3364,115 @@ Fourth round running.
 
 Nothing here is deployment acceptance. Every one of the preflight findings came
 from probing the live host, and none of the repairs has been near it.
+
+
+## Tenth review — 2026-09-10, pinned to `beaaa79`
+
+The usefulness gate held up independently — the reviewer ran the four live tests
+with `MAX_ASKS=1`, so every prompt was answered on a single user ask, and 41
+focused tests passed. One new finding, F53, and it is a regression in my F52
+repair.
+
+### F53 — the cleanup repair restored the wrong task's context · `d9f70f5`
+
+`log_context` was changed in F52 from `ContextVar.reset(token)` to
+`_context.set(previous)`. That removed the exception and introduced a silent bug
+in its place: `set()` writes into whichever task is CLOSING the generator, which
+by definition is not the task that entered the scope. Reproduced with three
+distinct contexts, no model and no database:
+
+```
+driver before   caller-team
+driver after    turn-team     <- never restored, stale
+closer after    caller-team   <- clobbered, was closer-team
+```
+
+The driving task went on logging a finished turn's team and run — exactly the
+mis-attribution `log_context` exists to prevent — and an unrelated task
+inherited them. Silently. The `ValueError` it replaced at least announced
+itself.
+
+**The reset was right. The LIFETIME was wrong.** `run_turn` returns from inside
+its `async for` on every early frame — busy, empty, cancelled, over_budget — and
+returning out of an `async for` does not close the generator. It was left to the
+garbage collector or the loop's asyncgen shutdown, neither of which runs in the
+driving task. `aclosing` closes it in the task that drove it, on every path out,
+and then the context that entered the scope is the context that leaves it.
+
+```
+pytest tests/test_observability.py tests/test_empty_turn.py
+       tests/test_agent_history.py        ->  45 passed
+```
+
+Verified positively as well as negatively: with ownership obeyed, the turn's
+scope reads `turn-team`, the driver gets `caller-team` back, a concurrent task
+keeps `closer-team`, the outermost scope is empty again, and nothing raises.
+
+🔴 **The old tests could not see it, and that is the more useful half.** They
+asserted the outer context AFTER `asyncio.run` returned — a boundary that copies
+the context, so they were inspecting a place the defect could not reach, and they
+passed. Every assertion now happens INSIDE the task under test and names whose
+context it is checking: the driver after an early return, a concurrent task with
+its own identifiers, normal completion, cancellation, and `run_turn` itself
+driving a stand-in stream that ends on an early frame.
+
+One test asserts that closing a turn from another task RAISES. An
+exception-asserting test is usually a smell; here it is the guard that makes
+restore-by-value impossible to reintroduce quietly. Mutation confirms the split:
+swapping the token back for a value assignment fails only that test, and removing
+`aclosing` fails only the `run_turn` one.
+
+### The gate
+
+```
+curl -fsS localhost:8000/health   ->  {"status":"ok","database":"ok"}
+
+=== backend (pytest) ===        1702 passed, 8 skipped, 21 deselected (12m30s)
+=== frontend build ===          ok
+=== frontend lint ===           ok, 3 fast-refresh warnings
+=== frontend unit + component ===   229 passed / 34 files
+=== frontend integration ===        21 passed / 6 files
+=== browser journeys (playwright) ===    8 passed (41.9s)
+=== real GitHub end to end ===      2 skipped — no credential configured
+all gates passed                GATE EXIT: 0
+```
+
+1698 → 1702, which is the net of removing the two context tests that could not
+see F53 and adding six that can. Deselected stayed at 21: the live usefulness
+tests, still opt-in, still not run by this gate.
+
+🔴 The realtime integration test failed its first trial and passed the retry.
+Fifth round running. It is recorded every time and fixed in none of them, which
+at this point is a decision by default rather than an observation.
+
+### The pattern, fifth entry
+
+The list above the eighth review's gate now reads:
+
+  * F49 → terminal-and-unleased observed; "the record is complete" assumed.
+  * F50 → a NULL column observed; "nothing ever executed" assumed.
+  * F51 → the schema restored observed; "the database is unharmed" assumed.
+  * F51 report → an empty count observed afterwards; "nothing was destroyed"
+    assumed.
+  * F53 → the exception gone observed; "the context is correct" assumed.
+
+F53 is the sharpest instance because the test I wrote to prove the fix was
+measuring somewhere the bug could not appear. The exception disappearing was
+real; it was also the only thing I checked.
+
+### What is still open for the release
+
+| | State |
+|---|---|
+| registry proxy | 🔴 unprovisioned — the material blocker, and F06's acceptance |
+| real-host repo install/test | 🔴 unverified — needs the proxy first |
+| worker docker group | fixed in the release, not verified on the host |
+| sandbox image built | fixed in the release, not verified on the host |
+| F46 dependency volumes | 🔴 unchecked against the live host |
+| empty-candidate root cause | 🔴 unknown; mitigated by a measured retry budget |
+
+The live deployment is still the September 6 run at `5c73fd0`. Nothing in the
+last seven rounds has been deployed.
 
 ---
 

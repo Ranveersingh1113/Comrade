@@ -95,6 +95,12 @@ def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
     # The prod overlay has a caddy service, so the release's proxy checks
     # must actually run here rather than being skipped.
     printf 'api\\nfrontend\\ncaddy\\n'; exit 0 ;;
+  *config)
+    # 🔴 `config` and `config --services` are different questions. The
+    # release reads the hostname out of the RESOLVED configuration now
+    # instead of parsing `.env` itself, so this has to answer it — and
+    # answering it HERE rather than from the environment is the point.
+    printf '      COMRADE_HOST: comrade.example.test\\n'; exit 0 ;;
   *" build") [ "$FAILURE" != build ] || exit 7 ;;
   *" -T migrate") [ "$FAILURE" != migration ] || exit 8 ;;
   *"validate --config"*) [ "$FAILURE" != proxyconfig ] || exit 6 ;;
@@ -115,10 +121,11 @@ esac
     env = {**os.environ,
            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
            "DEPLOY_LOG": log.as_posix(), "FAILURE": failure,
-           # The configured public name. Without it the release refuses to
-           # claim the site is served rather than asking localhost, which is
-           # the whole of fix.md F35.
-           "COMRADE_HOST": "comrade.example.test"}
+           }
+    # NOT set here. The release takes the hostname from Compose's resolved
+    # configuration, which the double above reports, so an inherited variable
+    # cannot be what makes this pass.
+    env.pop("COMRADE_HOST", None)
     # 🔴 Asserted BEFORE the script runs, and the path put in front INSIDE the
     # shell. Prepending to the Windows PATH is not enough on every host (see
     # `_posix`), and where it lost the script ran a real `git fetch origin
@@ -229,7 +236,7 @@ def _double(path, name, extra=()):
     path.chmod(0o755)
 
 
-def _fake_host(tmp_path, *, failure="", env_host=None, dotenv_host=None):
+def _fake_host(tmp_path, *, failure="", compose_host=None, dotenv_host=None):
     """A host with the repository checked out, and every external faked."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -246,7 +253,18 @@ def _fake_host(tmp_path, *, failure="", env_host=None, dotenv_host=None):
     for name in ("git", "mkdir", "chown", "flock", "sleep"):
         _double(fake_bin / name, name)
     _double(fake_bin / "stat", "stat", ["echo 999"])
-    _double(fake_bin / "docker", "docker", ["printf 'api\\nfrontend\\ncaddy\\n'"])
+    # The same two questions, answered separately. Only the SHAPE of
+    # `config` output is imitated here; that this shape is what Compose
+    # really emits, for every way the hostname can be written, is what
+    # test_the_release_and_compose_agree_on_the_hostname checks against
+    # real Compose.
+    answers = ['case "$*" in',
+               '  *"config --services") printf \'api\\nfrontend\\ncaddy\\n\' ;;']
+    if compose_host:
+        answers.append(
+            "  *config) printf '      COMRADE_HOST: %s\\n' ;;" % compose_host)
+    answers.append('esac')
+    _double(fake_bin / "docker", "docker", answers)
     _double(fake_bin / "curl", "curl",
             ['[ "$FAILURE" != proxydown ] || exit 7'])
 
@@ -256,9 +274,9 @@ def _fake_host(tmp_path, *, failure="", env_host=None, dotenv_host=None):
         "DEPLOY_LOG": (tmp_path / "commands.log").as_posix(),
         "FAILURE": failure,
     }
+    # Compose exports nothing into the parent SSM shell, and preferring the
+    # shell here would have the probe check a name the site is not serving.
     env.pop("COMRADE_HOST", None)
-    if env_host:
-        env["COMRADE_HOST"] = env_host
     return env
 
 
@@ -291,7 +309,7 @@ def test_the_release_runs_the_way_the_workflow_invokes_it(tmp_path):
     the committed helper is at `scripts/proxy_check.sh`. The check I added so a
     healthy deployment would stop being reported broken would itself have
     failed every healthy deployment."""
-    env = _fake_host(tmp_path, dotenv_host="comrade.example.test")
+    env = _fake_host(tmp_path, compose_host="comrade.example.test")
 
     result = _as_the_workflow_does(tmp_path, env)
 
@@ -301,30 +319,41 @@ def test_the_release_runs_the_way_the_workflow_invokes_it(tmp_path):
                for call in calls), calls
 
 
-def test_the_hostname_can_come_from_the_deployments_env_file(tmp_path):
-    """Compose interpolates `.env` for the containers; it exports nothing into
-    the parent SSM shell. A host configured the documented way reached the new
-    unset-host failure."""
-    env = _fake_host(tmp_path, dotenv_host="from-dotenv.test")
+def test_the_hostname_comes_from_the_deployments_own_configuration(tmp_path):
+    """🔴 THE DEFECT this began as: Compose interpolates `.env` for the
+    containers and exports nothing into the parent SSM shell, so a host
+    configured the documented way reached the unset-host failure and a
+    healthy release was reported broken.
+
+    Nothing is in the environment here — `_fake_host` removes it — and the
+    release still has to arrive at the configured name."""
+    env = _fake_host(tmp_path, compose_host="from-compose.test")
 
     result = _as_the_workflow_does(tmp_path, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (tmp_path / "commands.log").read_text().splitlines()
-    assert any("from-dotenv.test" in call for call in calls), calls
+    assert any("from-compose.test" in call for call in calls), calls
 
 
-def test_an_exported_hostname_still_wins(tmp_path):
-    """An operator running this by hand with the variable set should not have
-    it silently replaced by whatever is in the file."""
-    env = _fake_host(tmp_path, env_host="from-env.test",
-                     dotenv_host="from-dotenv.test")
+def test_the_hostname_the_probe_uses_is_the_one_compose_reports(tmp_path):
+    """🔴 REWRITTEN. This asserted that an exported variable beats `.env`,
+    which Compose does not do (measured above) — so the release must not do it
+    either, or the probe checks a name the site is not serving. The release now
+    asks Compose and uses whatever comes back; here the `docker` double reports
+    a specific value and that is what has to reach the probe.
+    """
+    env = _fake_host(tmp_path, dotenv_host="only-in-the-file.test",
+                     compose_host="what-compose-says.test")
 
-    _as_the_workflow_does(tmp_path, env)
+    result = _as_the_workflow_does(tmp_path, env)
 
+    assert result.returncode == 0, result.stdout + result.stderr
     calls = (tmp_path / "commands.log").read_text().splitlines()
-    assert any("from-env.test" in call for call in calls), calls
-    assert not any("from-dotenv.test" in call for call in calls), calls
+    assert any("what-compose-says.test" in call for call in calls), calls
+    # The `.env` sitting right there is not what the release reads. When it
+    # parsed the file itself, this is the value the probe asked for.
+    assert not any("only-in-the-file.test" in call for call in calls), calls
 
 
 def test_a_host_configured_nowhere_is_refused(tmp_path):
@@ -341,7 +370,7 @@ def test_a_host_configured_nowhere_is_refused(tmp_path):
 
 def test_a_missing_helper_is_reported_rather_than_skipped(tmp_path):
     """A checkout without the helper is a broken release, not a passed check."""
-    env = _fake_host(tmp_path, dotenv_host="comrade.example.test")
+    env = _fake_host(tmp_path, compose_host="comrade.example.test")
     (tmp_path / "scripts" / "proxy_check.sh").unlink()
 
     result = _as_the_workflow_does(tmp_path, env)
@@ -384,3 +413,173 @@ def test_the_double_directory_is_searched_in_the_shells_own_syntax(tmp_path):
     assert _posix(tmp_path).startswith("/")
     assert "\\" not in _posix(tmp_path)
     assert _posix("/already/posix") == "/already/posix"
+
+# ---------------------------------------------------------------------------
+# F35 follow-up — the hostname is Compose's, not a second parser's
+# ---------------------------------------------------------------------------
+
+def _compose_available() -> bool:
+    try:
+        return subprocess.run(["docker", "compose", "version"],
+                              capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+needs_compose = pytest.mark.skipif(
+    not _compose_available(),
+    reason="docker compose is what resolves the hostname; nothing to compare to",
+)
+
+#: The value shapes the finding names. Each is written into `.env` verbatim.
+HOSTNAME_SHAPES = {
+    "plain": ("COMRADE_HOST=comrade.example.test", "comrade.example.test"),
+    "commented": ("COMRADE_HOST=comrade.example.test # public hostname",
+                  "comrade.example.test"),
+    "quoted": ('COMRADE_HOST="comrade.example.test"', "comrade.example.test"),
+    "single-quoted": ("COMRADE_HOST='comrade.example.test'",
+                      "comrade.example.test"),
+    "trailing-space": ("COMRADE_HOST=comrade.example.test   ",
+                       "comrade.example.test"),
+    "interpolated": ("COMRADE_BASE=example.test\n"
+                     "COMRADE_HOST=comrade.${COMRADE_BASE}",
+                     "comrade.example.test"),
+}
+
+
+def _extraction_block() -> str:
+    """Everything the release does to decide the hostname, lifted from the
+    release script itself.
+
+    Read out of the file rather than restated, so this cannot drift into
+    testing a copy that no longer matches what deploys.
+
+    Bounded by the SECTION, from the end of the missing-helper guard to the
+    start of the probe — not by the assignment. Anchored on the assignment,
+    anything put in FRONT of it falls outside the lifted text and this goes
+    blind to it, which is exactly the shape of the mistake measured below.
+    """
+    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    helper = script.index("scripts/proxy_check.sh is missing")
+    start = script.index("\n  fi\n", helper) + len("\n  fi\n")
+    end = script.index("if ! sh scripts/proxy_check.sh", start)
+    assert "COMRADE_HOST=$($COMPOSE config" in script[start:end], script[start:end]
+    return script[start:end]
+
+
+@needs_compose
+@pytest.mark.parametrize("shape", sorted(HOSTNAME_SHAPES))
+def test_the_release_and_compose_agree_on_the_hostname(tmp_path, shape):
+    """🔴 THE DEFECT (fix.md F35 follow-up). The hand-written `.env` parser is
+    not Compose's `.env` parser.
+
+    Given `COMRADE_HOST=comrade.example.test # public hostname`, Compose
+    configures `comrade.example.test` and the sed produced
+    `comrade.example.test # public hostname` — which the probe then asked for,
+    AFTER activation, so a healthy release was reported failed.
+
+    This runs the committed extraction and real Compose against the same
+    project and requires the same answer, for every shape the finding names.
+    """
+    body, expected = HOSTNAME_SHAPES[shape]
+    project = tmp_path / "deploy"
+    project.mkdir()
+    shutil.copy(ROOT / "docker-compose.yml", project / "docker-compose.yml")
+    shutil.copy(ROOT / "docker-compose.prod.yml",
+                project / "docker-compose.prod.yml")
+    (project / ".env").write_text(
+        "POSTGRES_PASSWORD=secret\nCOMRADE_PREVIEW_DOMAIN=p.test\n"
+        + body.replace("\\n", "\n") + "\n",
+        encoding="utf-8", newline="\n")
+
+    # What Compose itself resolves, which is what the containers receive.
+    resolved = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml",
+         "-f", "docker-compose.prod.yml", "config"],
+        cwd=project, capture_output=True, text=True, encoding="utf-8",
+        timeout=180,
+    )
+    assert resolved.returncode == 0, resolved.stderr[-400:]
+    from_compose = next(
+        line.split(":", 1)[1].strip().strip("\"'")
+        for line in resolved.stdout.splitlines()
+        if line.strip().startswith("COMRADE_HOST:")
+    )
+    assert from_compose == expected, (shape, from_compose)
+
+    # And what the release script extracts, running the committed block.
+    script = (
+        'COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"\n'
+        + _extraction_block()
+        + '\necho "$COMRADE_HOST"\n'
+    )
+    extracted = subprocess.run(
+        [SH, "-c", script], cwd=project, capture_output=True, text=True,
+        encoding="utf-8", timeout=180,
+    )
+
+    assert extracted.stdout.strip() == from_compose, (
+        f"{shape}: the release asks for {extracted.stdout.strip()!r} while"
+        f" Compose configured {from_compose!r}"
+    )
+
+
+@needs_compose
+def test_the_release_agrees_with_compose_even_under_a_shell_override(tmp_path):
+    """🔴 MEASURED, not assumed. I expected the shell to win over `.env`, which
+    is the documented interpolation precedence. On Compose 2.39.4 it does not:
+    with COMRADE_HOST in `.env`, `.env` wins over an exported variable.
+
+    That settles the design rather than complicating it. Caddy's site is
+    whatever Compose handed the container, so the probe must ask for the same
+    thing — agreeing with Compose is the property, and a precedence of the
+    release's own would make it check a hostname the site is not serving.
+    """
+    project = tmp_path / "deploy"
+    project.mkdir()
+    shutil.copy(ROOT / "docker-compose.yml", project / "docker-compose.yml")
+    shutil.copy(ROOT / "docker-compose.prod.yml",
+                project / "docker-compose.prod.yml")
+    (project / ".env").write_text(
+        "POSTGRES_PASSWORD=secret\nCOMRADE_PREVIEW_DOMAIN=p.test\n"
+        "COMRADE_HOST=from-dotenv.test\n", encoding="utf-8", newline="\n")
+
+    script = (
+        'COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"\n'
+        + _extraction_block()
+        + '\necho "$COMRADE_HOST"\n'
+    )
+    out = subprocess.run(
+        [SH, "-c", script], cwd=project,
+        env={**os.environ, "COMRADE_HOST": "from-shell.test"},
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
+    )
+
+    resolved = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml",
+         "-f", "docker-compose.prod.yml", "config"],
+        cwd=project, env={**os.environ, "COMRADE_HOST": "from-shell.test"},
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
+    )
+    from_compose = next(
+        line.split(":", 1)[1].strip().strip("\"'")
+        for line in resolved.stdout.splitlines()
+        if line.strip().startswith("COMRADE_HOST:")
+    )
+
+    assert out.stdout.strip() == from_compose, (
+        f"the release asks for {out.stdout.strip()!r} while Compose configured"
+        f" {from_compose!r}"
+    )
+
+
+def test_the_release_no_longer_carries_its_own_env_parser():
+    """One parser. A second one beside Compose's is what produced a hostname
+    Compose never configured."""
+    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+    assert "$COMPOSE config" in code
+    assert ".env" not in code, "the release reads .env itself again"
+

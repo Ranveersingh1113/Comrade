@@ -158,18 +158,38 @@ if $COMPOSE config --services | grep -qx caddy; then
     exit 1
   fi
 
-  # 🔴 And the hostname comes from the DEPLOYMENT's configuration, not from the
-  # shell's environment. Compose interpolates `.env` for the containers; it does
-  # not export anything into the parent SSM shell, so a correctly configured
-  # host reached the unset-host failure above.
-  if [ -z "${COMRADE_HOST:-}" ] && [ -f .env ]; then
-    COMRADE_HOST=$(sed -n 's/^[[:space:]]*COMRADE_HOST[[:space:]]*=[[:space:]]*//p' .env \
-                   | tail -n 1 | tr -d '"'"'"'\r')
-    export COMRADE_HOST
-  fi
+  # 🔴 (fix.md F35 follow-up.) COMPOSE'S OWN ANSWER, not a second parser.
+  #
+  # The hostname has to come from the deployment's configuration: Compose
+  # interpolates `.env` for the containers and exports nothing into the parent
+  # SSM shell, so a correctly configured host was reaching the unset-host
+  # failure below. The first attempt at that read `.env` with sed — and `.env`
+  # is Compose's format, not a shell's. Given
+  #
+  #     COMRADE_HOST=comrade.example.test # public hostname
+  #
+  # Compose configures `comrade.example.test` and the sed produced
+  # `comrade.example.test # public hostname`, which the probe then asked for.
+  # Inline comments, quoting, whitespace and `${VAR}` interpolation all diverge
+  # the same way, and this check runs AFTER activation — so a healthy release
+  # is reported failed.
+  #
+  # `config` is the parser the deployment already relies on. Only the one value
+  # is extracted; nothing else from the resolved configuration is printed.
+  #
+  # ALWAYS Compose's answer, with no shell short-circuit in front of it.
+  # Measured on Compose 2.39.4: where `.env` sets COMRADE_HOST, `.env` WINS
+  # over an exported shell variable — the opposite of the precedence I had
+  # assumed. Caddy's site is whatever Compose handed the container, so
+  # preferring the shell here would have the probe check a hostname the site is
+  # not serving. One source of truth, and it is the containers'.
+  COMRADE_HOST=$($COMPOSE config 2>/dev/null \
+    | awk -F':[[:space:]]*' '/^[[:space:]]+COMRADE_HOST:/ {print $2; exit}' \
+    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  export COMRADE_HOST
   if [ -z "${COMRADE_HOST:-}" ]; then
-    echo "COMRADE_HOST is set neither in the environment nor in .env, so the" \
-         "public site cannot be checked" >&2
+    echo "COMRADE_HOST is not set in the Compose configuration, so the public" \
+         "site cannot be checked" >&2
     exit 1
   fi
 

@@ -45,33 +45,38 @@ def log_context(**fields: Any) -> Iterator[None]:
     another's, and context that leaked between them would attribute one team's
     failure to another — worse than having none at all.
 
-    🔴 (fix.md F52) RESTORED BY VALUE, not by token. `ContextVar.reset(token)`
-    requires the token to be reset in the Context it was created in, and
-    `agent.runtime.stream_turn` holds this open across `yield` — so the
-    contexts differ whenever the generator is finalised somewhere other than
-    where it was driven. A member closing the tab mid-answer, or a cancelled
-    turn, abandons the generator; its `aclose()` then runs in another task and
-    the reset raised
+    🔴 (fix.md F52, then F53.) `reset(token)`, which is the correct thing, and
+    the story of getting here is worth keeping.
+
+    `agent.runtime.stream_turn` holds this open across `yield`. A Token may only
+    be reset in the Context that created it, so when the generator was finalised
+    somewhere other than where it was driven, this raised
 
         ValueError: <Token ...> was created in a different Context
 
-    out of the cleanup path, on a turn that was otherwise finished. Reproduced
-    deterministically: exhausting the generator in one task is clean, taking
-    one frame and closing it from another is not.
+    F52 replaced the token with save-and-restore-by-value. That removed the
+    exception and introduced a worse, silent bug: `set()` writes into whichever
+    task is closing the generator. Measured with three distinct contexts —
 
-    Saving the previous mapping and putting it back is equivalent here — the
-    var always holds a dict and defaults to `{}`, so there is no "unset" state
-    for a token to restore that a value cannot — and it is indifferent to which
-    context does the restoring.
+        driver before   caller-team
+        driver after    turn-team     <- never restored, stale
+        closer after    caller-team   <- clobbered, was closer-team
+
+    — so the driving task kept a finished turn's identifiers and an unrelated
+    task inherited them. An exception at least announces itself.
+
+    The reset is right; what was wrong was the LIFETIME. A caller must close the
+    generator in the task that drove it, which `run_turn` now does with
+    `aclosing`. Then the context that entered this block is the context that
+    leaves it, and a token is exactly the correct instrument.
     """
-    previous = _context.get()
-    _context.set({**previous, **{
+    token = _context.set({**_context.get(), **{
         k: str(v) for k, v in fields.items() if v is not None
     }})
     try:
         yield
     finally:
-        _context.set(previous)
+        _context.reset(token)
 
 
 def bind(**fields: Any) -> None:

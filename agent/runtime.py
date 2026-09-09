@@ -9,7 +9,7 @@ The orchestrator (run_turn / run_turn_sync) is defined below the pure helpers.
 import asyncio
 import json
 import logging
-from contextlib import ExitStack
+from contextlib import ExitStack, aclosing
 from typing import Any, AsyncIterator
 
 from google.adk.agents.run_config import RunConfig
@@ -591,41 +591,54 @@ async def run_turn(
     """Batch form of stream_turn: drain it and return the collected result."""
     steps: list[dict[str, Any]] = []
     final: dict[str, Any] = {}
-    async for item in stream_turn(
+    # 🔴 (fix.md F53) `aclosing`, because most of the exits below are `return`
+    # from inside the loop — and returning out of an `async for` does NOT close
+    # the generator. It was left to the garbage collector or the loop's
+    # asyncgen shutdown, both of which run its `finally` in some OTHER task's
+    # context. `stream_turn` holds `log_context` open across `yield`, so that
+    # finalisation either raised (the token was created elsewhere) or, after
+    # F52 replaced the token with a value, silently restored a finished turn's
+    # identifiers into whatever task happened to close it.
+    #
+    # Closed HERE, in the task that drove it, on every path out — early frame,
+    # exception or cancellation. That is what makes scoped restoration correct
+    # rather than something to work around inside log_context.
+    async with aclosing(stream_turn(
         team_id, requester_id, user_text, thread_id=thread_id,
         trigger_type=trigger_type, exclude_message_id=exclude_message_id,
         lock_held=lock_held, run_id=run_id, worker_id=worker_id,
-    ):
-        if item.get("type") == "run":
-            continue
-        if item.get("type") == "final":
-            final = item
-            continue
-        if item.get("type") == "busy":  # no run row at all — see below
-            # The room lock refused this turn (§4.3). There is no run row and
-            # no reply — surface it as itself rather than KeyError-ing on a
-            # `final` frame that will never arrive.
-            return {
-                "run_id": None,
-                "reply": "",
-                "steps": [],
-                "busy": item["detail"],
-            }
-        if item.get("type") in _STOPS_WITHOUT_A_FINAL:
-            # 🔴 This used to be a branch per frame, and every new way for a
-            # turn to stop early re-opened the same hole: no `final` arrives,
-            # so `final["run_id"]` raised KeyError. Empty was the second cause
-            # and got its own branch; cancellation (T11) and the budget brake
-            # were the third and fourth and got none. The agent worker drives
-            # turns through `run_turn_sync`, where that exception is a crashed
-            # worker rather than a handled outcome.
-            #
-            # The run row exists on all of these — hand it back, so a caller
-            # that wants to look up what happened can.
-            outcome = {"run_id": item["run_id"], "reply": "", "steps": steps}
-            outcome[item["type"]] = item.get("detail", True)
-            return outcome
-        steps.append(item)
+    )) as turn:
+        async for item in turn:
+            if item.get("type") == "run":
+                continue
+            if item.get("type") == "final":
+                final = item
+                continue
+            if item.get("type") == "busy":  # no run row at all — see below
+                # The room lock refused this turn (§4.3). There is no run row and
+                # no reply — surface it as itself rather than KeyError-ing on a
+                # `final` frame that will never arrive.
+                return {
+                    "run_id": None,
+                    "reply": "",
+                    "steps": [],
+                    "busy": item["detail"],
+                }
+            if item.get("type") in _STOPS_WITHOUT_A_FINAL:
+                # 🔴 This used to be a branch per frame, and every new way for a
+                # turn to stop early re-opened the same hole: no `final` arrives,
+                # so `final["run_id"]` raised KeyError. Empty was the second cause
+                # and got its own branch; cancellation (T11) and the budget brake
+                # were the third and fourth and got none. The agent worker drives
+                # turns through `run_turn_sync`, where that exception is a crashed
+                # worker rather than a handled outcome.
+                #
+                # The run row exists on all of these — hand it back, so a caller
+                # that wants to look up what happened can.
+                outcome = {"run_id": item["run_id"], "reply": "", "steps": steps}
+                outcome[item["type"]] = item.get("detail", True)
+                return outcome
+            steps.append(item)
     # A `final` that never came is a frame this function has not been taught
     # about. Report the run truthfully rather than raising on the way out.
     return {"run_id": final.get("run_id", run_id), "reply": final.get("reply", ""),

@@ -12,6 +12,7 @@
    through it; a log is the copy that leaves the building, and it needed a
    guarantee rather than a habit.
 """
+import asyncio
 import logging
 
 import pytest
@@ -191,69 +192,202 @@ def test_a_turn_binds_its_run_so_the_lines_can_be_found():
         "a turn is the unit an operator debugs and it opens no context"
     )
 
-
 # ---------------------------------------------------------------------------
-# F52 — the context survives an abandoned async generator
+# F52/F53 — whose context is restored, and by whom
 # ---------------------------------------------------------------------------
+#
+# 🔴 THE FIRST FIX WAS WRONG AND ITS TESTS COULD NOT SEE IT (fix.md F53).
+#
+# `stream_turn` holds `log_context` open across `yield`. F52 found that
+# finalising it in another task raised — a Token may only be reset where it was
+# created — and replaced the token with save-and-restore-by-value. That removed
+# the exception and introduced a silent bug: `set()` writes into whichever task
+# closes the generator, so the DRIVER kept the finished turn's identifiers and
+# the CLOSER inherited them.
+#
+# The tests written with it asserted the outer context AFTER `asyncio.run`
+# returned. That boundary copies the context, so they were looking at something
+# the defect could not touch, and they passed.
+#
+# So every assertion below is made INSIDE the task under test, and each names
+# whose context it is checking.
 
-def test_context_unwinds_when_a_generator_is_closed_elsewhere():
-    """🔴 THE DEFECT (fix.md F52). `log_context` restored itself with
-    `ContextVar.reset(token)`, and a Token may only be reset in the Context
-    that created it.
+def _team() -> str:
+    from shared.observability import _context
 
-    `agent.runtime.stream_turn` holds this open across `yield`, so the contexts
-    differ whenever the generator is finalised somewhere other than where it
-    was driven — a member closing the tab mid-answer, or a cancelled turn. The
-    `aclose()` then raised
+    return _context.get().get("team_id", "<none>")
 
-        ValueError: <Token ...> was created in a different Context
 
-    out of the cleanup path of a turn that was otherwise done. Observed live at
-    shared/observability.py:54 via agent/runtime.py:272.
+async def _turn(steps=("run", "final")):
+    """The shape of stream_turn: correlation held open across yields."""
+    with log_context(team_id="turn-team"):
+        for step in steps:
+            yield step
 
-    Driving it to exhaustion in one task never showed this, which is why the
-    suite did not.
+
+def test_the_driver_gets_its_own_context_back_after_an_early_return():
+    """🔴 THE DEFECT. Take one frame, stop early, and the driving task was left
+    carrying `turn-team` — a finished turn's identifiers on every later line it
+    logged, which is the mis-attribution log_context exists to prevent.
+
+    `aclosing` is what makes this true: returning out of an `async for` does not
+    close the generator, and whoever closed it later was not this task.
     """
-    import asyncio
-    from contextlib import ExitStack
+    from contextlib import aclosing
 
-    async def turn():
-        with ExitStack() as stack:
-            stack.enter_context(log_context(team_id="t", thread_id="th"))
-            yield "run"
-            yield "final"
+    seen = {}
 
-    async def drive():
-        gen = turn()
-        # One frame taken inside one task's context...
-        assert await asyncio.create_task(gen.__anext__()) == "run"
-        # ...and finalised from a different one, which is the abandoned case.
-        await asyncio.create_task(gen.aclose())
+    async def driver():
+        with log_context(team_id="caller-team"):
+            async with aclosing(_turn()) as turn:
+                async for _ in turn:
+                    break            # the early exit every terminal frame takes
+            seen["after"] = _team()
 
-    asyncio.run(drive())
+    asyncio.run(driver())
+
+    assert seen["after"] == "caller-team", seen
 
 
-def test_an_abandoned_generator_still_restores_the_previous_context(captured):
-    """And it restores rather than merely not raising: a field from an
-    abandoned turn must not stay attached to whatever the worker does next."""
-    import asyncio
-    from contextlib import ExitStack
+def test_a_concurrent_task_keeps_its_own_context():
+    """🔴 THE OTHER HALF. Restoring by value wrote the driver's previous
+    mapping into the CLOSING task, so an unrelated task ended up correlated to
+    someone else's team."""
+    from contextlib import aclosing
 
-    async def turn():
-        with ExitStack() as stack:
-            stack.enter_context(log_context(team_id="abandoned-team"))
-            yield "run"
-            yield "final"
+    seen = {}
 
-    async def drive():
-        gen = turn()
+    async def other():
+        with log_context(team_id="other-team"):
+            await asyncio.sleep(0)
+            seen["other"] = _team()
+
+    async def driver():
+        with log_context(team_id="caller-team"):
+            task = asyncio.create_task(other())
+            async with aclosing(_turn()) as turn:
+                async for _ in turn:
+                    break
+            await task
+            seen["driver"] = _team()
+
+    asyncio.run(driver())
+
+    assert seen == {"other": "other-team", "driver": "caller-team"}, seen
+
+
+def test_normal_completion_restores_the_driver():
+    """The path that always worked, kept: exhausting the generator."""
+    from contextlib import aclosing
+
+    seen = {}
+
+    async def driver():
+        with log_context(team_id="caller-team"):
+            async with aclosing(_turn()) as turn:
+                async for _ in turn:
+                    pass
+            seen["after"] = _team()
+
+    asyncio.run(driver())
+
+    assert seen["after"] == "caller-team", seen
+
+
+def test_cancellation_restores_the_driver():
+    """And the path a stopped turn takes. The generator is closed by the
+    unwinding `aclosing`, in this task, before the cancellation propagates."""
+    from contextlib import aclosing
+
+    seen = {}
+
+    async def driver():
+        with log_context(team_id="caller-team"):
+            try:
+                async with aclosing(_turn()) as turn:
+                    async for _ in turn:
+                        raise asyncio.CancelledError
+            except asyncio.CancelledError:
+                pass
+            seen["after"] = _team()
+
+    asyncio.run(driver())
+
+    assert seen["after"] == "caller-team", seen
+
+
+def test_run_turn_closes_the_turn_it_drove():
+    """The production consumer, not a stand-in for it.
+
+    `run_turn` returns from inside its `async for` on every early frame. This
+    replaces `stream_turn` with one that holds correlation open the same way and
+    ends on a `busy` frame — an early return — then checks the context of the
+    task that drove it.
+    """
+    import agent.runtime as runtime
+
+    seen = {}
+
+    async def fake_stream_turn(*args, **kwargs):
+        with log_context(team_id="turn-team"):
+            yield {"type": "run", "run_id": "r1"}
+            yield {"type": "busy", "detail": "someone else is asking"}
+            yield {"type": "final", "run_id": "r1", "reply": "unreachable"}
+
+    async def driver():
+        with log_context(team_id="caller-team"):
+            result = await runtime.run_turn(
+                "team", "user", "hello", thread_id="thread")
+            seen["result"] = result
+            seen["after"] = _team()
+
+    original = runtime.stream_turn
+    runtime.stream_turn = fake_stream_turn
+    try:
+        asyncio.run(driver())
+    finally:
+        runtime.stream_turn = original
+
+    assert seen["result"]["busy"] == "someone else is asking", seen["result"]
+    assert seen["after"] == "caller-team", (
+        "run_turn returned out of its loop and left the turn's correlation"
+        f" attached to the task that drove it: {seen}"
+    )
+
+
+def test_closing_a_turn_from_another_task_is_refused_loudly():
+    """The property that makes `reset(token)` the right instrument, and the one
+    the F52 fix traded away.
+
+    Ownership is the contract: whoever drove the generator closes it. A caller
+    that breaks it gets a ValueError out of the finaliser. That is not pleasant,
+    and it is much better than the alternative it replaced — restoring by value
+    breaks the same contract SILENTLY, leaving the driver correlated to a
+    finished turn and the closer correlated to someone else's team.
+
+    A test that asserts an exception is usually a smell. Here it is the
+    regression guard: without it, swapping the token back for a value assignment
+    passes everything else in this file.
+    """
+    import pytest as _pytest
+
+    outcome = {}
+
+    async def driver():
+        gen = _turn()
         await gen.__anext__()
-        await asyncio.create_task(gen.aclose())
 
-    logger, records = captured
-    with log_context(team_id="outer-team"):
-        asyncio.run(drive())
-        logger.info("after the abandoned turn")
+        async def closer():
+            await gen.aclose()
 
-    assert "outer-team" in records[-1], records[-1]
-    assert "abandoned-team" not in records[-1], records[-1]
+        try:
+            await asyncio.create_task(closer())
+        except ValueError as exc:
+            outcome["raised"] = str(exc)
+
+    asyncio.run(driver())
+
+    assert "different Context" in outcome.get("raised", ""), (
+        "closing a turn from another task did not announce itself, so the"
+        " driver and the closer are both quietly carrying the wrong context"
+    )

@@ -2966,6 +2966,118 @@ deliberate choice rather than an accident — the alternative discards paid
 tokens — but it is a ceiling, not a solved problem: nothing sweeps a run whose
 worker never returns.
 
+
+## Seventh review — 2026-09-09, pinned to `61f7fc0`
+
+Both sixth-review F49 paths were accepted; the reviewer independently ran the
+four PostgreSQL-backed suites and got 58 passed. One upgrade-state gap
+remained.
+
+### F50 — an unbackfilled legacy row is not proof nothing ran · `54fa8ce`
+
+Both settlement columns are nullable and deliberately unbackfilled, so a run
+that executed and lost its lease BEFORE those migrations carries
+`attempts > 0`, `worker_id NULL`, `usage_owner NULL` and no checkpoint marker.
+The eligibility predicate accepted `usage_owner is null` as "nothing ever
+executed this run, so zero is the true number". On such a row it means only
+"nobody has written this column yet", and cancelling one finalized its stale
+zero and released the entire reservation.
+
+🔴 **This is the same mistake as the bug directly above it in the same
+predicate, one layer further back.** The sixth review found terminal-plus-
+unleased being read as "the record is complete". This is a NULL column being
+read as "nothing happened". Twice in the same statement, absence of evidence
+was taken for evidence — and the second time I wrote the migration comment
+promising unknown state would be held, then wrote a predicate that released it.
+
+**The invariant:** "this run never executed" needs positive durable evidence,
+and a column added yesterday cannot testify about last week.
+
+`attempts` can. It is `not null default 0`, incremented by
+`claim_next_agent_run` — the only path that starts execution, in all three of
+its versions — and has said the same thing about every row since the queue
+existed. The owner check stays beside it and is not decorative: mutation shows
+two existing F43 tests depend on that half, because their fixtures produce a
+run with `attempts = 0` that a worker owns.
+
+```
+pytest tests/test_run_cancellation.py tests/test_usage_continuity.py
+       tests/test_usage_reservations.py tests/test_agent_resume.py
+       tests/test_agent_run_queue.py tests/test_queue_fairness.py
+       tests/test_run_stream_resume.py tests/test_permission_continuation.py
+       tests/test_worker_concurrency.py        ->  99 passed
+```
+
+Acceptance is the sequence the finding asks for rather than a hand-shaped row.
+A fixture really drops both columns and both triggers, the run really executes
+and is really lease-recovered in that pre-upgrade schema, both migration files
+are really re-applied, and only then is it cancelled through the API. The row
+reads `(attempts=1, worker_id=None, usage_owner=None, usage_checkpoint_at=None)`
+— the migration's NULLs, not the test's — and its 6,000 stays reserved. A legacy
+run that was never claimed is still refunded in full through the same sequence.
+
+Building that fixture from what I believed the migrations leave behind would
+have agreed with the belief under test, which is the whole shape of this
+finding.
+
+Mutation-checked: restoring `usage_owner is null` fails exactly the legacy test,
+dropping the owner half fails 3, `attempts >= 0` fails 7.
+
+A note is appended to `20260909130000` because the reasoning recorded there is
+what invited this. It is correct about `finalize_usage`, which it was written
+for, and was wrong as the general statement a later predicate borrowed from it.
+
+### The gate
+
+```
+curl -fsS localhost:8000/health   ->  {"status":"ok","database":"ok"}
+
+=== backend (pytest) ===        1689 passed, 8 skipped, 17 deselected (11m41s)
+=== frontend build ===          ok
+=== frontend lint ===           ok, 3 fast-refresh warnings
+=== frontend unit + component ===   229 passed / 34 files
+=== frontend integration ===        21 passed / 6 files
+=== browser journeys (playwright) ===    8 passed (35.6s)
+=== real GitHub end to end ===      2 skipped — no credential configured
+all gates passed                GATE EXIT: 0
+```
+
+1689, up from 1686: the three F50 tests. The backend lane had the database to
+itself.
+
+The F50 fixture drops two columns and re-applies the migrations that create
+them, so the schema the rest of the suite then runs against is rebuilt by the
+same files rather than restored from a copy. Measured, because "the same" was
+worth checking rather than assuming: the definitions match, and the two columns
+end up at ordinal 58 and 59 of a 25-column table, since a drop/add cycle leaves
+gaps in `attnum`. Nothing reads this table positionally — there is no
+`select *` on `agent_runs` anywhere — so that difference is invisible, but it
+is a difference, and "identical" would have been the wrong word.
+
+🔴 Third round in which this gate passed against an implementation the next
+review found a defect in. That is not an argument against running it; it is the
+measure of what it covers. Every F49/F50 defect so far has been in a path the
+suite did not exercise until the review named it.
+
+### What the settlement rule is now
+
+A reservation is reconciled from the run's own record only when nobody is
+executing it AND the record is known to be complete:
+
+| Row | Settled by | Why |
+|---|---|---|
+| never claimed (`attempts = 0`, no owner) | the server, as zero | zero is the true number, on positive evidence |
+| parked, checkpoint marked | the server, from the checkpoint | written in the statement that dropped the lease |
+| resumed then cancelled before reclaim | the server, from the checkpoint | no claim has invalidated it |
+| executing | its own worker | the row does not know what it has spent |
+| lease-recovered | its own worker, later | usage in flight, nothing checkpointed |
+| legacy, executed, unbackfilled | its own worker, later | unknown is not zero |
+
+🔴 Unchanged ceilings: a worker killed between its model response and its
+settlement leaves the reservation held for the rest of that hour, and nothing
+sweeps it. The migrations have still not been applied FROM EMPTY — that lane
+rebuilds the local database and has not been run.
+
 ---
 
 ## Standing ceilings

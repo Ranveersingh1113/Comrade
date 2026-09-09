@@ -18,13 +18,21 @@ def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (tmp_path / ".git").mkdir()
-    for command in ("git", "docker", "mkdir", "chown", "stat", "flock"):
+    for command in ("git", "docker", "mkdir", "chown", "stat", "flock", "curl"):
         executable = fake_bin / command
         executable.write_text(
             "#!/bin/sh\n"
             f'echo "{command} $*" >> "$DEPLOY_LOG"\n'
             + ("echo 999\n" if command == "stat" else "")
             + ("[ \"$FAILURE\" != lock ] || exit 9\n" if command == "flock" else "")
+            # 🔴 The public check no longer speaks through the caddy container.
+            # `exec -T caddy wget https://localhost/...` asked for a hostname
+            # Caddy has no site for, and disabled certificate verification while
+            # it was there (fix.md F35). It now runs scripts/proxy_check.sh on
+            # the host, so `curl` is the external operation to fake — and the
+            # real script runs.
+            + ("[ \"$FAILURE\" != proxydown ] || exit 7\n"
+               if command == "curl" else "")
             + ('''case "$*" in
   *"config --services")
     # The prod overlay has a caddy service, so the release's proxy checks
@@ -51,7 +59,11 @@ esac
         [SH, str(ROOT / "scripts/deploy_host.sh"), "abc123"],
         cwd=tmp_path,
         env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
-             "DEPLOY_LOG": log.as_posix(), "FAILURE": failure},
+             "DEPLOY_LOG": log.as_posix(), "FAILURE": failure,
+             # The configured public name. Without it the release now refuses
+             # to claim the site is served rather than asking localhost, which
+             # is the whole of fix.md F35.
+             "COMRADE_HOST": "comrade.example.test"},
         capture_output=True, text=True, timeout=30,
     )
     calls = log.read_text().splitlines()
@@ -59,9 +71,11 @@ esac
         assert result.returncode != 0, calls
         if failure == "proxydown":
             # 🔴 This is the case that used to report success. The proxy is
-            # down AFTER activation, which the previous check could not see
-            # because it spoke to the api container's own localhost.
-            assert any("exec -T caddy" in call for call in calls), calls
+            # down AFTER activation, which the api container's own localhost
+            # could not see — and which the caddy-container check could not see
+            # either, because it asked for a hostname with no site (F35).
+            assert any("curl" in call and "comrade.example.test" in call
+                       for call in calls), calls
             return
         assert not any(" up " in call for call in calls), calls
         if failure == "lock":
@@ -81,8 +95,14 @@ esac
     # AFTER it. Neither existed: an ordinary deployment could not parse its
     # Caddyfile, and the release printed "deployed" over the resulting outage.
     validate = next(i for i, call in enumerate(calls) if "validate --config" in call)
-    proxy = next(i for i, call in enumerate(calls) if "exec -T caddy" in call)
+    proxy = next(i for i, call in enumerate(calls) if call.startswith("curl "))
     assert validate < up < proxy, calls
+    # The CONFIGURED hostname, with verification left on. The behaviour over
+    # real TLS lives in tests/test_proxy_check.py; this pins that the release
+    # actually goes through it.
+    assert "comrade.example.test" in calls[proxy], calls[proxy]
+    assert "--resolve" in calls[proxy], calls[proxy]
+    assert "--insecure" not in calls[proxy], calls[proxy]
     assert "git checkout --detach --force abc123" in calls
 
 

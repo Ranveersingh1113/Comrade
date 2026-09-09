@@ -140,13 +140,24 @@ def test_the_release_validates_the_proxy_before_activating():
 def test_the_release_checks_through_the_public_path():
     """🔴 The readiness check ran inside the api container against localhost,
     so a dead proxy was invisible to it. The last thing a release does has to
-    be the thing a member does."""
-    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    be the thing a member does.
 
-    assert "exec -T caddy" in script, (
+    🔴 UPDATED (fix.md F35). This used to assert `exec -T caddy`, which is how
+    that check was first written — and it asked the caddy container for
+    `https://localhost/api/health`. Caddy serves a NAMED site, so localhost
+    matched nothing and a healthy deployment was reported broken, while
+    `--no-check-certificate` hid every real TLS failure. The check now runs
+    scripts/proxy_check.sh against the configured hostname; the claim here is
+    unchanged, only the mechanism it names.
+    """
+    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in script.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+    assert "proxy_check.sh" in code, (
         "nothing in the release speaks to the deployment through its proxy"
     )
-    assert script.index("exec -T caddy") > script.index("$COMPOSE up -d")
+    assert code.index("proxy_check.sh") > code.index("$COMPOSE up -d")
 
 
 def test_the_production_compose_mounts_the_fragment_directory():

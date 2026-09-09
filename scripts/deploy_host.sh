@@ -132,17 +132,26 @@ fi
 # configuration and exited left the site unreachable while this script printed
 # "deployed". Skipped when there is no caddy service — the base compose file
 # publishes the API directly and there is no second hop to check.
+#
+# 🔴 (fix.md F35) The replacement for that asked caddy for
+# `https://localhost/api/health` with `--no-check-certificate`. Caddy's site is
+# `{$COMRADE_HOST}`, matched on Host and SNI, so `localhost` matched no site and
+# a HEALTHY deployment failed this gate — while the disabled certificate check
+# meant a genuinely broken TLS setup passed it. It also never asked for the
+# frontend, so a build that served nothing reached "deployed".
+#
+# scripts/proxy_check.sh sends the configured hostname with real SNI and real
+# certificate verification, and checks both upstreams. See its header for what
+# it deliberately does not prove.
 if $COMPOSE config --services | grep -qx caddy; then
-  for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-    if $COMPOSE exec -T caddy wget -q -O /dev/null --no-check-certificate \
-      "https://localhost/api/health" 2>/dev/null; then
-      echo "deployed $COMMIT"
-      exit 0
-    fi
-    sleep 5
-  done
-  echo "the API is ready but the public proxy is not serving it" >&2
-  exit 1
+  if [ -z "${COMRADE_HOST:-}" ]; then
+    echo "COMRADE_HOST is unset, so the public site cannot be checked" >&2
+    exit 1
+  fi
+  if ! sh "$(dirname "$0")/proxy_check.sh" "$COMRADE_HOST"; then
+    echo "the API is ready but the public proxy is not serving it" >&2
+    exit 1
+  fi
 fi
 
 echo "deployed $COMMIT"

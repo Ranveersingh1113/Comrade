@@ -92,6 +92,11 @@ def drill(tmp_path_factory):
 
     url = settings.comrade_db_url_admin.rsplit("/", 1)[0] + "/" + DRILL_DB
     try:
+        # 🔴 (fix.md F36) PREPARED first. The restore now runs under
+        # ON_ERROR_STOP, and every new database arrives with a `public` schema
+        # the dump also creates — so the precondition is explicit rather than
+        # an error class the restore was told to ignore.
+        backup.prepare_target(url)
         restore_seconds = backup.restore(artifacts, url, globals_too=False)
         yield artifacts, url, restore_seconds
     finally:

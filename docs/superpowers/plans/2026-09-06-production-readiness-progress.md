@@ -3131,12 +3131,26 @@ Mutation-checked both ways: reverting the F50 rule fails the isolated legacy
 test, so moving it off the shared database did not cost it its subject; pointing
 the upgrade helper back at the configured database fails both isolation guards.
 
-**What was actually lost here: nothing.** The old fixture's `finally` restored
-the schema on every run, and this database held no rows with settlement metadata
-— `select count(*) where usage_owner is not null` returns 0, and `agent_runs`
-has one row. The mechanism was exactly as described and would have destroyed
-values on a database that had them; on this machine it destroyed none. Both are
-worth saying, and neither excuses the other.
+🔴 **RETRACTED, by the ninth review, and it is the same error a fourth time.**
+What stood here was: "What was actually lost here: nothing … on this machine it
+destroyed none", supported by `select count(*) where usage_owner is not null`
+returning 0 and `agent_runs` holding one row.
+
+Those numbers were read AFTER the destructive runs. A database that lost values
+and a database that never had them produce exactly that reading. It is a
+post-hoc measurement offered as an answer to a pre-hoc question — which is
+precisely the pattern named three paragraphs below, committed in the same breath
+as naming it.
+
+Establishing it would need a snapshot from before the first destructive run. I
+looked: the retained `pg_dump` artifacts under `pytest-of-ricky` all date from
+21:17 onward, and the fixture first ran around 20:46. **No such snapshot exists,
+so whether earlier runs destroyed values here cannot be established either way.**
+
+What IS supported: the schema was intact each time (the `finally` re-applied
+both migrations), and the mechanism would destroy values on any database that
+had them. What is not supported is any claim about what this database held at
+the moment those runs happened.
 
 ### The gate
 
@@ -3178,9 +3192,17 @@ easy to observe and treated it as the property that mattered.
   * F49 → terminal-and-unleased observed; "the record is complete" assumed.
   * F50 → a NULL column observed; "nothing ever executed" assumed.
   * F51 → the schema restored observed; "the database is unharmed" assumed.
+  * and in the paragraph that reported F51 fixed: an empty count observed
+    afterwards; "nothing was destroyed" assumed. Retracted above.
 
 The fix each time was to find evidence that predates the question being asked —
-`attempts`, a value rather than a definition, a database nothing else uses.
+`attempts`, a value rather than a definition, a database nothing else uses. The
+fourth one has no such evidence available, so the honest answer is that it is
+unknown rather than that it is nothing.
+
+Writing the pattern down did not stop me repeating it four paragraphs later.
+What has actually caught it every time is someone re-deriving the claim from the
+artifact instead of from my account of the artifact.
 
 ---
 

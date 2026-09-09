@@ -54,6 +54,11 @@ COPY pipeline/ pipeline/
 COPY server/ server/
 COPY shared/ shared/
 COPY supabase/migrations/ supabase/migrations/
+# 🔴 The operational tooling, because it is operated HERE. scripts/backup.py is
+# what docs/deployment.md's "rehearse restoration" means, and the image had
+# neither pg_dump nor the script — so the only place the documented procedure
+# could run was a developer's laptop, against a developer's database.
+COPY scripts/ scripts/
 RUN uv sync --frozen --no-dev
 
 # The same uid the sandbox runs as (agent/sandbox.SANDBOX_UID). Files a

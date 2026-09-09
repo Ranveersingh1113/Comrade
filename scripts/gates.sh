@@ -150,6 +150,19 @@ if [ "$AGENT_EVAL" -eq 1 ]; then
   step "agent eval (deterministic scorer tests)"
   uv run pytest tests/test_team_scenario_scoring.py -q
 
+  # 🔴 (fix.md F52) Does it ANSWER? The browser journey accepts an AI message
+  # OR an error note, deliberately — the model returns nothing often enough
+  # that requiring a reply made it flaky, and "the member is told something
+  # either way" is the property that journey guards. It means the default gate
+  # can be green with the product silent, which is what the review found: a
+  # passing journey in which the ordinary question "What tasks are open right
+  # now?" was answered three times with nothing.
+  #
+  # These make real model calls and assert on facts only the team's own state
+  # can supply, so they belong in this lane rather than the default one.
+  step "agent eval (does it answer? — live judge prompts)"
+  uv run pytest tests/test_agent_usefulness_live.py -q -m live
+
   api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
   case "$api_health" in
     *'"database":"ok"'*) ;;

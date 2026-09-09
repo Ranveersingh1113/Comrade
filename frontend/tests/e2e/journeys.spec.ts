@@ -145,6 +145,17 @@ test.describe.serial('Comrade journeys', () => {
     // stopped" — and which one the member gets depends on whether the model
     // called a tool before going quiet. Matching one sentence made this assert
     // on model behaviour again, the exact thing the paragraph above rejects.
+    // 🔴 (fix.md F52) AND THIS IS NOT AGENT-USEFULNESS COVERAGE. Everything
+    // above is right about why: requiring a reply here tests the model. But a
+    // review found this journey passing on a run where the ordinary question
+    // was answered three times with nothing, and nothing anywhere else gated
+    // the primary outcome — so a release could be green with the product
+    // silent.
+    //
+    // It is gated now, where real model calls belong: tests/
+    // test_agent_usefulness_live.py, run by `scripts/gates.sh --with-agent-eval`.
+    // Those assert on facts only the team's state can supply. This assertion
+    // stays exactly as it is, as the error-feedback coverage it always was.
     const answered = page.locator('[data-sender="ai"]').last();
     const explained = page.locator('[data-agent-note]');
     await expect(answered.or(explained)).toBeVisible({ timeout: 30000 });

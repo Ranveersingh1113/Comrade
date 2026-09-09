@@ -416,3 +416,98 @@ def test_a_resumed_turn_adds_to_what_the_earlier_segments_spent(
         "the resumed segment replaced the earlier ones instead of adding to them"
     )
 
+# ---------------------------------------------------------------------------
+# F43 reopened — settlement belongs to whoever finished the run
+# ---------------------------------------------------------------------------
+
+def test_a_stale_worker_cannot_settle_after_the_replacement_finishes(run):
+    """🔴 THE DEFECT (fix.md F43, reopened). My terminal-status fence blocks a
+    stale worker while the replacement is RUNNING, and stops the moment it
+    finishes.
+
+    The interleaving: a replacement takes the lease, completes the run and
+    commits 1,200 tokens. The stale worker then walks its own exit path — its
+    `finish_run` is refused on the worker fence, `_finish` catches that
+    LookupError, and it settles its LOCAL total of 50 anyway. The run is
+    terminal by then, so my fence lets it through. The replacement's own
+    settlement is skipped because `usage_finalized_at` is now set, and the
+    bucket permanently records 50 for a turn that cost 1,200 — releasing
+    budget the team actually spent.
+
+    Terminal status alone cannot say whose totals are authoritative.
+    """
+    conn = _admin()
+    try:
+        # The replacement holds the lease and finishes the work.
+        conn.execute("update public.agent_runs set worker_id='replacement'"
+                     " where id=%s", (run,))
+    finally:
+        conn.close()
+    finish_run(TEAM_A, run, "done", input_tokens=1_000, output_tokens=200,
+               worker_id="replacement")
+
+    # The stale worker's exit path, with its own much smaller local totals.
+    finalize_usage(TEAM_A, run, 50, worker_id="stale")
+
+    assert _tokens() == CHUNK, (
+        "a stale worker settled a run it did not finish, releasing budget the"
+        " replacement actually spent"
+    )
+
+    # And the real owner can still settle, with the truth.
+    finalize_usage(TEAM_A, run, 1_200, worker_id="replacement")
+    assert _tokens() == 1_200
+
+
+def test_the_worker_that_finished_the_run_settles_it(run):
+    """The ordinary success path has to keep working: the worker that owns the
+    run is the one whose numbers count."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id='mine'"
+                     " where id=%s", (run,))
+    finally:
+        conn.close()
+    finish_run(TEAM_A, run, "done", input_tokens=900, output_tokens=100,
+               worker_id="mine")
+
+    finalize_usage(TEAM_A, run, 1_000, worker_id="mine")
+
+    assert _tokens() == 1_000
+
+
+def test_a_cancelled_run_is_still_settled_by_the_worker_that_ran_it(run):
+    """The case the LookupError branch exists for, and it must survive the
+    fence. `cancel_run` sets the status AND nulls `worker_id`, so the worker
+    that was executing has no id to match — it is nonetheless the only thing
+    that knows what the turn actually spent."""
+    conn = _admin()
+    try:
+        conn.execute(
+            "update public.agent_runs set status='cancelled', worker_id=null,"
+            " finished_at=now() where id=%s", (run,))
+    finally:
+        conn.close()
+
+    finalize_usage(TEAM_A, run, 800, worker_id="the-worker-that-ran-it")
+
+    assert _tokens() == 800, (
+        "a cancelled turn's real cost was refused, so the estimate stays on"
+        " the bucket for the rest of the hour"
+    )
+
+
+def test_settlement_without_a_worker_id_still_works(run):
+    """The server cancels a QUEUED run and settles zero with no worker in
+    play. That caller has no id to offer and must not be fenced out."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set status='cancelled',"
+                     " worker_id=null, finished_at=now() where id=%s", (run,))
+    finally:
+        conn.close()
+
+    finalize_usage(TEAM_A, run, 0)
+
+    assert _tokens() == 0
+

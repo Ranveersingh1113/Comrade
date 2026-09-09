@@ -112,7 +112,10 @@ def release_turn(team_id: str, reservation: int) -> None:
         )
 
 
-def finalize_usage(team_id: str, run_id: str, actual_tokens: int) -> None:
+def finalize_usage(
+    team_id: str, run_id: str, actual_tokens: int,
+    worker_id: str | None = None,
+) -> None:
     """Replace this run's estimate with what it really cost. Exactly once.
 
     Idempotent by the `usage_finalized_at is null` guard, not by hoping the
@@ -140,11 +143,27 @@ def finalize_usage(team_id: str, run_id: str, actual_tokens: int) -> None:
             # settle, whoever is asking.
             "   and status not in ('queued','running','waiting_for_permission',"
             "                      'waiting_for_user')"
+            # 🔴 (fix.md F43, reopened.) AND IT HAS TO BE OURS. The terminal
+            # check above blocks a stale worker only while the replacement is
+            # still running; the moment the replacement FINISHES, the stale
+            # worker's exit path finds a terminal run and settles its own
+            # local totals. Measured shape: replacement commits 1,200 tokens,
+            # stale worker's fenced `finish_run` is refused, `_finish` catches
+            # that and settles 50 anyway, and the replacement's settlement is
+            # then skipped because usage_finalized_at is set. The bucket keeps
+            # 50 for a turn that cost 1,200 and releases budget really spent.
+            #
+            # `worker_id is null` is the CANCELLATION case and is deliberate:
+            # `cancel_run` nulls it, and the worker that was executing is the
+            # only thing that knows what the turn actually spent. A caller
+            # with no id of its own (the server settling a queued run at zero)
+            # passes null and is likewise not fenced out.
+            "   and (%s::text is null or worker_id is null or worker_id = %s)"
             " returning coalesce(tokens_reserved, 0),"
             #  The hour this run's claims were charged to (fix.md F44), not
             #  whatever hour it happens to be when it finishes.
             "           coalesce(usage_bucket, date_trunc('hour', created_at))",
-            (run_id, team_id),
+            (run_id, team_id, worker_id, worker_id),
         ).fetchone()
         if claimed is None:
             return

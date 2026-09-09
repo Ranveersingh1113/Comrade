@@ -100,7 +100,11 @@ def _finish(
     # paid for the prompt it was handed — and a turn that cost less than its
     # estimate must give the balance back or a team slowly loses budget it
     # never spent. finalize_usage is idempotent; this runs on every exit.
-    finalize_usage(team_id, run_id, used_input + used_output)
+    # WITH OUR IDENTITY. A worker that lost its lease must not settle a run a
+    # replacement finished — `finish_run` above already refused it, and
+    # settling anyway is how the stale total became the durable one
+    # (fix.md F43).
+    finalize_usage(team_id, run_id, used_input + used_output, worker_id)
 
 
 def _over_budget(team_id: str, run_id: str | None, spent: int) -> int | None:

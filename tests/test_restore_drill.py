@@ -27,6 +27,8 @@ from pathlib import Path
 import psycopg
 import pytest
 
+ROOT = Path(__file__).parents[1]
+
 from scripts import backup
 from shared.config import settings
 from tests._seed import A1, A2, B1, TEAM_A, TEAM_B, cleanup, seed
@@ -145,6 +147,34 @@ def test_the_backup_says_it_carries_secrets(drill):
 
 
 # ---------------------------------------------------------------------------
+def test_the_applied_migration_ledger_comes_back(drill):
+    """🔴 (fix.md F36 follow-up) Without this the restored database cannot say
+    which migrations it has. `server/app.py`'s readiness check and
+    `shared/migrations.py` both read `supabase_migrations.schema_migrations`,
+    so a target missing it is one that either fails readiness or re-applies
+    every migration over objects that are already there."""
+    _artifacts, url, _seconds = drill
+    conn = psycopg.connect(url)
+    conn.autocommit = True
+    try:
+        restored = {
+            row[0] for row in conn.execute(
+                "select version from supabase_migrations.schema_migrations"
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+
+    on_disk = {
+        path.stem.partition("_")[0]
+        for path in (ROOT / "supabase" / "migrations").glob("*.sql")
+    }
+
+    assert restored, "the restored database has no migration ledger at all"
+    missing = sorted(on_disk - restored)
+    assert not missing, f"the restore lost these applied versions: {missing}"
+
+
 # What survives the restore
 # ---------------------------------------------------------------------------
 

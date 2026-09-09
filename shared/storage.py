@@ -11,6 +11,8 @@ The bytes were already in private Storage. The job only ever needed to say
 WHICH file, and the worker fetches it under its own permission when it is
 ready to parse.
 """
+from urllib.parse import quote
+
 import httpx
 
 from shared.config import settings
@@ -57,6 +59,11 @@ def canonical_path(path: str) -> str | None:
     if not path or path != path.strip():
         return None
     if path.startswith("/") or "\\" in path:
+        return None
+    # NUL and the ASCII control range: not URL metacharacters, but neither a
+    # header nor a path can carry them, and a name containing one is a name
+    # somebody constructed rather than uploaded.
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in path):
         return None
     segments = path.split("/")
     if len(segments) < 2:
@@ -165,9 +172,27 @@ def download_document(
     storage_path = assert_object_is_authentic(
         storage_path, team_id=team_id, document_id=document_id,
     )
+    # 🔴 (fix.md F20, reopened.) THE AUTHORISED NAME AND THE FETCHED NAME MUST
+    # BE THE SAME STRING, and string interpolation does not give you that.
+    #
+    # An object key is not a URL. Supabase's own validator permits `?` in a
+    # key, so a member could upload `<team>/restricted.txt?owned`, file its
+    # document row, and pass every ownership check on that literal name —
+    # while the request that went out asked for `<team>/restricted.txt` with
+    # `owned` as a query string, under the service key. A restricted same-team
+    # object, ingested through the member's own document, and the unique-path
+    # index cannot see it because the two literal names differ.
+    #
+    # Measured with httpx: `?` and `#` split the name, and a pre-encoded `%3F`
+    # is decoded back into a separator. Percent-encoding the key as PATH DATA
+    # closes all three, and `canonical_path` above has already refused the
+    # shapes (`//`, `.`, `..`) where httpx would still normalise.
+    # `safe="/"` keeps the separators and encodes everything else, which is
+    # exactly the distinction: the slashes are structure, the rest is data.
+    key = quote(storage_path.lstrip("/"), safe="/")
     url = (
         f"{settings.supabase_url.rstrip('/')}/storage/v1/object/"
-        f"{DOCUMENT_BUCKET}/{storage_path.lstrip('/')}"
+        f"{DOCUMENT_BUCKET}/{key}"
     )
     headers = {
         "Authorization": f"Bearer {settings.supabase_secret_key}",

@@ -242,3 +242,147 @@ def test_a_path_that_is_not_the_documents_own_is_refused(clean):
 
     with pytest.raises(ObjectNotOwned):
         download_document(theirs, team_id=TEAM_A, document_id=document_id)
+
+# ---------------------------------------------------------------------------
+# The name that was authorised must be the name that is fetched
+# ---------------------------------------------------------------------------
+
+def _requested(monkeypatch, path: str, document_id: str) -> str:
+    """The object key the outgoing request would actually ask Storage for."""
+    from urllib.parse import unquote
+
+    import httpx
+
+    from shared import storage
+
+    seen = {}
+
+    class _Response:
+        headers = {"content-length": "2"}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, *a, **k):
+            yield b"ok"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _stream(method, url, **kwargs):
+        seen["url"] = url
+        return _Response()
+
+    monkeypatch.setattr(httpx, "stream", _stream)
+    storage.download_document(path, team_id=TEAM_A, document_id=document_id)
+    url = httpx.URL(seen["url"])
+    # `url.path`, NOT `raw_path`: httpx's raw_path includes the query, so a
+    # helper built on it reassembles `name?suffix` and reports the decoy as
+    # identical — masking the exact defect this measures. Caught when `?owned`
+    # passed while every other case failed.
+    # The PATH only. Storage resolves an object key from the path; a query
+    # string is not part of the key, it is the thing that made the decoy work.
+    # Reassembling the two here would report `name?suffix` as identical and
+    # mask the defect — which the first version of this helper did.
+    return url.path.split("/documents/", 1)[1]
+
+
+@pytest.mark.parametrize("suffix", [
+    "?owned",        # a real query separator: the fetch drops everything after it
+    "%3Fx",          # pre-encoded, which httpx decodes back into a separator
+    "#fragment",     # the fetch drops this too
+    "%23fragment",
+])
+def test_the_fetched_object_is_the_one_that_was_authorised(
+    clean, monkeypatch, suffix,
+):
+    """🔴 THE DEFECT (fix.md F20, reopened again). My own repair had a hole in
+    exactly the place it was guarding.
+
+    Ownership is now checked properly — uploader against Storage's owner, plus
+    the team prefix. But the authorised name was then INTERPOLATED into a URL
+    string, and a URL is not a path. A member can upload their own decoy named
+    `<team>/restricted.txt?owned`, file its document row, and pass every
+    ownership check on that literal name — while the request that goes out asks
+    for `<team>/restricted.txt` with `owned` as a query string, using the
+    service key. A restricted same-team object, ingested through the member's
+    own document.
+
+    Measured with `httpx.URL`: the path ends at `/restricted.txt` and
+    `query=b'owned'`. Supabase's own key validator permits `?`, so the decoy is
+    a legal object name and the unique-path index cannot see the collision —
+    the two literal names differ.
+
+    `canonical_path` rejected traversal and said nothing about URL
+    metacharacters, which is the same class of mistake: enumerate the
+    dangerous shapes and miss one.
+    """
+    path = f"{TEAM_A}/{uuid.uuid4()}-decoy.txt{suffix}"
+    _object(path, A1)
+    document_id = _document(team=TEAM_A, uploader=A1, path=path)
+
+    requested = _requested(monkeypatch, path, document_id)
+
+    assert requested == path, (
+        f"authorised {path!r} and fetched {requested!r}"
+    )
+
+
+@pytest.mark.parametrize("name", [
+    "plain report.txt",      # a space
+    "100%25.txt",            # a literal percent in the stored key
+    "a+b.txt",
+    "café.txt",              # non-ascii
+])
+def test_ordinary_names_still_reach_their_own_object(clean, monkeypatch, name):
+    """The encoding must not break the names members actually upload. A guard
+    that mangles `report v2.pdf` is a guard that gets removed."""
+    path = f"{TEAM_A}/{uuid.uuid4()}-{name}"
+    _object(path, A1)
+    document_id = _document(team=TEAM_A, uploader=A1, path=path)
+
+    assert _requested(monkeypatch, path, document_id) == path
+
+
+def test_the_request_carries_no_query_of_its_own(clean, monkeypatch):
+    """A query string is how the decoy worked. There is never a legitimate one
+    on this request, so its presence is the signal."""
+    import httpx
+
+    path = f"{TEAM_A}/{uuid.uuid4()}-report.txt?download=1"
+    _object(path, A1)
+    document_id = _document(team=TEAM_A, uploader=A1, path=path)
+
+    seen = {}
+
+    class _Response:
+        headers = {"content-length": "2"}
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, *a, **k):
+            yield b"ok"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _stream(method, url, **kwargs):
+        seen["url"] = httpx.URL(url)
+        return _Response()
+
+    monkeypatch.setattr(httpx, "stream", _stream)
+    from shared import storage
+
+    storage.download_document(path, team_id=TEAM_A, document_id=document_id)
+
+    assert seen["url"].query == b"", (
+        f"the request carried a query: {seen['url'].query!r}"
+    )
+

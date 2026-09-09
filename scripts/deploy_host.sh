@@ -144,11 +144,36 @@ fi
 # certificate verification, and checks both upstreams. See its header for what
 # it deliberately does not prove.
 if $COMPOSE config --services | grep -qx caddy; then
-  if [ -z "${COMRADE_HOST:-}" ]; then
-    echo "COMRADE_HOST is unset, so the public site cannot be checked" >&2
+  # 🔴 (fix.md F35, reopened.) NOT `dirname "$0"`. The workflow pipes this
+  # script into `sh -s <sha>`, so `$0` is `sh` and that expression resolved to
+  # `./proxy_check.sh` — while the committed helper is at
+  # `scripts/proxy_check.sh`. The check I added to stop a healthy deployment
+  # being reported broken would itself have failed every healthy deployment.
+  #
+  # The working tree is the repository this script was just checked out of, and
+  # step 2 above operates on it in the current directory, so that is where the
+  # helper is.
+  if [ ! -f scripts/proxy_check.sh ]; then
+    echo "scripts/proxy_check.sh is missing from the checkout at $(pwd)" >&2
     exit 1
   fi
-  if ! sh "$(dirname "$0")/proxy_check.sh" "$COMRADE_HOST"; then
+
+  # 🔴 And the hostname comes from the DEPLOYMENT's configuration, not from the
+  # shell's environment. Compose interpolates `.env` for the containers; it does
+  # not export anything into the parent SSM shell, so a correctly configured
+  # host reached the unset-host failure above.
+  if [ -z "${COMRADE_HOST:-}" ] && [ -f .env ]; then
+    COMRADE_HOST=$(sed -n 's/^[[:space:]]*COMRADE_HOST[[:space:]]*=[[:space:]]*//p' .env \
+                   | tail -n 1 | tr -d '"'"'"'\r')
+    export COMRADE_HOST
+  fi
+  if [ -z "${COMRADE_HOST:-}" ]; then
+    echo "COMRADE_HOST is set neither in the environment nor in .env, so the" \
+         "public site cannot be checked" >&2
+    exit 1
+  fi
+
+  if ! sh scripts/proxy_check.sh "$COMRADE_HOST"; then
     echo "the API is ready but the public proxy is not serving it" >&2
     exit 1
   fi

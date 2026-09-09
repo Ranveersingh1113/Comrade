@@ -18,6 +18,12 @@ def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     (tmp_path / ".git").mkdir()
+    # The helper, where a real checkout puts it. The release resolves it from
+    # the working tree rather than from `$0`, because the workflow pipes this
+    # script in on stdin and `$0` is then `sh` (fix.md F35).
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "proxy_check.sh",
+                tmp_path / "scripts" / "proxy_check.sh")
     for command in ("git", "docker", "mkdir", "chown", "stat", "flock", "curl"):
         executable = fake_bin / command
         executable.write_text(
@@ -135,3 +141,123 @@ def test_only_the_migration_service_is_given_the_table_owner():
     assert services["migrate"]["profiles"] == ["migrate"], (
         "a migrator that starts with the stack races the code it migrates for"
     )
+
+def _double(path, name, extra=()):
+    lines = ["#!/bin/sh", 'echo "%s $*" >> "$DEPLOY_LOG"' % name, *extra, "exit 0"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+
+
+def _fake_host(tmp_path, *, failure="", env_host=None, dotenv_host=None):
+    """A host with the repository checked out, and every external faked."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (tmp_path / ".git").mkdir()
+    # The committed helper, where a real checkout puts it.
+    (tmp_path / "scripts").mkdir()
+    shutil.copy(ROOT / "scripts" / "proxy_check.sh",
+                tmp_path / "scripts" / "proxy_check.sh")
+    if dotenv_host:
+        (tmp_path / ".env").write_text(
+            "POSTGRES_PASSWORD=x\nCOMRADE_HOST=%s\n" % dotenv_host,
+            encoding="utf-8", newline="\n")
+
+    for name in ("git", "mkdir", "chown", "flock", "sleep"):
+        _double(fake_bin / name, name)
+    _double(fake_bin / "stat", "stat", ["echo 999"])
+    _double(fake_bin / "docker", "docker", ["printf 'api\\nfrontend\\ncaddy\\n'"])
+    _double(fake_bin / "curl", "curl",
+            ['[ "$FAILURE" != proxydown ] || exit 7'])
+
+    env = {
+        **os.environ,
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "DEPLOY_LOG": (tmp_path / "commands.log").as_posix(),
+        "FAILURE": failure,
+    }
+    env.pop("COMRADE_HOST", None)
+    if env_host:
+        env["COMRADE_HOST"] = env_host
+    return env
+
+
+def _as_the_workflow_does(tmp_path, env):
+    """`git show <sha>:scripts/deploy_host.sh | sh -s <sha>` — the real shape.
+
+    The script arrives on STDIN, so `$0` is `sh`. That is the only invocation
+    in which the defect below exists; calling the file by path hides it.
+    """
+    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    # encoding pinned: the script carries 🔴 markers, and piping it as text on
+    # Windows encodes with cp1252, which cannot represent them. A test artifact,
+    # not a product one — the deploy host reads UTF-8 either way.
+    return subprocess.run(
+        [SH, "-s", "abc123"], input=script, cwd=tmp_path, env=env,
+        capture_output=True, text=True, encoding="utf-8", timeout=120,
+    )
+
+
+def test_the_release_runs_the_way_the_workflow_invokes_it(tmp_path):
+    """🔴 THE DEFECT (fix.md F35, reopened). Piped into `sh -s`, `$0` is `sh`,
+    so `$(dirname "$0")/proxy_check.sh` resolved to `./proxy_check.sh` while
+    the committed helper is at `scripts/proxy_check.sh`. The check I added so a
+    healthy deployment would stop being reported broken would itself have
+    failed every healthy deployment."""
+    env = _fake_host(tmp_path, dotenv_host="comrade.example.test")
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "commands.log").read_text().splitlines()
+    assert any("curl" in call and "comrade.example.test" in call
+               for call in calls), calls
+
+
+def test_the_hostname_can_come_from_the_deployments_env_file(tmp_path):
+    """Compose interpolates `.env` for the containers; it exports nothing into
+    the parent SSM shell. A host configured the documented way reached the new
+    unset-host failure."""
+    env = _fake_host(tmp_path, dotenv_host="from-dotenv.test")
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "commands.log").read_text().splitlines()
+    assert any("from-dotenv.test" in call for call in calls), calls
+
+
+def test_an_exported_hostname_still_wins(tmp_path):
+    """An operator running this by hand with the variable set should not have
+    it silently replaced by whatever is in the file."""
+    env = _fake_host(tmp_path, env_host="from-env.test",
+                     dotenv_host="from-dotenv.test")
+
+    _as_the_workflow_does(tmp_path, env)
+
+    calls = (tmp_path / "commands.log").read_text().splitlines()
+    assert any("from-env.test" in call for call in calls), calls
+    assert not any("from-dotenv.test" in call for call in calls), calls
+
+
+def test_a_host_configured_nowhere_is_refused(tmp_path):
+    """Still fails closed: checking `localhost` against a named site is the
+    original defect, so an unknown hostname stops the release rather than
+    checking something meaningless."""
+    env = _fake_host(tmp_path)
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode != 0
+    assert "COMRADE_HOST" in result.stderr
+
+
+def test_a_missing_helper_is_reported_rather_than_skipped(tmp_path):
+    """A checkout without the helper is a broken release, not a passed check."""
+    env = _fake_host(tmp_path, dotenv_host="comrade.example.test")
+    (tmp_path / "scripts" / "proxy_check.sh").unlink()
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode != 0
+    assert "proxy_check.sh" in result.stderr
+

@@ -371,53 +371,66 @@ def test_every_staged_manifest_is_also_cleared(tmp_path):
 
 @needs_image
 def test_both_commonjs_and_esm_resolve_through_the_real_paths(tmp_path):
-    """The acceptance, run for real: one installed fixture, imported both ways,
-    through the argv the product itself builds.
+    """The acceptance, run for real: one installed dependency, imported both
+    ways, through the argv the product itself builds.
 
-    Marked as needing the image because it installs a package and starts
-    containers. The unit checks above are the fast net; this is the evidence,
-    and its absence is what let F46 ship.
+    🔴 NO REGISTRY. The first version of this ran `npm install` against the
+    public npm registry, and it was flaky in exactly the way that matters —
+    it passed alone every time and failed inside the full file, at 104s
+    instead of 13s, because it was waiting on the network. A test that fails
+    for reasons unrelated to its subject teaches people to rerun the suite
+    until it is green, which is worse than not having it.
+
+    What this test is FOR is the mount and the resolution: whether a package
+    sitting in the dependency volume is findable by `require` AND by `import`
+    once the run phase mounts it. The dependency is therefore placed directly,
+    which makes the test deterministic and offline. The install SCRIPT's own
+    behaviour — what it copies, where it installs, what it clears — is covered
+    by the unit tests above, which need no containers at all.
     """
     import json
-    from pathlib import Path as _Path
 
     from agent.sandbox import _docker_run_argv
-    from pipeline.repo_deps import _install_script, recipe_for
 
     root = tmp_path / "app"
     root.mkdir()
-    (root / "package.json").write_text(json.dumps({
-        "name": "probe", "version": "1.0.0", "private": True,
-        "dependencies": {"leftpad": "0.0.1"},
-    }), encoding="utf-8")
     (root / "probe.cjs").write_text(
         "console.log('CJS:', typeof require('leftpad'));\n", encoding="utf-8")
     (root / "probe.mjs").write_text(
         "import leftpad from 'leftpad';\n"
         "console.log('ESM:', typeof leftpad);\n", encoding="utf-8")
 
+    # The package, as an install would leave it in the volume. `exports` is
+    # what an ESM import actually consults, and `main` is what require reads.
+    staged = tmp_path / "node_modules" / "leftpad"
+    staged.mkdir(parents=True)
+    (staged / "package.json").write_text(json.dumps({
+        "name": "leftpad", "version": "0.0.1",
+        "main": "./index.cjs", "exports": {".": {
+            "require": "./index.cjs", "import": "./index.mjs",
+        }},
+    }), encoding="utf-8")
+    (staged / "index.cjs").write_text(
+        "module.exports = function leftpad() {};\n", encoding="utf-8")
+    (staged / "index.mjs").write_text(
+        "export default function leftpad() {}\n", encoding="utf-8")
+
     volume = f"comrade-test-{uuid.uuid4().hex[:10]}"
     try:
-        # A lockfile, so the frozen recipe is the one under test.
-        subprocess.run(
-            ["docker", "run", "--rm", "-v", f"{root}:/out", "-w", "/out",
-             "--user", "0:0", settings.comrade_sandbox_image, "sh", "-c",
-             "export HOME=/tmp; npm install --package-lock-only"
-             " --no-audit --no-fund"],
-            capture_output=True, timeout=300, check=True,
+        # Copied into the volume with the same layout `install()` produces,
+        # including the empty-directory guarantee a Python-only project relies
+        # on (fix.md F46).
+        seeded = subprocess.run(
+            ["docker", "run", "--rm", "--user", "0:0",
+             "-v", f"{tmp_path / 'node_modules'}:/staged:ro",
+             "-v", f"{volume}:{DEPS_MOUNT}",
+             settings.comrade_sandbox_image, "sh", "-c",
+             f"mkdir -p {DEPS_MOUNT}/node_modules"
+             f" && cp -r /staged/. {DEPS_MOUNT}/node_modules/"
+             f" && chmod -R a+rX {DEPS_MOUNT}"],
+            capture_output=True, text=True, timeout=300,
         )
-        recipe = recipe_for(root)
-        assert recipe is not None and recipe.name == "package-lock.json"
-
-        installed = subprocess.run(
-            ["docker", "run", "--rm", "--user", "0:0", "--read-only",
-             "--tmpfs", "/tmp:size=1024m",
-             "-v", f"{root}:{MOUNT}:ro", "-v", f"{volume}:{DEPS_MOUNT}",
-             "-w", MOUNT, settings.comrade_sandbox_image,
-             "sh", "-c", _install_script(recipe, "probe-digest")],
-            capture_output=True, text=True, timeout=600,
-        )
-        assert installed.returncode == 0, installed.stderr[-500:]
+        assert seeded.returncode == 0, seeded.stderr[-400:]
 
         ran = subprocess.run(
             _docker_run_argv(
@@ -435,3 +448,84 @@ def test_both_commonjs_and_esm_resolve_through_the_real_paths(tmp_path):
     finally:
         subprocess.run(["docker", "volume", "rm", "-f", volume],
                        capture_output=True, timeout=120)
+
+
+@pytest.mark.parametrize("name", [
+    ".npmrc", "npm-shrinkwrap.json", "pnpm-workspace.yaml",
+])
+def test_adding_a_staged_input_changes_the_environment_key(tmp_path, name):
+    """🔴 THE DEFECT (fix.md F48, reopened). Clearing the staged manifests was
+    the right repair and it is unreachable.
+
+    `_install_script` exits at the `.manifest` comparison when the digest
+    matches, BEFORE any of the cleanup runs. The key hashed package.json and
+    the lockfiles and nothing else — so adding or removing `.npmrc`,
+    `npm-shrinkwrap.json` or `pnpm-workspace.yaml` left the digest identical,
+    the install reported "already current", and the stale copy in /deps kept
+    applying. `.npmrc` sets the REGISTRY: a repository changing where its
+    packages come from, with nothing noticing.
+
+    The recipe-version bump fixed one upgrade. It does nothing for the next
+    edit.
+    """
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion":3}',
+                                                encoding="utf-8")
+    before = environment_key(tmp_path, "package-lock.json")
+
+    (tmp_path / name).write_text("registry=https://example.test\n",
+                                 encoding="utf-8")
+
+    assert environment_key(tmp_path, "package-lock.json") != before
+
+
+@pytest.mark.parametrize("name", [
+    ".npmrc", "npm-shrinkwrap.json", "pnpm-workspace.yaml",
+])
+def test_removing_a_staged_input_changes_the_environment_key(tmp_path, name):
+    """Removal is the direction that matters most: the staged copy outlives the
+    repository's, so a deleted file goes on applying until something rebuilds."""
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion":3}',
+                                                encoding="utf-8")
+    (tmp_path / name).write_text("registry=https://example.test\n",
+                                 encoding="utf-8")
+    before = environment_key(tmp_path, "package-lock.json")
+
+    (tmp_path / name).unlink()
+
+    assert environment_key(tmp_path, "package-lock.json") != before
+
+
+@pytest.mark.parametrize("name", [
+    ".npmrc", "npm-shrinkwrap.json", "pnpm-workspace.yaml",
+])
+def test_editing_a_staged_input_changes_the_environment_key(tmp_path, name):
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text('{"lockfileVersion":3}',
+                                                encoding="utf-8")
+    (tmp_path / name).write_text("registry=https://one.test\n", encoding="utf-8")
+    before = environment_key(tmp_path, "package-lock.json")
+
+    (tmp_path / name).write_text("registry=https://two.test\n", encoding="utf-8")
+
+    assert environment_key(tmp_path, "package-lock.json") != before
+
+
+def test_the_hashed_inputs_are_the_staged_inputs(tmp_path):
+    """One list, not two. A file that is copied into the volume but not hashed
+    is a file that can go stale — which is the defect — and the two lists
+    drifting apart is how it happened."""
+    (tmp_path / "package.json").write_text('{"name":"a"}', encoding="utf-8")
+    base = environment_key(tmp_path, "package.json")
+
+    for name in NODE_MANIFESTS:
+        if name == "package.json":
+            continue
+        target = tmp_path / name
+        target.write_text("x\n", encoding="utf-8")
+        assert environment_key(tmp_path, "package.json") != base, (
+            f"{name} is staged into the volume but not hashed into the key"
+        )
+        target.unlink()
+

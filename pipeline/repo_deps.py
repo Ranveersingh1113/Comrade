@@ -284,13 +284,26 @@ def environment_key(root: Path, manifest: str) -> str:
             parts.append(f"lock={lock}:{digest}")
     if manifest == "pyproject.toml":
         parts.append(f"commit={_head_sha(root) or 'unknown'}")
-    # `npm ci` validates the lockfile against package.json and REFUSES when
-    # they disagree, so a package.json that moved without its lock is a
-    # different environment — a failing one, which the key has to notice or
-    # the volume is handed back as current forever.
-    if (root / "package.json").is_file():
-        digest = hashlib.sha256((root / "package.json").read_bytes()).hexdigest()[:16]
-        parts.append(f"pkg={digest}")
+    # 🔴 (fix.md F48, reopened.) EVERY STAGED NODE INPUT, from NODE_MANIFESTS
+    # itself rather than a second list beside it.
+    #
+    # This hashed `package.json` and the lockfiles and nothing else, so adding,
+    # editing or removing `.npmrc`, `npm-shrinkwrap.json` or
+    # `pnpm-workspace.yaml` left the digest identical. `_install_script` exits
+    # at the `.manifest` comparison when the digest matches — BEFORE the
+    # cleanup that clears stale staged copies — so the stale file went on
+    # applying. `.npmrc` sets the REGISTRY: that is a repository changing where
+    # its packages come from, and nothing noticing.
+    #
+    # One list, because two lists is how this happened: a file staged into the
+    # volume but absent from the key is a file that can go stale. `npm ci` also
+    # refuses when package.json and its lock disagree, so the key has to see
+    # both or a failing environment is handed back as current.
+    for name in NODE_MANIFESTS:
+        candidate = root / name
+        if candidate.is_file():
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()[:16]
+            parts.append(f"node={name}:{digest}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
 
 

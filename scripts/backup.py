@@ -74,10 +74,18 @@ DOCKER_DB_CONTAINER = os.environ.get("COMRADE_DB_CONTAINER", "supabase_db_Comrad
 #:              without it cannot even create them;
 #:   * storage — the object metadata AND the policies T24/F18/F20 put on it,
 #:              which are part of the authorization model rather than
-#:              Supabase's.
+#:              Supabase's;
+#:   * supabase_migrations — the applied-version ledger, which readiness and
+#:              the migration runner both read.
 #: `realtime`, `graphql`, `extensions` and the rest belong to the platform and
 #: come back when a cluster is provisioned.
-BACKUP_SCHEMAS = ("public", "auth", "storage")
+#: 🔴 (fix.md F36 follow-up) `supabase_migrations` is in this list because
+#: narrowing the dump dropped it, and with it every applied-version record.
+#: On a restored target `shared/migrations.py` then either fails reading the
+#: missing relation or re-applies every migration against objects that are
+#: already there, and `/ready` cannot confirm the schema at all. A clean psql
+#: exit is not a working recovered service.
+BACKUP_SCHEMAS = ("public", "auth", "storage", "supabase_migrations")
 
 #: Dropped from the dump, by name, because only Supabase's own admin roles may
 #: execute them.
@@ -121,6 +129,30 @@ def _parts(url: str) -> dict[str, str]:
     }
 
 
+def _publishes(port: str) -> bool:
+    """Does the database container publish Postgres on `port` of this host?
+
+    `docker port <container> 5432` prints one line per binding, e.g.
+    `5432/tcp -> 0.0.0.0:54322`. The ADDRESS varies by host and IP family, so
+    only the port is compared — matching the whole string would refuse a
+    legitimate mapping on somebody else's machine.
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            ["docker", "port", DOCKER_DB_CONTAINER, "5432"],
+            capture_output=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if done.returncode != 0:
+        return False
+    for line in done.stdout.decode("utf-8", "replace").splitlines():
+        _, _, endpoint = line.rpartition("->")
+        if endpoint.strip().rsplit(":", 1)[-1] == str(port):
+            return True
+    return False
+
+
 def _run(tool: str, args: list[str], url: str, *, stdin: bytes | None = None) -> bytes:
     """Run a Postgres client tool, locally if it exists and in the database
     container if it does not."""
@@ -158,6 +190,23 @@ def _run(tool: str, args: list[str], url: str, *, stdin: bytes | None = None) ->
             f" host — refusing to run it against the local database container"
             f" instead. Install the PostgreSQL client binaries to reach"
             f" {p['host']}:{p['port']}."
+        )
+    # 🔴 (fix.md F37, reopened.) LOOPBACK IS NOT AN IDENTITY. Refusing remote
+    # hosts left every local PORT still rewritten to 5432 inside the container
+    # — and `localhost:6543` is a different database, or an SSH/SSM tunnel to a
+    # production one. If the credentials and database name happen to match, a
+    # RESTORE runs against the wrong server and reports success.
+    #
+    # The container's own publication is the only thing that makes the
+    # translation true: if it publishes 5432 on the requested port, the server
+    # the url names IS the server inside. Anything else, including a container
+    # that cannot be asked, is an unverified mapping and is refused.
+    if not _publishes(p["port"]):
+        raise RuntimeError(
+            f"{tool} is not installed on this host, and {DOCKER_DB_CONTAINER}"
+            f" does not publish port {p['port']} — refusing to run against it"
+            f" instead. localhost:{p['port']} may be another database or a"
+            f" tunnel; loopback does not establish which server is listening."
         )
     inner = ["-h", "127.0.0.1", "-p", "5432", "-U", p["user"]]
     try:

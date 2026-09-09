@@ -69,6 +69,11 @@ def test_a_local_target_may_still_use_the_container(monkeypatch):
         seen.append(argv)
         if argv[0] != "docker":
             raise FileNotFoundError(2, argv[0])
+        if argv[1] == "port":
+            # The container publishes the port the url asks for, which is what
+            # now authorises the translation at all (fix.md F37).
+            return subprocess.CompletedProcess(
+                argv, 0, b"5432/tcp -> 0.0.0.0:54322\n", b"")
         return subprocess.CompletedProcess(argv, 0, b"dump", b"")
 
     monkeypatch.setattr(subprocess, "run", _only_docker)
@@ -88,13 +93,19 @@ def test_the_container_fallback_keeps_the_database_and_user(monkeypatch):
         seen.append(argv)
         if argv[0] != "docker":
             raise FileNotFoundError(2, argv[0])
+        if argv[1] == "port":
+            return subprocess.CompletedProcess(
+                argv, 0, b"5432/tcp -> 0.0.0.0:54322\n", b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     monkeypatch.setattr(subprocess, "run", _only_docker)
     backup._run("pg_dump", ["-d", "comrade"],
                 "postgresql://owner:p@localhost:54322/comrade")
 
-    docker_call = next(argv for argv in seen if argv[0] == "docker")
+    # The EXEC, not the `docker port` that authorises it: there are two docker
+    # calls now, and taking the first one measured the wrong thing.
+    docker_call = next(argv for argv in seen
+                       if argv[0] == "docker" and argv[1] == "exec")
     assert "-U" in docker_call
     assert docker_call[docker_call.index("-U") + 1] == "owner"
     assert "comrade" in docker_call
@@ -129,6 +140,12 @@ def test_the_dump_carries_only_what_this_product_owns(monkeypatch, tmp_path):
     assert "--schema=auth" in dump, "every policy in public calls auth.uid()"
     assert "--schema=storage" in dump, "T24/F18/F20 put policies there"
     assert not any(a.startswith("--schema=realtime") for a in dump)
+    # 🔴 (fix.md F36 follow-up) The applied-version ledger. Narrowing the dump
+    # dropped it, so a restored target had no record of which migrations had
+    # run: readiness could not confirm the schema, and the runner either failed
+    # on the missing relation or re-applied everything over objects that were
+    # already restored. A clean psql exit is not a working recovered service.
+    assert "--schema=supabase_migrations" in dump
     # Ownership statements name supabase_admin, which the restoring user
     # cannot SET ROLE to.
     assert "--no-owner" in dump
@@ -341,3 +358,101 @@ def test_the_role_passwords_are_not_world_readable(monkeypatch, tmp_path):
     made = backup.create(tmp_path)
 
     assert made.globals_path.stat().st_mode & 0o077 == 0
+
+# ---------------------------------------------------------------------------
+# F37 reopened — loopback is not proof of identity
+# ---------------------------------------------------------------------------
+
+def _fallback(monkeypatch, *, published: str | None = "0.0.0.0:54322"):
+    """No local client binaries, and a container publishing `published`."""
+    seen: list[list[str]] = []
+
+    def _run(argv, **kwargs):
+        seen.append(argv)
+        if argv[0] != "docker":
+            raise FileNotFoundError(2, argv[0])
+        if argv[1] == "port":
+            if published is None:
+                return subprocess.CompletedProcess(argv, 1, b"", b"no such container")
+            return subprocess.CompletedProcess(
+                argv, 0, f"5432/tcp -> {published}\n".encode(), b"")
+        return subprocess.CompletedProcess(argv, 0, b"dump", b"")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return seen
+
+
+def test_another_local_port_is_not_the_selected_container(monkeypatch):
+    """🔴 THE DEFECT (fix.md F37, reopened). Refusing non-local hosts was an
+    improvement and not the fix: EVERY loopback port was still rewritten to
+    5432 inside the container. `localhost:6543` is a different database, or an
+    SSH tunnel to a remote one — and if the credentials and database name
+    happen to match, a RESTORE proceeds against the wrong server. Loopback
+    says nothing about which server is listening."""
+    seen = _fallback(monkeypatch)
+
+    with pytest.raises(RuntimeError) as refused:
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@localhost:6543/postgres")
+
+    assert "6543" in str(refused.value)
+    assert not any(argv[1] == "exec" for argv in seen), (
+        "a request for another local port was executed inside the container"
+    )
+
+
+def test_a_tunnel_on_a_local_port_is_refused_too(monkeypatch):
+    """An SSM or SSH tunnel is the case that makes this dangerous: it looks
+    exactly like localhost and is a production database."""
+    seen = _fallback(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        backup._run("psql", ["-d", "postgres"],
+                    "postgresql://u:p@127.0.0.1:15432/postgres")
+
+    assert not any(argv[1] == "exec" for argv in seen)
+
+
+def test_the_published_endpoint_is_what_authorises_the_translation(monkeypatch):
+    """The supported route stays supported, and now for a stated reason: this
+    port IS the container's, so the server the url names and the server in the
+    container are the same one."""
+    seen = _fallback(monkeypatch, published="0.0.0.0:54322")
+
+    out = backup._run("pg_dump", ["-d", "postgres"],
+                      "postgresql://u:p@127.0.0.1:54322/postgres")
+
+    assert out == b"dump"
+    assert any(argv[1] == "exec" for argv in seen)
+    asked = next(argv for argv in seen if argv[1] == "port")
+    assert backup.DOCKER_DB_CONTAINER in asked, (
+        "the publication of some other container was consulted"
+    )
+
+
+def test_an_unverifiable_mapping_is_refused(monkeypatch):
+    """"Reject unverified mappings." If the container cannot be asked, its
+    endpoint is not established and neither is the target."""
+    seen = _fallback(monkeypatch, published=None)
+
+    with pytest.raises(RuntimeError):
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@127.0.0.1:54322/postgres")
+
+    assert not any(argv[1] == "exec" for argv in seen)
+
+
+@pytest.mark.parametrize("published", [
+    "0.0.0.0:54322", "[::]:54322", "127.0.0.1:54322",
+])
+def test_the_published_port_is_read_however_docker_spells_the_address(
+    monkeypatch, published,
+):
+    """`docker port` prints the bind address as well, and it varies by host and
+    by IP family. Matching the whole string would refuse a legitimate mapping
+    on somebody else's machine."""
+    _fallback(monkeypatch, published=published)
+
+    assert backup._run("pg_dump", ["-d", "postgres"],
+                       "postgresql://u:p@127.0.0.1:54322/postgres") == b"dump"
+

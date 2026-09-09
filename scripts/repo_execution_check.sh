@@ -43,6 +43,31 @@ check() {  # label, expected-substring, actual
   esac
 }
 
+# The dummy database URLs Settings insists on at import, declared once. Up here
+# because `cleanup` needs them too: `shared.workspace` imports config, so without
+# them the volume-name helper died on a pydantic ValidationError, printed nothing,
+# and the cleanup removed nothing while saying it could not work out the name.
+#
+# Dummy on purpose. Nothing below touches a database, which is the design point:
+# nothing of Comrade's is inside the sandbox, so nothing of Comrade's is needed
+# to drive it.
+D=postgresql://u:p@127.0.0.1:5432/none
+SETTINGS_ENV="-e COMRADE_AGENT_DB_URL=$D -e COMRADE_EXECUTOR_DB_URL=$D
+  -e COMRADE_PIPELINE_DB_URL=$D -e COMRADE_CONTROL_DB_URL=$D
+  -e COMRADE_AUTHENTICATOR_DB_URL=$D -e COMRADE_DB_URL_ADMIN=$D
+  -e SUPABASE_URL=http://127.0.0.1 -e SUPABASE_ANON_KEY=x
+  -e SUPABASE_SECRET_KEY=x -e SUPABASE_JWT_SECRET=x"
+
+deps_name() {  # repo full name -> the volume Comrade would use
+  # 🔴 Comrade's OWN function, not a second implementation of the hash. The
+  # naming rule lives in shared.workspace.deps_volume; a copy here is a copy
+  # that can disagree, and this script would then delete nothing — or something
+  # else.
+  docker run --rm $SETTINGS_ENV --entrypoint python "$APP" -c "
+from shared.workspace import deps_volume
+print(deps_volume('$TEAM', '$1'))" 2>/dev/null | tail -1 | tr -d '\r'
+}
+
 cleanup() {
   docker rm -f "$PROXY" >/dev/null 2>&1
   rm -rf "$WS/$TEAM"
@@ -56,9 +81,7 @@ cleanup() {
   # "current", and two checks failed on a run where the product was right.
   # A cleanup that fails quietly looks exactly like one that worked.
   for repo in "$PY_NAME" "$NODE_NAME"; do
-    vol=$(docker run --rm --entrypoint python "$APP" -c "
-from shared.workspace import deps_volume
-print(deps_volume('$TEAM', '$repo'))" 2>/dev/null | tail -1 | tr -d '\r')
+    vol=$(deps_name "$repo")
     case "$vol" in
       comrade-deps-*) docker volume rm -f "$vol" >/dev/null || \
                         echo "    (could not remove $vol)" ;;
@@ -158,11 +181,7 @@ app() {  # run python in the app image, wired the way a worker is
     -e COMRADE_SANDBOX_IMAGE="$SANDBOX" \
     -e COMRADE_SETUP_PROXY_CONTAINER="$PROXY" \
     -e COMRADE_SETUP_PROXY_URL="http://$PROXY:3128" \
-    -e COMRADE_AGENT_DB_URL="$D" -e COMRADE_EXECUTOR_DB_URL="$D" \
-    -e COMRADE_PIPELINE_DB_URL="$D" -e COMRADE_CONTROL_DB_URL="$D" \
-    -e COMRADE_AUTHENTICATOR_DB_URL="$D" -e COMRADE_DB_URL_ADMIN="$D" \
-    -e SUPABASE_URL=http://127.0.0.1 -e SUPABASE_ANON_KEY=x \
-    -e SUPABASE_SECRET_KEY=x -e SUPABASE_JWT_SECRET=x \
+    $SETTINGS_ENV \
     --entrypoint python "$APP" -c "$1" 2>&1 | grep -v onnxruntime
 }
 

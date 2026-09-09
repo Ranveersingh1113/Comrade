@@ -8,6 +8,32 @@
 #     Publishing 8000 as well would leave a plaintext route straight past TLS,
 #     which is the kind of thing nobody notices until it is in a log.
 services:
+  # The only route out of the dependency-install sandbox.
+  #
+  # 🔴 (fix.md F06, hackathon preflight.) `agent/sandbox.py:run_setup` refuses to
+  # run at all unless COMRADE_SETUP_PROXY_URL and COMRADE_SETUP_PROXY_CONTAINER
+  # are both set, because the behaviour it replaced was unrestricted egress for a
+  # phase that executes a repository's own build hooks. Until this service
+  # existed the pilot host had neither variable, so dependency installation was
+  # disabled — which is the correct failure and also means no repository work.
+  #
+  # A COMPOSE SERVICE, not something made by hand on the host: an egress policy
+  # that only exists in one operator's shell history is one the next release
+  # deletes. docker/squid.conf is the policy; docker/registry-proxy.Dockerfile
+  # checks it parses at build time.
+  #
+  # NO PUBLISHED PORTS. It is reachable on Docker networks only — the project
+  # network, which gives it a route out, and each per-run `--internal` network
+  # that agent/sandbox.py attaches it to, which has no other route at all.
+  registry-proxy:
+    build:
+      context: .
+      dockerfile: docker/registry-proxy.Dockerfile
+    # Named, because COMRADE_SETUP_PROXY_CONTAINER has to say what to attach and
+    # a generated `comrade-registry-proxy-1` moves with the project name.
+    container_name: comrade-registry-proxy
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

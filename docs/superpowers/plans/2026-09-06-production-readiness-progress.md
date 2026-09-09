@@ -3474,6 +3474,224 @@ real; it was also the only thing I checked.
 The live deployment is still the September 6 run at `5c73fd0`. Nothing in the
 last seven rounds has been deployed.
 
+
+## Deployment — 2026-09-10, `5c73fd0` → the candidate
+
+The seven prerequisites, each verified on the pilot host `i-0e5e97d751ffbd262`
+rather than locally. Live before this was the September 6 run at `5c73fd0`.
+
+### 1. The registry egress proxy · `cda58fc`
+
+`agent/sandbox.py:run_setup` refuses to run unless COMRADE_SETUP_PROXY_URL and
+COMRADE_SETUP_PROXY_CONTAINER are both set. The host had neither, so dependency
+installation was disabled — the correct failure, and also no repository work.
+
+squid, pinned, built from `docker/registry-proxy.Dockerfile`, configured by
+`docker/squid.conf`, run as a Compose service with no published ports. Allowlist:
+`pypi.org`, `.pythonhosted.org`, `.npmjs.org` — exactly what the recipes in
+`pipeline/repo_deps.py` need, including `pip install uv "poetry>=2"`. Default deny
+is the last rule; CONNECT is confined to 443; squid's own manager is refused.
+
+Verified ON THE HOST by `scripts/proxy_egress_check.sh`, with squid's own log as
+the evidence rather than my summary of it:
+
+```
+TCP_TUNNEL/200  CONNECT pypi.org:443
+TCP_TUNNEL/200  CONNECT files.pythonhosted.org:443
+TCP_TUNNEL/200  CONNECT registry.npmjs.org:443
+TCP_DENIED/403  GET  http://169.254.169.254/latest/meta-data/   <- the real one
+TCP_DENIED/403  GET  http://metadata.google.internal/
+TCP_DENIED/403  CONNECT example.com:443
+TCP_DENIED/403  GET  http://example.com/
+TCP_DENIED/403  GET  http://pypi.org.evil.test/
+TCP_DENIED/403  GET  http://<a neighbour container>:8080/
+TCP_DENIED/403  GET  http://<proxy>:3128/squid-internal-mgr/info
+TCP_DENIED/403  CONNECT pypi.org:8443
+```
+
+…and with no proxy configured the internal network has no route out at all.
+
+🔴 **The first version of that check proved nothing.** Squid was exiting with
+`FATAL: failed to open /var/run/squid.pid: (13) Permission denied`, so the proxy
+was dead — and every deny case "passed" on a DNS failure while every allow case
+failed for the same reason. The script now refuses to report anything until the
+proxy is accepting connections, requires a denial to be squid's own 403, and
+proves the client can open a TCP connection to it first.
+
+What it honestly does not do: it matches the hostname a client asks for, so for
+HTTPS the policy is which host a tunnel may open to, not what travels inside it.
+
+### 2. Docker access and the sandbox toolchain
+
+```
+/var/run/docker.sock            root:docker gid=113   (compose default was 999)
+candidate worker image, gid 113 client=29.8.0 server=29.1.3   both roles
+candidate worker image, gid 999 permission denied
+the RUNNING old workers         no docker CLI in this image
+comrade-sandbox                 python 3.12.14  node v22.23.2  npm 10.9.8
+                                pnpm 9.15.4  pytest 8.3.4
+```
+
+After deployment, from the real containers rather than the images:
+
+```
+docker exec comrade-agent-worker-1     docker version -> server=29.1.3
+docker exec comrade-pipeline-worker-1  docker version -> server=29.1.3
+```
+
+### 3. F46 dependency volumes
+
+Zero `comrade-deps-*` volumes existed on the host, so there was nothing built by
+the old layout to migrate and nothing to preserve. F46's code fix — the
+`volume-subpath=node_modules` mount — was verified working rather than assumed:
+see the ESM import below.
+
+### 4. Repository work, through Comrade's own code · `scripts/repo_execution_check.sh`
+
+`EXIT=0`, 13 of 13, on the host, driving `pipeline.repo_deps.install` and
+`agent.sandbox.run_contained`:
+
+```
+python install    STATUS installed  3.4s   volume comrade-deps-1192a48cbad748b6
+node install      STATUS installed  1.2s
+venv python       SIX_OK /deps/venv
+the repo's tests  EXIT 0
+Node ESM import   ESM_IMPORT_RESOLVED           <- F46, on the real host
+run phase cannot reach metadata / arbitrary / platform_db / host_gateway
+both installs went through the proxy
+leftover volumes after the run: 0
+```
+
+🔴 **Four of my own mistakes in that script, every one found by running it.**
+`Recipe.name`, not `.manifest` — my getattr defaulted to None and printed
+"RECIPE None" about a recipe that had matched. `install()` returns "installed" or
+"current"; I asserted "ok" and called a successful install a failure.
+`recipe_for` returns the FIRST match, so one tree with both manifests installs
+Python and never touches npm — the Node ESM check was running against a volume
+nothing Node had touched. And the cleanup failed into `/dev/null` because the app
+image prints a warning on import and I took all of stdout as a volume name, so
+the next run found the volumes still there, correctly reported "current", made no
+network request, and failed two checks about a run where the product was right.
+
+### 5. The gates and the live usefulness checks
+
+```
+scripts/gates.sh   GATE EXIT: 0
+  backend    1713 passed, 8 skipped, 21 deselected  (exclusive DB)
+  frontend   229 passed / 34 files; integration 21 passed / 6 files
+  browser journeys   8 passed
+  real GitHub        2 skipped — no credential configured
+
+pytest tests/test_agent_usefulness_live.py -m live   4 passed, ONE ask each
+  task lookup   11.0s   wiki 9.3s   team context 6.8s   consent: card staged
+  empty model calls during that run: 0
+```
+
+### 6. Backup, rollback, and two things that made the backup impossible
+
+Taken from production with Comrade's own tooling and **verified by restoring it**
+into a throwaway server on the host:
+
+```
+globals.sql    9,254 bytes   (role password hashes)
+database.sql 750,442 bytes   40.4s
+sha256 recorded in latest.json
+
+restored ->  comrade roles 5   policies 112   public tables 35
+             migrations 66     teams 2       rls-enabled tables 33
+```
+
+Rollback images tagged `:rollback-5c73fd0` for api, agent-worker,
+pipeline-worker and frontend.
+
+🔴 **The backup tool could not run in production at all** (`ee9a9a0`, `30df774`).
+The app image had no `pg_dump`, so `scripts/backup.py` fell through to its
+container fallback — which F37 makes it correctly refuse, because the database is
+a remote Supabase instance and a local container would be a different server. And
+`scripts/` was not copied into the image either. So `docs/deployment.md`'s
+"rehearse restoration" could only ever run on a developer's laptop against a
+developer's database. Found by trying to take a backup.
+
+🔴 Restoring `globals.sql` into a cluster that already has a `postgres` role
+fails under ON_ERROR_STOP (`role "postgres" already exists`), and the Supabase
+platform roles cannot be granted on a plain server. The five comrade roles come
+back regardless, which is what the policies need — but the documented
+"restore the globals first" step needs a note, and it does not have one yet.
+
+### 7. After deployment
+
+```
+public HTTPS      GET /               200   tls_verify=0
+                  GET /api/health     200   {"status":"ok","database":"ok"}
+                  certificate         Let's Encrypt, CN=13-62-11-26.nip.io,
+                                      valid 2026-09-05 .. 2026-12-04
+                  http://             308 -> https://
+sign-in page      <title>Comrade</title>, #root, /assets/index-*.js 200, 558,868 B
+auth boundary     GET /api/threads/<uuid>/agent-runs  no token    401
+                  same with a bogus token                         401
+                  POST /api/agent/turn no token                   401
+readiness         GET /api/ready 200 — database, roles, migrations, agent_queue,
+                  pipeline_queue, expired_leases, workers, sandbox: all ok
+document ingestion  parsed by the running pipeline worker, status=ready,
+                    the text came through
+agent answers       INTERMITTENT — see below
+teardown            the designated test team removed, rows left: 0
+```
+
+🔴 **NOT a browser sign-in.** Nothing here typed a password or created an account.
+Sign-in is verified as far as the page rendering, its bundle being served, and the
+API refusing unauthenticated calls. A real signed-in session on the deployed host
+is NOT verified by me.
+
+### The one thing that is not right: empty model responses
+
+The deployed stack answers, and not reliably. On the same key, same model, within
+one day:
+
+```
+local, 21:35   4 of 4 judge prompts answered, one ask each, 0 empty calls
+host,  21:42   2 of 3 answered   (54.1s, 39.7s; empties recovered by the retry)
+host,  21:50   1 of 3 answered   (two prompts exhausted all six attempts)
+measured rate  0% .. 45% .. 64-76% of CALLS empty, in different windows
+```
+
+What it is NOT, each ruled out with a measurement:
+
+  * not the key — the container's key is `sha256[:12]=480139766ec2, len 39`,
+    the same one that answered 4/4 locally. My first reading said "different
+    key, len 40"; that was my own shell capturing the `\r` from a CRLF line in
+    `.env`, and the container receives 39 characters with no CR;
+  * not quota — a minimal direct call answered 3/3 while agent turns were failing;
+  * not the tool surface — a bare ADK runner with all 26 tools answered 8/8;
+  * not thread history — a fresh thread answered 10/10;
+  * not tool use — a tool-requiring prompt on a fresh thread answered 5/5;
+  * not the experimental JSON_SCHEMA_FOR_FUNC_DECL path — disabling it made
+    **every** call empty, 36/36, so it is load-bearing;
+  * not request pacing — 8 seconds between turns left the rate unchanged.
+
+`EMPTY_TURN_ATTEMPTS = 6` is the mitigation and it demonstrably works — several
+deployed turns recovered on attempts 2-6. At a 70% per-call rate six attempts
+still leaves roughly one turn in eight silent, and the member gets the error
+notice instead of an answer.
+
+🔴 I cannot fix this in code, and raising the constant again would be treating a
+number I have already recalibrated once. It is an upstream, time-varying
+condition on the configured Gemini key/model, and it is the reason **agent
+usefulness at one ask is not a guarantee this deployment can make right now**,
+even though it held in the 21:35 window.
+
+### What the deployment is, plainly
+
+Structurally deployed and verified: HTTPS, certificate, readiness, the auth
+boundary, document ingestion, dependency installation through an enforced egress
+policy, repository command execution with the sandbox unable to reach the
+metadata endpoint, a platform database port, the host gateway or an arbitrary
+destination, both workers on the daemon, a verified backup and tagged rollback
+images.
+
+Not verified: a browser sign-in on the deployed host, and reliable agent answers
+at one ask under the model's current behaviour.
+
 ---
 
 ## Standing ceilings

@@ -2149,6 +2149,127 @@ unit-tested. 🔴 A01, A02, A07–A12 are untouched; several are acknowledged in
 earlier entries as known limitations and remain so.
 
 
+## Repair review — 2026-09-09, pinned to `c8f03c6`
+
+A second review, of my own committed repairs. Fourteen new findings (F35–F48)
+and F20 reopened. Worked in the order the owner set: F20, F40, F42–F44, then
+F35–F38, then F39, F41, F45–F48. Commits `e3a04d1`, `8ff80c9`, `56c765d`,
+`6fd0848`.
+
+**Nine of the fifteen were in work I had just done.** That is the headline, and
+the pattern inside it is worth more than the count: in almost every case a test
+of mine passed on the broken value.
+
+### The tests that agreed with me
+
+**F45.** F16's own test asserted the replay was `<= 200 and >= KEEP_RECENT`
+on a 300-message thread with no summary. It got 20 — inside both bounds — so
+the assertion was satisfied by exactly the defect. A second test asserted
+`== agent_history_turns` and called it "unchanged behaviour where there is
+nothing to bridge from", which is the defect stated as a requirement. On a
+fresh 59-message thread, messages 1–39 were invisible: F16 closed the gap
+BETWEEN compactions and left the one before the first.
+
+**F46.** I verified F06's node install with `require('leftpad')` and never
+tried `import`. Node's ESM resolver ignores NODE_PATH entirely. Measured in a
+container: `CJS: function`, `ESM: ERR_MODULE_NOT_FOUND`. Running the real thing
+is not enough if you run only one of the two ways users invoke it.
+
+**F20.** The migration I wrote claimed `shared/storage.py` "refuses a path
+outside the reading team's own prefix". It did not — `download_document` took a
+path and nothing else and fetched it with the service secret. A comment
+asserting a guarantee that was never implemented, in the file that claims it:
+the same failure I had just fixed in A04's docstring, committed four days
+apart.
+
+**F38 (my own fix, twice).** The generation name collided on seconds; I moved
+to microseconds and reported it fixed; microseconds collided too, because on
+Windows `datetime.now()` returns the same value for calls milliseconds apart. It
+passed in isolation because the timing happened to differ. A clock is not an
+identity source. The test now freezes the clock so the property is pinned
+rather than left to whether time passed.
+
+### What ON_ERROR_STOP found
+
+**F36** looked like a missing psql flag. Turning it on revealed that this
+backup had NEVER been fully restorable, and ignoring errors is what hid it.
+One error at a time, against a real database: `--clean` DROPs for absent
+schemas (line 30); `SET ROLE supabase_admin` (38); `realtime.list_changes`
+declared `SET log_min_messages`, superuser-only (2614); ALTER DEFAULT
+PRIVILEGES FOR ROLE supabase_auth_admin (11842). Then exit 0, zero errors.
+
+The dump was of the whole Supabase database. It now carries what Comrade owns
+or extends — `public`, `auth` (every policy calls `auth.uid()`), `storage`
+(where T24/F18/F20 put policies) — with `--no-owner`, one named 18-line
+exclusion, and an explicit `prepare_target()`. NOT `--no-acl`: the grants and
+policies ARE the thing being backed up. The drill passes under ON_ERROR_STOP:
+backup 0.8s, restore 2.4s, 128 public policies and 2 storage policies verified
+back.
+
+### The rest, briefly
+
+**F37** — with no host client binaries, `_run` rewrote ANY url to
+`127.0.0.1:5432` inside the local container. For a restore that is not a failed
+operation, it is a successful one against the wrong database.
+
+**F35** — the release asked caddy for `https://localhost/api/health` with
+`--no-check-certificate`. Caddy serves a NAMED site, so a healthy deployment
+was reported broken while a broken TLS setup passed. Now checks the configured
+hostname with real SNI and verification, both upstreams, over real TLS in test.
+
+**F40** — the verification gate opened with `if edit_generation == 0: return
+False`, which counts `repo_edit` calls in this in-memory turn. A resumed turn, a
+change written by a command, an untracked file, and edit→run→edit all proposed
+with no verification record at all.
+
+**F42/F43/F44** — a permission wait reset the run's recorded total; a stop
+during the first model call finalized zero tokens for a response already
+billed; the hour boundary refused a run that had a full unused allowance,
+depending on unrelated traffic.
+
+**F39** — the heartbeat beat from inside the work loop, so a turn longer than
+STALE_SECONDS made readiness report live workers missing.
+
+**F41** — a failed PR correlation logged that "a later attempt" would fix it;
+`execute_consent` sets `executed` before the executor runs, so the retry
+returns `noop` and the mapping is never written.
+
+**F47/F48** — a failed steering send hid a live run's output and STOP button;
+a rebuild kept stale staged manifests so a deleted `.npmrc` kept applying.
+
+### Method notes
+
+Every finding was reproduced before it was fixed and mutation-checked after —
+33 mutations across the batch, each one biting. Two of those checks found my
+own tests proving less than they claimed (F42's seeding and F43's ordering were
+exercised only through helpers, not the turn loop), and both were rewritten to
+drive `stream_turn`.
+
+Three heredoc-escaping mistakes, all the same one: `\n` becoming a literal
+newline inside a Python string. Switched to the Edit tool for anything
+containing escapes.
+
+Two test fixtures of mine leaked into shared state — `worker_heartbeats`
+cleaned before each test and not after, which failed `test_readiness` in a full
+run while passing alone.
+
+**Passing:** 1609 backend, 8 skipped, 17 deselected, 0 failed. 229 frontend
+across 34 files; typecheck clean.
+
+**Ceiling:** 🔴 **F46's fix has a deployment window.** Docker refuses to start a
+container whose `volume-subpath` is absent — measured — so a dependency volume
+built by the old layout fails runs until the next sync rebuilds it.
+RECIPE_VERSION forces the rebuild and the failure is loud rather than silent,
+but it is a window. 🔴 F02 and F17 remain open together: ASCII Box is the agreed
+provider, F17 is the approved next task, and F17's acceptance cannot be met
+from this machine — it needs provider-side evidence of Box execution, and
+fix.md says a locally installed `box.exe` proves nothing about the deployed
+backend. 🔴 A01–A03 and A05–A12 are untouched; A03 needs local DNS/TLS and A05
+a disposable Linux Compose host. 🔴 F06's egress policy is still only
+unit-tested: the end-to-end installs used the real image and the real generated
+script but bypassed the registry proxy.
+
+
 ---
 
 ## Standing ceilings

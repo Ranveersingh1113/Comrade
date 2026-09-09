@@ -10,6 +10,57 @@ ROOT = Path(__file__).parents[1]
 SH = shutil.which("sh") or "C:/Program Files/Git/bin/sh.exe"
 
 
+def _posix(path) -> str:
+    """A Windows path in the form Git Bash searches.
+
+    🔴 THE HARNESS DEFECT (fix.md, fourth review). These tests prepended their
+    double directory to the WINDOWS environment PATH, separated by `;`. Git
+    Bash builds its own POSIX PATH at startup, and whether a `;`-separated
+    Windows entry survives that conversion depends on the host — on one machine
+    the doubles won, on another `/mingw64/bin` came first and `git` resolved to
+    the REAL binary while `flock` resolved to the double.
+
+    Where it lost, the script ran a real `git fetch origin abc123`, failed with
+    "couldn't find remote ref", and never reached the stage under test. Four
+    parameterised failure cases still passed, because they asserted only a
+    nonzero exit and the absence of activation — both of which an unrelated
+    early failure also satisfies.
+
+    So precedence is established INSIDE the launched shell, in its own path
+    syntax, and asserted before the script runs.
+    """
+    text = str(Path(path))
+    if len(text) > 1 and text[1] == ":":
+        return "/" + text[0].lower() + text[2:].replace("\\", "/")
+    return text.replace("\\", "/")
+
+
+def _in_shell(fake_bin, command: str, *, env=None):
+    """Run `command` with the doubles ahead of everything else."""
+    prelude = f'export PATH="{_posix(fake_bin)}:$PATH"\n'
+    return subprocess.run(
+        [SH, "-c", prelude + command], env=env, capture_output=True,
+        text=True, encoding="utf-8", timeout=180,
+    )
+
+
+def _assert_doubles_win(fake_bin, env, *names):
+    """Prove the doubles are what the script will find, before running it.
+
+    A test whose doubles are not in effect is a test of something else, and
+    this says so out loud rather than letting an unrelated early failure look
+    like the expected one.
+    """
+    for name in names:
+        resolved = _in_shell(fake_bin, f"command -v {name}", env=env)
+        assert resolved.returncode == 0, (name, resolved.stderr)
+        first = resolved.stdout.strip().splitlines()[0]
+        assert first.startswith(_posix(fake_bin)), (
+            f"{name} resolves to {first!r}, not the double in"
+            f" {_posix(fake_bin)} — the script would run the real one"
+        )
+
+
 @pytest.mark.parametrize("failure",
                          ["", "build", "migration", "lock",
                           "proxyconfig", "proxydown"])
@@ -61,20 +112,50 @@ esac
     nap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     nap.chmod(0o755)
     log = tmp_path / "commands.log"
+    env = {**os.environ,
+           "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+           "DEPLOY_LOG": log.as_posix(), "FAILURE": failure,
+           # The configured public name. Without it the release refuses to
+           # claim the site is served rather than asking localhost, which is
+           # the whole of fix.md F35.
+           "COMRADE_HOST": "comrade.example.test"}
+    # 🔴 Asserted BEFORE the script runs, and the path put in front INSIDE the
+    # shell. Prepending to the Windows PATH is not enough on every host (see
+    # `_posix`), and where it lost the script ran a real `git fetch origin
+    # abc123`, died there, and every failure case still "passed" on that
+    # unrelated early exit.
+    _assert_doubles_win(fake_bin, env, "git", "docker", "flock", "curl")
     result = subprocess.run(
-        [SH, str(ROOT / "scripts/deploy_host.sh"), "abc123"],
-        cwd=tmp_path,
-        env={**os.environ, "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
-             "DEPLOY_LOG": log.as_posix(), "FAILURE": failure,
-             # The configured public name. Without it the release now refuses
-             # to claim the site is served rather than asking localhost, which
-             # is the whole of fix.md F35.
-             "COMRADE_HOST": "comrade.example.test"},
-        capture_output=True, text=True, timeout=30,
+        [SH, "-c", f'export PATH="{_posix(fake_bin)}:$PATH"\nexec sh "$0" "$@"',
+         str(ROOT / "scripts/deploy_host.sh"), "abc123"],
+        cwd=tmp_path, env=env,
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
     )
     calls = log.read_text().splitlines()
+    # The fetch is the first thing the script does after taking the lock, so
+    # its absence means the run never got past the lock — correct only for the
+    # lock case itself.
+    if failure != "lock":
+        assert any("git fetch" in call for call in calls), (
+            "the release never reached its own fetch, so whatever failed was"
+            f" not the {failure or 'success'} case: {calls}"
+        )
+    # Each failure case names the call that PROVES the script reached that
+    # stage. Without these, an unrelated early exit satisfies "nonzero and no
+    # activation", which is all these used to check — and that is exactly what
+    # happened on a host where the git double did not win.
+    STAGE = {
+        "build": lambda c: any(call.endswith(" build") for call in c),
+        "migration": lambda c: any("-T migrate" in call for call in c),
+        "proxyconfig": lambda c: any("validate --config" in call for call in c),
+        "proxydown": lambda c: any(call.startswith("curl ") for call in c),
+        "lock": lambda c: any(call.startswith("flock ") for call in c),
+    }
     if failure:
         assert result.returncode != 0, calls
+        assert STAGE[failure](calls), (
+            f"the {failure} case exited without reaching its own stage: {calls}"
+        )
         if failure == "proxydown":
             # 🔴 This is the case that used to report success. The proxy is
             # down AFTER activation, which the api container's own localhost
@@ -187,13 +268,20 @@ def _as_the_workflow_does(tmp_path, env):
     The script arrives on STDIN, so `$0` is `sh`. That is the only invocation
     in which the defect below exists; calling the file by path hides it.
     """
+    # The doubles are put in front INSIDE this shell and asserted first, so a
+    # result here is a result about the script rather than about whichever
+    # `git` the host happened to offer.
+    fake_bin = tmp_path / "bin"
+    _assert_doubles_win(fake_bin, env, "git", "docker", "curl", "flock")
     script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
     # encoding pinned: the script carries 🔴 markers, and piping it as text on
     # Windows encodes with cp1252, which cannot represent them. A test artifact,
     # not a product one — the deploy host reads UTF-8 either way.
     return subprocess.run(
-        [SH, "-s", "abc123"], input=script, cwd=tmp_path, env=env,
-        capture_output=True, text=True, encoding="utf-8", timeout=120,
+        [SH, "-c", f'export PATH="{_posix(fake_bin)}:$PATH"\nexec sh -s "$@"',
+         "sh", "abc123"],
+        input=script, cwd=tmp_path, env=env,
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
     )
 
 
@@ -261,3 +349,38 @@ def test_a_missing_helper_is_reported_rather_than_skipped(tmp_path):
     assert result.returncode != 0
     assert "proxy_check.sh" in result.stderr
 
+def test_the_harness_refuses_to_run_when_a_double_is_not_in_effect(tmp_path):
+    """🔴 The guard that makes every test in this file mean something.
+
+    The defect it exists for is host-dependent: where Git Bash's PATH
+    conversion drops the doubles' directory, `git` resolves to the real binary,
+    the script fetches `abc123` for real, dies there, and every failure case
+    below still satisfies "nonzero exit and no activation". On this machine the
+    conversion happens to work, so the failure cannot be reproduced here — which
+    is exactly why the assertion has to exist rather than be assumed.
+
+    This proves the assertion has teeth by removing a double outright: whatever
+    the host does with PATH, a missing double must stop the test rather than
+    hand it the real command.
+    """
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _double(fake_bin / "docker", "docker")
+    env = {**os.environ, "DEPLOY_LOG": (tmp_path / "log").as_posix()}
+
+    # The double that IS there passes.
+    _assert_doubles_win(fake_bin, env, "docker")
+
+    # The one that is not must fail loudly, naming what it found instead.
+    with pytest.raises(AssertionError) as refused:
+        _assert_doubles_win(fake_bin, env, "git")
+
+    assert "git" in str(refused.value)
+
+
+def test_the_double_directory_is_searched_in_the_shells_own_syntax(tmp_path):
+    r"""`_posix` is why the prelude works: Git Bash searches POSIX paths, and a
+    `C:\...` entry separated by `;` is not one."""
+    assert _posix(tmp_path).startswith("/")
+    assert "\\" not in _posix(tmp_path)
+    assert _posix("/already/posix") == "/already/posix"

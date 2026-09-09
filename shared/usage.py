@@ -153,12 +153,24 @@ def finalize_usage(
             # then skipped because usage_finalized_at is set. The bucket keeps
             # 50 for a turn that cost 1,200 and releases budget really spent.
             #
-            # `worker_id is null` is the CANCELLATION case and is deliberate:
-            # `cancel_run` nulls it, and the worker that was executing is the
-            # only thing that knows what the turn actually spent. A caller
-            # with no id of its own (the server settling a queued run at zero)
-            # passes null and is likewise not fenced out.
-            "   and (%s::text is null or worker_id is null or worker_id = %s)"
+            # 🔴 (fix.md F43, third pass.) `worker_id is null` used to be an
+            # allowance for ANY caller, on the reasoning that cancellation
+            # nulls it and the executing worker is the only thing that knows
+            # what the turn cost. The first half is true and the conclusion is
+            # not: a worker that LOST its lease is also holding totals, and it
+            # reaches this line too. Cancel a replacement mid-run and the stale
+            # worker settles 50 against the replacement's 1,200.
+            #
+            # `usage_owner` carries the identity forward when execution is
+            # revoked (see 20260909130000), so the three cases stay distinct:
+            #   * still owned  — the holder settles;
+            #   * revoked      — the worker that WAS executing settles, and
+            #                    nobody else;
+            #   * never owned  — a queued cancellation, settled by the server,
+            #                    which has no identity of its own to offer.
+            "   and case when worker_id is not null"
+            "             then %s::text is not distinct from worker_id"
+            "             else %s::text is not distinct from usage_owner end"
             " returning coalesce(tokens_reserved, 0),"
             #  The hour this run's claims were charged to (fix.md F44), not
             #  whatever hour it happens to be when it finishes.

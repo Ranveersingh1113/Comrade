@@ -209,9 +209,12 @@ def test_the_real_owner_can_still_settle_when_it_finishes(run):
                      " where id=%s", (run,))
     finally:
         conn.close()
-    finalize_usage(TEAM_A, run, 50)                      # refused above
-    finish_run(TEAM_A, run, "done", input_tokens=40, output_tokens=10)
-    finalize_usage(TEAM_A, run, 50)
+    # As the owner, which is what the fence now requires: a caller with no
+    # identity may settle only a run nobody executed.
+    finalize_usage(TEAM_A, run, 50, worker_id="replacement")   # refused: live
+    finish_run(TEAM_A, run, "done", input_tokens=40, output_tokens=10,
+               worker_id="replacement")
+    finalize_usage(TEAM_A, run, 50, worker_id="replacement")
 
     assert _tokens() == 50
 
@@ -478,11 +481,20 @@ def test_the_worker_that_finished_the_run_settles_it(run):
 
 def test_a_cancelled_run_is_still_settled_by_the_worker_that_ran_it(run):
     """The case the LookupError branch exists for, and it must survive the
-    fence. `cancel_run` sets the status AND nulls `worker_id`, so the worker
-    that was executing has no id to match — it is nonetheless the only thing
-    that knows what the turn actually spent."""
+    fence. `cancel_run` nulls `worker_id`, so the worker that was executing has
+    no id to match — it is nonetheless the only thing that knows what the turn
+    actually spent, and `usage_owner` is what remembers that.
+
+    🔴 The setup used to jump straight to (cancelled, worker_id=null) with one
+    UPDATE, so the run had never been OWNED and the test passed on the old
+    rule's blanket allowance rather than on ownership. It now takes the
+    ownership first, which is the only way the state it describes arises.
+    """
     conn = _admin()
     try:
+        conn.execute("update public.agent_runs set worker_id="
+                     "'the-worker-that-ran-it', status='running'"
+                     " where id=%s", (run,))
         conn.execute(
             "update public.agent_runs set status='cancelled', worker_id=null,"
             " finished_at=now() where id=%s", (run,))
@@ -510,4 +522,177 @@ def test_settlement_without_a_worker_id_still_works(run):
     finalize_usage(TEAM_A, run, 0)
 
     assert _tokens() == 0
+
+# ---------------------------------------------------------------------------
+# F43 still open — cancellation erased the fence
+# ---------------------------------------------------------------------------
+#
+# THE INVARIANT: a run is settled exactly once, by the identity that actually
+# performed the work whose totals are being recorded.
+#
+# The state transitions that reach (terminal, worker_id IS NULL) — the shape
+# the previous fence waved through — are all reached here through the real
+# functions rather than by hand:
+#
+#   * `cancel_run` on an EXECUTING run: the executing worker is the rightful
+#     settler, and it is the only thing that knows what the turn spent.
+#   * `cancel_run` on a QUEUED run: nobody executed, and the server settles
+#     zero with no identity of its own.
+#   * `recover_expired_agent_runs` past its attempt limit: 'failed', worker
+#     nulled, and the last worker may still be walking its exit path.
+
+def _cancel(run_id: str, requester=A1) -> bool:
+    from agent.run_queue import cancel_run
+
+    return cancel_run(TEAM_A, run_id, requester_id=requester)
+
+
+def _owner_columns(run_id: str) -> tuple:
+    conn = _admin()
+    try:
+        return conn.execute(
+            "select worker_id, status from public.agent_runs where id=%s",
+            (run_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_a_stale_worker_cannot_settle_a_cancelled_replacements_run(run):
+    """🔴 THE DEFECT (fix.md F43, still open). The fence accepts ANY caller
+    once the stored worker id is NULL, and cancellation is exactly what nulls
+    it.
+
+    The sequence, through the real cancel path: the old worker loses its lease,
+    a replacement takes over and spends 1,200, a member cancels, and the stale
+    worker's exit settles 50 FIRST. It wins `usage_finalized_at`, the
+    replacement's real number is skipped, and the bucket keeps 50 for a turn
+    that cost 1,200 — releasing budget the team actually spent.
+    """
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id='replacement',"
+                     " status='running' where id=%s", (run,))
+    finally:
+        conn.close()
+
+    assert _cancel(run) is True
+    assert _owner_columns(run) == (None, "cancelled")
+
+    finalize_usage(TEAM_A, run, 50, worker_id="stale")
+
+    assert _tokens() == CHUNK, (
+        "a worker that lost its lease settled a run the replacement executed"
+    )
+
+    finalize_usage(TEAM_A, run, 1_200, worker_id="replacement")
+    assert _tokens() == 1_200
+
+
+def test_the_worker_that_was_executing_settles_a_cancelled_run(run):
+    """The case the NULL-owner allowance existed for, and it must survive:
+    a member cancels the turn this worker is running, and this worker holds the
+    only record of what it cost."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id='mine',"
+                     " status='running' where id=%s", (run,))
+    finally:
+        conn.close()
+    assert _cancel(run) is True
+
+    finalize_usage(TEAM_A, run, 800, worker_id="mine")
+
+    assert _tokens() == 800
+
+
+def test_a_cancelled_queued_run_is_settled_by_the_server(run):
+    """Queued-never-executed is a different thing from cancelled-while-running,
+    and the server settles it with no identity at all."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id=null,"
+                     " status='queued' where id=%s", (run,))
+    finally:
+        conn.close()
+    assert _cancel(run) is True
+
+    finalize_usage(TEAM_A, run, 0)
+
+    assert _tokens() == 0
+
+
+def test_a_stranger_cannot_settle_a_cancelled_queued_run(run):
+    """Nobody executed it, so nobody's totals are authoritative — but a worker
+    that was never near this run must not be able to write one either."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id=null,"
+                     " status='queued' where id=%s", (run,))
+    finally:
+        conn.close()
+    _cancel(run)
+
+    finalize_usage(TEAM_A, run, 4_000, worker_id="passing-stranger")
+
+    assert _tokens() != 4_000
+
+
+def test_a_run_recovery_gave_up_on_keeps_its_last_owner(run):
+    """The third route to (terminal, no worker): recovery past the attempt
+    limit marks the run failed and nulls the worker, while that worker may
+    still be walking its own exit path."""
+    conn = _admin()
+    try:
+        conn.execute(
+            "update public.agent_runs set worker_id='last-owner', attempts=3,"
+            " status='running', lease_expires_at=now() - interval '1 hour'"
+            " where id=%s", (run,))
+        conn.execute("select public.recover_expired_agent_runs()")
+        worker, status = conn.execute(
+            "select worker_id, status from public.agent_runs where id=%s",
+            (run,)).fetchone()
+    finally:
+        conn.close()
+    assert (worker, status) == (None, "failed"), (worker, status)
+
+    finalize_usage(TEAM_A, run, 70, worker_id="someone-else")
+    assert _tokens() == CHUNK, "a stranger settled a run recovery gave up on"
+
+    finalize_usage(TEAM_A, run, 900, worker_id="last-owner")
+    assert _tokens() == 900
+
+
+def test_ordinary_completion_is_unaffected(run):
+    """The common path must not acquire a new way to fail."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id='mine'"
+                     " where id=%s", (run,))
+    finally:
+        conn.close()
+    finish_run(TEAM_A, run, "done", input_tokens=600, output_tokens=100,
+               worker_id="mine")
+
+    finalize_usage(TEAM_A, run, 700, worker_id="mine")
+
+    assert _tokens() == 700
+
+
+def test_settlement_still_happens_only_once(run):
+    """Whoever wins, they win once: a second settlement would hand the team
+    back tokens it spent."""
+    conn = _admin()
+    try:
+        conn.execute("update public.agent_runs set worker_id='mine'"
+                     " where id=%s", (run,))
+    finally:
+        conn.close()
+    finish_run(TEAM_A, run, "done", input_tokens=600, output_tokens=100,
+               worker_id="mine")
+
+    finalize_usage(TEAM_A, run, 700, worker_id="mine")
+    finalize_usage(TEAM_A, run, 700, worker_id="mine")
+
+    assert _tokens() == 700
 

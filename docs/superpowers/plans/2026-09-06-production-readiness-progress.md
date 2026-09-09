@@ -2831,7 +2831,140 @@ just because you know the trap exists.
 |---|---|---|---|
 | F35 caddy's hostname | yes | yes — real Compose for the resolution, the real caddy image for the read-back, the complete stdin invocation for the probe | 🔴 no deploy has run with this, and the `exec` read is only exercised against a double end to end |
 | F37 full candidate set | yes | yes — real resolver, real `docker port` output shapes | never run against the pilot host's actual mapping |
-| F49 parked settlement | yes | yes — real HTTP route, real Postgres, five lifecycle cases | not exercised against a real permission wait driven by a live worker |
+| F49 parked settlement | 🔴 PARTIAL at this commit — two failure paths remained; see the sixth review | the five cases passed and did not cover a lease-recovered run or a failed settlement | not exercised against a real permission wait driven by a live worker |
+
+
+## Sixth review — 2026-09-09, pinned to `87d2029`
+
+F35 and F37 were accepted; the reviewer independently ran
+`tests/test_backup_integrity.py tests/test_deploy_host_script.py` and got 57
+passed, 1 skipped, including the real-Compose and real-Caddy-image checks. F49
+had two remaining failure paths, both P-rated, both real.
+
+My own gate at the fifth review did not cover either of them: it ran against
+this same implementation and passed. A green suite is evidence about the paths
+it exercises and nothing else.
+
+### F49 follow-up 1 — a recovered run's stale checkpoint · `b205193`
+
+`queued` does not mean the previous execution finished.
+`recover_expired_agent_runs` requeues an expired run and clears `worker_id`
+while the old worker may still have an in-flight model response — paid for, and
+checkpointed nowhere. Cancelling in that interval found a terminal run with no
+worker and settled the stale totals, often zero. When the response arrived the
+old worker's exit settlement lost to the `usage_finalized_at` already written,
+and the tokens were discarded.
+
+Reproduced through the real path — enqueue, claim, reserve 6,000, expire the
+lease, `recover_expired_runs()`, cancel over HTTP:
+
+```
+after recovery:  status=queued  worker_id=None  usage_owner='old-worker'
+after cancel:    usage_finalized_at set, bucket settled to 0
+the paid 1,200 then had nowhere to go
+```
+
+**The invariant I had written was too weak.** "Nobody is executing" is not the
+same question as "this row's record of what the run spent is complete".
+`pause_for_permission` writes the totals in the statement that drops the lease,
+so a parked run's record IS complete; lease recovery promises nothing. Nothing
+distinguished them.
+
+`usage_checkpoint_at` (migration `20260909160000`) records the difference: set
+by `pause_for_permission`, cleared by a trigger whenever a worker takes the run,
+because whoever is executing may have spent more than the row knows. Settlement
+requires that marker, or `usage_owner is null` — nothing ever executed, so zero
+is the true number rather than a stale one.
+
+A lease-recovered run has neither, so its reservation is HELD until the worker
+that spent the tokens accounts for them. Holding costs the team admission for
+the rest of that hour; releasing loses the record of real spend. For a cap,
+holding is the safe direction.
+
+The trigger pair now reads as one rule: `keep_usage_owner` remembers WHO ran it
+when execution is revoked, `expire_usage_checkpoint` forgets WHAT the row knows
+when execution begins.
+
+### F49 follow-up 2 — a failed settlement stranded the reservation · `b205193`
+
+`cancel_run` committed before `settle_from_checkpoint` opened its transaction.
+A settlement that failed left the run durably cancelled and still reserved — and
+the retry made it worse, because `cancel_run` then found nothing to cancel,
+returned None, and the route skipped settlement entirely. No worker remains for
+a parked run, so nothing else was coming.
+
+The settlement rides in `cancel_run`'s own transaction now: cancelling a run and
+accounting for what it spent are one change to the world or neither. The route's
+remaining call is a repair path for a row something else left stranded, and it
+is safe to attempt on every retry because eligibility lives in the statement —
+a still-executing or lease-recovered run is refused.
+
+```
+pytest tests/test_run_cancellation.py tests/test_usage_continuity.py
+       tests/test_usage_reservations.py tests/test_agent_resume.py
+       tests/test_agent_run_queue.py tests/test_queue_fairness.py
+       tests/test_run_stream_resume.py tests/test_permission_continuation.py
+       tests/test_worker_concurrency.py        ->  96 passed
+```
+
+Acceptance for both, through the real HTTP route against real Postgres: recover
+a lease with usage unaccounted for, cancel before a replacement claims, and the
+reservation is held — then the old worker's 1,200 lands and the hour records it;
+a settlement failure rolls the cancellation back with it, so the retry has
+something to do and reconciles exactly once; a run left cancelled-but-unsettled
+by anything else is repaired by a retry, and that same retry refuses a
+lease-recovered run.
+
+Mutation-checked: dropping the completeness clause fails 5, moving settlement
+back outside the transaction fails 2, never marking the parked checkpoint fails
+5.
+
+### The gate
+
+Status captured into a variable immediately after the script, with the API the
+gate requires already answering.
+
+```
+curl -fsS localhost:8000/health   ->  {"status":"ok","database":"ok"}
+
+=== backend (pytest) ===        1686 passed, 8 skipped, 17 deselected (11m46s)
+=== frontend build ===          ok
+=== frontend lint ===           ok, 3 fast-refresh warnings
+=== frontend unit + component ===   229 passed / 34 files
+=== frontend integration ===        21 passed / 6 files
+=== browser journeys (playwright) ===    8 passed (40.8s)
+=== real GitHub end to end ===      2 skipped — no credential configured
+all gates passed                GATE EXIT: 0
+```
+
+1686, up from 1682: the four reproductions above. The backend lane had the
+database to itself.
+
+🔴 This is the same gate that passed at the fifth review against the
+implementation this round had to fix. It exercised neither of these paths, and
+passing says nothing about the ones it does not reach. The realtime integration
+test again failed its first trial and passed the retry — third round running.
+
+### What F49 is now
+
+| | Implemented | Verified locally | Deployment acceptance |
+|---|---|---|---|
+| parked cancellation | yes | yes | pending |
+| approval-requeued cancellation | yes | yes | pending |
+| lease-recovered cancellation | yes | yes — real recovery, real route | pending |
+| failed-settlement retry | yes | yes — fault injected at the real seam | pending |
+
+🔴 **The migration has not been applied from empty.** It is re-appliable, and
+both triggers were exercised against the real schema — a claim invalidates the
+checkpoint, revocation preserves the owner — but the from-empty lane is
+`gates.sh --with-reset`, which rebuilds the developer's database, and it was not
+run. That is the one piece of this change with no from-scratch evidence.
+
+🔴 **A process killed between the model response and the worker's settlement
+still leaves the reservation held** for the rest of the hour. That is now the
+deliberate choice rather than an accident — the alternative discards paid
+tokens — but it is a ceiling, not a solved problem: nothing sweeps a run whose
+worker never returns.
 
 ---
 

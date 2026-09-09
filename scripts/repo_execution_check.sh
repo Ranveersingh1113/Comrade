@@ -48,11 +48,22 @@ cleanup() {
   rm -rf "$WS/$TEAM"
   # Only what this run created. A real team's dependency volume must survive a
   # verification run, so the names are computed rather than pattern-matched.
+  #
+  # 🔴 `tail -1`, and the removal is not silenced. The app image prints a GPU
+  # discovery warning on import; taking the whole of stdout as the volume name
+  # gave `docker volume rm` a multi-line argument, which failed — into
+  # /dev/null. The volumes survived, the next install correctly reported
+  # "current", and two checks failed on a run where the product was right.
+  # A cleanup that fails quietly looks exactly like one that worked.
   for repo in "$PY_NAME" "$NODE_NAME"; do
     vol=$(docker run --rm --entrypoint python "$APP" -c "
 from shared.workspace import deps_volume
-print(deps_volume('$TEAM', '$repo'))" 2>/dev/null | tr -d '\r')
-    [ -n "$vol" ] && docker volume rm -f "$vol" >/dev/null 2>&1
+print(deps_volume('$TEAM', '$repo'))" 2>/dev/null | tail -1 | tr -d '\r')
+    case "$vol" in
+      comrade-deps-*) docker volume rm -f "$vol" >/dev/null || \
+                        echo "    (could not remove $vol)" ;;
+      *) echo "    (could not work out the volume name for $repo: '$vol')" ;;
+    esac
   done
 }
 trap cleanup EXIT

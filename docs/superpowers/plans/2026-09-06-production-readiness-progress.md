@@ -2365,6 +2365,233 @@ dependency volume built by the old layout fails runs until the next sync
 rebuilds it.
 
 
+
+## Fourth review — 2026-09-09, pinned to `bba661d`
+
+Four findings, four commits, in the order asked for: F43, F37, the
+deployment-test harness, F35.
+
+### F43 — settlement ownership survived neither cancellation nor replacement · `c735dbc`
+
+`finalize_usage` authorised settlement by comparing the caller's `worker_id`
+against `agent_runs.worker_id`. Three paths null that column — cancellation,
+lease replacement, and recovery giving up — and after any of them
+`worker_id is not distinct from NULL` is TRUE for a caller passing no worker
+and FALSE for the worker that was actually executing. So the stale worker that
+had already lost its lease could settle the run its replacement was given, and
+the replacement could not settle at all. First writer wins, `usage_finalized_at`
+is set, and the hour's bucket permanently records the wrong number.
+
+**The invariant:** the tokens a run reserved are released exactly once, by
+whoever was executing when the reservation was made — and cancellation must not
+change who that is.
+
+`agent_runs.usage_owner` records it. The copy happens in a `before update`
+trigger, at the moment `worker_id` is cleared, rather than in each of the three
+writers that clear it and whichever fourth one gets added later:
+
+```sql
+if old.worker_id is not null and new.worker_id is null then
+  new.usage_owner := old.worker_id;
+end if;
+```
+
+`finalize_usage` then authorises against `worker_id` while a lease is held and
+against `usage_owner` once it is gone.
+
+```
+uv run pytest tests/test_usage_continuity.py tests/test_usage_reservation.py \
+              tests/test_usage_finalization.py
+  ->  51 passed
+```
+
+Adjacent lifecycle, not just the reported example: the stale worker settling
+first after cancellation (the report), the executing worker settling a cancelled
+run, a cancelled QUEUED run settled by the server, a stranger refused on that
+same row, a run recovery gave up on keeping its last owner, ordinary completion
+unaffected, and settlement still happening only once.
+
+Two pre-existing tests had setups that never established ownership at all.
+Their SETUPS were fixed. Their assertions were not touched.
+
+### F37 — the backup checked a port and called it the database · `6de127e`
+
+`_database_endpoint` matched `docker port` output on the port number alone, so
+any container publishing 54322 was accepted — a second stack, a tunnel, an
+unrelated service. The address half of the mapping was parsed and discarded.
+The backup then dumped whatever answered and reported success.
+
+**The invariant:** the endpoint dumped is the one the requested address and port
+actually resolve to, and an ambiguous mapping is refused rather than guessed.
+
+`_publishes` matches the port, then requires either an exact address match or a
+wildcard of the SAME FAMILY — `0.0.0.0` covers an IPv4 request, `::` covers an
+IPv6 one, neither covers the other. A name (`localhost`) resolves to no single
+family, so it is accepted only against a wildcard and otherwise refused as
+ambiguous. The error names what the container actually publishes.
+
+```
+uv run pytest tests/test_backup_integrity.py tests/test_restore_drill.py
+  ->  44 passed, 1 skipped
+```
+
+Tests use the real bare-endpoint output shape (`54322/tcp -> 0.0.0.0:54322`)
+and cover a different loopback address, a different family, an exact match, both
+wildcards, an ambiguous name, a port mismatch, an unpublished port, and the
+prefixed shape.
+
+🔴 One older parametrised case asserted that `[::]:54322` satisfies an IPv4
+request — the port-only rule, written into a test. It was rewritten, not
+weakened around.
+
+### The harness that could test the wrong `git` · `a1dbf47`
+
+The deployment tests prepended their double directory to the WINDOWS
+environment `PATH`, separated by `;`, and then launched Git Bash. Git Bash
+builds its own POSIX `PATH` at startup, and whether a `;`-separated Windows
+entry survives that conversion depends on the host: on one machine the doubles
+won, on another `/mingw64/bin` came first, so `git` resolved to the REAL binary
+while `flock` resolved to the double.
+
+Where it lost, the script ran a real `git fetch origin abc123`, died with
+"couldn't find remote ref", and never reached the stage under test. Four
+parameterised failure cases still passed — they asserted only a nonzero exit and
+the absence of activation, and an unrelated early failure satisfies both. The
+suite was green about a release it had not exercised.
+
+**The invariant:** a test that reports on a stage has reached that stage.
+
+* Precedence is established INSIDE the launched shell, in the shell's own path
+  syntax (`_posix`), for both runners.
+* `_assert_doubles_win` resolves each double with `command -v` BEFORE the script
+  runs, so a test whose doubles are not in effect says so instead of passing.
+* Every negative case names the call that PROVES it reached its own stage
+  (`STAGE`), and every non-lock case asserts the release got as far as its own
+  `git fetch`.
+
+```
+uv run pytest tests/test_deploy_host_script.py   ->  15 passed   (at a1dbf47)
+```
+
+Mutation-checked in two directions: with the precedence work removed the guard
+test fails as designed; with the stage proofs removed the failure cases pass on
+an unrelated early exit, which is the defect itself, reproduced.
+
+🔴 **LIMITATION.** The underlying PATH conversion cannot be reproduced on this
+host — here the Windows-`PATH` form happens to win. What is verified locally is
+that the guards fire when the mechanism is removed. That this host reproduces
+the host that failed is NOT established, and no amount of local green will
+establish it.
+
+### F35 — a second `.env` parser, and a precedence I had assumed · `417bb54`
+
+The public-path probe needs the configured hostname. Compose interpolates
+`.env` for the containers and exports nothing into the parent SSM shell, so a
+correctly configured host reached the unset-host failure. The fix for THAT read
+`.env` with `sed` — but `.env` is Compose's format, not a shell's. Given
+
+```
+COMRADE_HOST=comrade.example.test # public hostname
+```
+
+Compose configures `comrade.example.test` and the sed produced
+`comrade.example.test # public hostname`, which the probe then asked for.
+Quoting, surrounding whitespace and `${VAR}` interpolation diverge the same way.
+This check runs AFTER activation, so the release reports failure over a working
+deployment.
+
+**The invariant:** the hostname the probe asks for is the hostname the
+containers were configured with. One resolver, and it is Compose's.
+
+```sh
+COMRADE_HOST=$($COMPOSE config 2>/dev/null \
+  | awk -F':[[:space:]]*' '/^[[:space:]]+COMRADE_HOST:/ {print $2; exit}' \
+  | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+```
+
+🔴 **MEASURED, not assumed — and I had it backwards.** I wrote a shell-wins
+short-circuit in front of this, and a test asserting that precedence, believing
+`.env` loses to an exported variable. On Compose 2.39.4 it does not:
+
+```
+no override:   COMRADE_HOST: from-dotenv.test
+with override: COMRADE_HOST: from-dotenv.test
+shell only:    COMRADE_HOST: from-shell.test
+neither:       COMRADE_HOST: ""
+```
+
+So the short-circuit is gone, and the two tests asserting a shell-wins rule were
+rewritten to assert AGREEMENT WITH COMPOSE instead. Caddy's site is whatever
+Compose handed the container; a precedence of the release's own would have the
+probe check a name the site is not serving.
+
+```
+sh -n scripts/deploy_host.sh                     ->  syntax OK
+uv run pytest tests/test_deploy_host_script.py   ->  23 passed
+```
+
+Six `.env` shapes — plain, inline comment, both quotings, trailing whitespace,
+`${VAR}` interpolation — are run through REAL Compose and through the committed
+extraction lifted out of the script, and required to agree. The extraction is
+read out of `scripts/deploy_host.sh` rather than restated, so the test cannot
+drift into checking a copy.
+
+Mutation-checked: restoring the sed parser fails 13 tests; putting the
+short-circuit back fails exactly the one precedence test.
+
+🔴 A first version of that lift anchored on the assignment line, which made it
+blind to anything inserted IN FRONT of the assignment — so the short-circuit
+mutation was being caught by a syntax error rather than by behaviour. The lift
+is now bounded by the section, not the statement.
+
+### What each of the four actually is
+
+| Finding | Implemented | Verified locally | Deployment acceptance |
+|---|---|---|---|
+| F43 settlement ownership | yes | yes — 51 tests against real Postgres, 7 lifecycle cases, mutation-checked | migration `20260909130000` has not run outside local |
+| F37 endpoint verification | yes | yes — 44 tests; wildcard/family logic exercised from real `docker port` output shapes | never run against the pilot host's actual mapping |
+| Harness precedence | yes | partly — guards proven to bite by mutation | 🔴 the failing host is not reproducible here |
+| F35 hostname from Compose | yes | yes — six shapes against real Compose 2.39.4 | 🔴 no deploy has run with this |
+
+### The gate
+
+`scripts/gates.sh`, exit 0. The backend lane was re-run on its own afterwards
+with the database to itself, because the first run's output went through `tail`
+and the count was lost:
+
+```
+uv run pytest -q     ->  1672 passed, 8 skipped, 17 deselected  (11m35s)
+npm run build                                                    ok
+npm run lint                          ok, 3 fast-refresh warnings
+npm run test               ->  229 passed, 34 files
+npm run test:integration   ->   21 passed,  6 files
+```
+
+Up from 1645 backend last round; the 27 are this round's F43, F37, harness and
+F35 tests. No failures, and nothing newly skipped.
+
+🔴 One lane did NOT run: the browser journeys, which need the API answering on
+:8000. `gates.sh` says so and still exits 0. It is the same gap the standing
+ceilings already record — no browser-level evidence anywhere in Phase B — and
+none of the four fixes is claimed on it.
+
+🔴 The realtime integration test failed its first trial ("no realtime event
+within 15000ms") and passed the retry the harness makes for exactly that reason.
+Unrelated to this round, but it is the flake the ceilings warn about and it is
+still there.
+
+### Method notes
+
+Each fix was reproduced through the real path before it was written, and each
+regression test was run against the unfixed code first. The F43 and F37 tests
+drive the real functions against real Postgres and real `docker port` output;
+the F35 shape tests drive real Compose. None of the four is closed on a mock.
+
+🔴 What is NOT established for any of them is deployment acceptance. Nothing
+here has been deployed, and the release script in particular is verified against
+command doubles plus one real-Compose comparison — which is a different claim
+from "the next deploy works".
+
 ---
 
 ## Standing ceilings

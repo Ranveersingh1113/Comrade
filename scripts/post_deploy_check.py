@@ -98,10 +98,12 @@ def furnish() -> str:
         conn.execute(
             "insert into public.memberships (team_id, user_id, role, status)"
             " values (%s,%s,'leader','active')", (TEAM, USER))
+        # 🔴 SELECTED, not inserted. Creating a team makes its General thread —
+        # `uq_threads_general` is one per team — so inserting one here duplicated
+        # what the product had already done. Found by running this.
         thread = conn.execute(
-            "insert into public.threads (team_id, title, visibility, kind,"
-            " created_by) values (%s,'General','team','discussion',%s)"
-            " returning id", (TEAM, USER)).fetchone()[0]
+            "select id from public.threads where team_id=%s and title='General'",
+            (TEAM,)).fetchone()[0]
         task = conn.execute(
             "insert into public.tasks (team_id, assignee_id, title, status,"
             " created_by_kind, created_by_id, thread_id)"

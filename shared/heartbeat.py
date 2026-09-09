@@ -19,6 +19,7 @@ that, and readiness reads the report.
 import logging
 import os
 import socket
+import threading
 import time
 from typing import Any
 
@@ -88,6 +89,83 @@ class Beater:
              capabilities=capabilities() if callable(capabilities) else capabilities,
              role=self.role)
         return True
+
+
+class Pulse:
+    """Liveness on a thread of its own.
+
+    🔴 THE DEFECT (fix.md F39). `Beater` is called FROM the work loop, and both
+    workers beat and then block — `run_once` is a whole agent turn,  `tick` a
+    whole pipeline batch. STALE_SECONDS is 120, so a turn that holds its slots
+    for longer than that stops the beats and readiness declares live workers
+    missing. The check added so a quiet deployment could not lie about being
+    ready acquired the opposite failure: a BUSY deployment lying about being
+    dead.
+
+    Liveness has to come from something that is not the thing doing the work.
+
+    WHAT A BEAT DOES NOT MEAN. That this process's current job is progressing.
+    A wedged job is diagnosed through its LEASE expiring, which `/ready`
+    reports separately, and conflating the two would hide exactly the case
+    leases exist to catch. This says the process is up. That is all it says.
+    """
+
+    def __init__(self, kind: str, *, capabilities: Any = None,
+                 role: Role = Role.CONTROL) -> None:
+        self.kind = kind
+        self._capabilities = capabilities
+        self._role = role
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "Pulse":
+        if self._thread is not None:
+            return self
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name=f"heartbeat-{self.kind}", daemon=True,
+        )
+        self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while True:
+            try:
+                beat(
+                    self.kind,
+                    capabilities=(self._capabilities()
+                                  if callable(self._capabilities)
+                                  else self._capabilities),
+                    role=self._role,
+                )
+            except Exception as exc:  # noqa: BLE001 - a pulse outlives surprises
+                # `beat` already refuses to raise; this is for a failing
+                # CAPABILITY probe, which shells out. A worker that went
+                # permanently silent because one probe threw would be reported
+                # dead while it is working — the defect this class exists for,
+                # arriving through the new door.
+                from shared.errors import safe_error
+
+                logger.warning("heartbeat pulse failed: %s", safe_error(exc))
+            # Read at wait time, so the interval is the module's and not a copy
+            # taken at construction.
+            if self._stop.wait(BEAT_SECONDS):
+                return
+
+    def stop(self) -> None:
+        """Stop beating, promptly. A drain that waited out BEAT_SECONDS would
+        make every deployment slower for a heartbeat nobody reads by then."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def __enter__(self) -> "Pulse":
+        return self.start()
+
+    def __exit__(self, *exc: object) -> bool:
+        self.stop()
+        return False
 
 
 def live_workers(within: int = STALE_SECONDS) -> dict[str, list[dict]]:

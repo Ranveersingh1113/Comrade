@@ -215,7 +215,19 @@ def manifest_hash(root: Path, name: str) -> str:
 #: there, and uv is pointed at that volume's virtualenv. A volume built by "1"
 #: has an empty or absent node_modules and would otherwise keep a key that
 #: still matched — handed back as current forever.
-RECIPE_VERSION = "2"
+#:
+#: "3": every volume now has a `node_modules` directory, empty for a
+#: Python-only project, because the run phase mounts that subpath into the
+#: checkout for ESM resolution and Docker refuses to start a container whose
+#: `volume-subpath` is absent (fix.md F46). Staged manifests are also cleared
+#: before the current set is copied (F48).
+#:
+#: DEPLOYMENT NOTE: a volume built by "1" or "2" has no `node_modules`
+#: directory, so runs against it fail to start until `install()` rebuilds it —
+#: which the next repository sync does, and which this bump forces. The failure
+#: is Docker refusing the mount, which `run_contained` reports as "the container
+#: could not start"; it is loud rather than silent, but it is a window.
+RECIPE_VERSION = "3"
 
 #: Hashed into the key when present. A lockfile pins the RESOLVED set, so it
 #: changing means the installed packages change even when the manifest that
@@ -319,6 +331,21 @@ def _install_script(recipe: "Recipe", digest: str) -> str:
         # built from a different manifest leaves whatever the old one pulled
         # in, so "it works here" would depend on install order and history.
         f"rm -rf {DEPS_MOUNT}/venv {DEPS_MOUNT}/node_modules {TOOLS}",
+        # 🔴 (fix.md F48) The staged manifests, cleared BEFORE the current set
+        # is copied in. The rebuild removed installed packages and left these
+        # behind, so a `.npmrc`, a shrinkwrap or a lockfile DELETED from the
+        # repository went on influencing every later install — the environment
+        # fingerprint had changed and the inputs had not.
+        #
+        # Named files rather than the directory: /deps also holds the venv, the
+        # tools and the npm cache, and a blanket delete would take resources
+        # this owns deliberately.
+        *[f"rm -f {DEPS_MOUNT}/{name}" for name in NODE_MANIFESTS],
+        # 🔴 (fix.md F46) ALWAYS, whatever the runtime. The run phase mounts
+        # this subpath into the checkout so Node's ESM resolver can find it,
+        # and a `volume-subpath` that does not exist refuses to start the
+        # container — so a Python-only project needs the empty directory too.
+        f"mkdir -p {DEPS_MOUNT}/node_modules",
     ]
 
     if recipe.runtime == "node":

@@ -25,6 +25,7 @@ egress proxy, and is marked as needing it. Everything below is about the
 argv, the script, and the image, which is what was actually wrong.
 """
 import subprocess
+import uuid
 
 import pytest
 
@@ -163,9 +164,13 @@ def test_no_recipe_writes_into_the_checkout(tmp_path):
 
 
 def test_a_python_recipe_does_not_copy_node_manifests(tmp_path):
+    """It still CLEARS them, though — a repository that moved from Node to
+    Python should not leave a stale package-lock.json staged in its volume
+    (fix.md F48). What it must not do is stage a new one."""
     script = _script_for("requirements.txt", tmp_path)
 
-    assert "package.json" not in script
+    assert f"cp {MOUNT}/package.json" not in script
+    assert f"rm -f {DEPS_MOUNT}/package.json" in script
     assert f"python -m venv {VENV}" in script
 
 
@@ -247,7 +252,10 @@ def test_installed_binaries_are_on_the_path():
     that had just installed it."""
     path = next(v for v in deps_env("vol") if v.startswith("PATH="))
 
-    assert f"{DEPS_MOUNT}/node_modules/.bin" in path
+    # Under the CHECKOUT now, not /deps: F46 moved the mount to where Node's
+    # ESM resolver looks, and PATH has to follow it or the binaries point at a
+    # directory nothing is mounted at.
+    assert f"{MOUNT}/node_modules/.bin" in path
     assert path.index(f"{VENV}/bin") < path.index("/usr/bin"), (
         "the image's own tools would win over the ones the project pinned"
     )
@@ -268,3 +276,162 @@ def test_every_node_manifest_copied_is_one_an_installer_reads():
         "package.json", "package-lock.json", "npm-shrinkwrap.json",
         "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc",
     }
+
+# ---------------------------------------------------------------------------
+# F46 — where Node actually looks
+# ---------------------------------------------------------------------------
+
+def test_dependencies_are_mounted_where_module_resolution_looks():
+    """🔴 (fix.md F46) Packages lived in /deps/node_modules and execution
+    relied on NODE_PATH. Node's ESM resolver IGNORES NODE_PATH — it walks up
+    from the importing file looking for `node_modules` — so a successful
+    install still left every modern Node app failing with
+    ERR_MODULE_NOT_FOUND. Measured in an isolated no-network container:
+    `require` returned a function, `import` threw."""
+    mounts = [v for v in deps_env("vol") if v.startswith("type=volume")]
+
+    assert mounts, "nothing is mounted inside the checkout for resolution"
+    spec = mounts[0]
+    assert f"target={MOUNT}/node_modules" in spec
+    assert "volume-subpath=node_modules" in spec
+    # The run phase uses what setup installed and never adds to it.
+    assert "readonly" in spec
+
+
+def test_the_paths_point_at_the_checkouts_node_modules():
+    """PATH and NODE_PATH have to follow the mount, or a project's pinned
+    binaries and its CommonJS requires point at a directory nothing is at."""
+    env = deps_env("vol")
+    path = next(v for v in env if v.startswith("PATH="))
+    node_path = next(v for v in env if v.startswith("NODE_PATH="))
+
+    assert f"{MOUNT}/node_modules/.bin" in path
+    assert node_path == f"NODE_PATH={MOUNT}/node_modules"
+
+
+def test_every_volume_gets_a_node_modules_directory(tmp_path):
+    """Even a Python-only project. Docker REFUSES to start a container whose
+    `volume-subpath` is absent — measured — so the directory has to exist on
+    every volume this system builds, empty or not."""
+    script = _script_for("requirements.txt", tmp_path)
+
+    assert f"mkdir -p {DEPS_MOUNT}/node_modules" in script
+
+
+def test_the_recipe_version_moved_with_this_layout_too():
+    """A volume built by an earlier layout has no node_modules, so a run
+    against it cannot start. The bump is what forces the rebuild."""
+    from pipeline.repo_deps import RECIPE_VERSION
+
+    assert RECIPE_VERSION not in ("1", "2")
+
+
+# ---------------------------------------------------------------------------
+# F48 — the staged manifests are the current ones
+# ---------------------------------------------------------------------------
+
+def test_a_rebuild_clears_the_previously_staged_manifests(tmp_path):
+    """🔴 (fix.md F48) The rebuild removed installed packages and left the
+    staged manifests behind, so a `.npmrc`, a shrinkwrap or a lockfile DELETED
+    from the repository went on influencing every later install — the
+    environment fingerprint had changed and the inputs had not."""
+    script = _script_for("package-lock.json", tmp_path)
+    lines = script.splitlines()
+
+    removals = [i for i, line in enumerate(lines)
+                if line.startswith(f"rm -f {DEPS_MOUNT}/")]
+    copies = [i for i, line in enumerate(lines) if line.startswith("if [ -f ")]
+
+    assert removals, "nothing clears the previously staged manifests"
+    assert copies, "nothing stages the current ones"
+    assert max(removals) < min(copies), (
+        "the current manifests are copied before the stale ones are cleared"
+    )
+
+
+def test_the_removals_name_files_rather_than_the_directory(tmp_path):
+    """/deps also holds the venv, the installer tools and the npm cache. A
+    blanket delete would take resources this owns deliberately."""
+    script = _script_for("package-lock.json", tmp_path)
+
+    assert f"rm -rf {DEPS_MOUNT}\n" not in script
+    assert f"rm -f {DEPS_MOUNT}/.npmrc" in script
+    for owned in ("venv", "tools", ".npm-cache"):
+        assert f"rm -f {DEPS_MOUNT}/{owned}" not in script
+
+
+def test_every_staged_manifest_is_also_cleared(tmp_path):
+    """A file that can be copied in and not cleared is a file that can go
+    stale, so the two lists have to be the same list."""
+    script = _script_for("package-lock.json", tmp_path)
+
+    for name in NODE_MANIFESTS:
+        assert f"rm -f {DEPS_MOUNT}/{name}" in script, f"{name} is never cleared"
+
+
+@needs_image
+def test_both_commonjs_and_esm_resolve_through_the_real_paths(tmp_path):
+    """The acceptance, run for real: one installed fixture, imported both ways,
+    through the argv the product itself builds.
+
+    Marked as needing the image because it installs a package and starts
+    containers. The unit checks above are the fast net; this is the evidence,
+    and its absence is what let F46 ship.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    from agent.sandbox import _docker_run_argv
+    from pipeline.repo_deps import _install_script, recipe_for
+
+    root = tmp_path / "app"
+    root.mkdir()
+    (root / "package.json").write_text(json.dumps({
+        "name": "probe", "version": "1.0.0", "private": True,
+        "dependencies": {"leftpad": "0.0.1"},
+    }), encoding="utf-8")
+    (root / "probe.cjs").write_text(
+        "console.log('CJS:', typeof require('leftpad'));\n", encoding="utf-8")
+    (root / "probe.mjs").write_text(
+        "import leftpad from 'leftpad';\n"
+        "console.log('ESM:', typeof leftpad);\n", encoding="utf-8")
+
+    volume = f"comrade-test-{uuid.uuid4().hex[:10]}"
+    try:
+        # A lockfile, so the frozen recipe is the one under test.
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{root}:/out", "-w", "/out",
+             "--user", "0:0", settings.comrade_sandbox_image, "sh", "-c",
+             "export HOME=/tmp; npm install --package-lock-only"
+             " --no-audit --no-fund"],
+            capture_output=True, timeout=300, check=True,
+        )
+        recipe = recipe_for(root)
+        assert recipe is not None and recipe.name == "package-lock.json"
+
+        installed = subprocess.run(
+            ["docker", "run", "--rm", "--user", "0:0", "--read-only",
+             "--tmpfs", "/tmp:size=1024m",
+             "-v", f"{root}:{MOUNT}:ro", "-v", f"{volume}:{DEPS_MOUNT}",
+             "-w", MOUNT, settings.comrade_sandbox_image,
+             "sh", "-c", _install_script(recipe, "probe-digest")],
+            capture_output=True, text=True, timeout=600,
+        )
+        assert installed.returncode == 0, installed.stderr[-500:]
+
+        ran = subprocess.run(
+            _docker_run_argv(
+                ["sh", "-c", "node probe.cjs; node probe.mjs"],
+                root=root, deps=volume, name=f"comrade-run-{uuid.uuid4().hex[:8]}",
+            ),
+            capture_output=True, text=True, timeout=300,
+        )
+        output = ran.stdout + ran.stderr
+        assert "CJS: function" in output, output[-600:]
+        assert "ESM: function" in output, (
+            "ESM resolution still fails, which is the whole of F46:"
+            f" {output[-600:]}"
+        )
+    finally:
+        subprocess.run(["docker", "volume", "rm", "-f", volume],
+                       capture_output=True, timeout=120)

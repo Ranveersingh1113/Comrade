@@ -422,7 +422,17 @@ export function GroupRoom({ thread, allowTeamMessages = true }: { thread: Thread
         // this failure cannot tell us. Putting the text back is safe only
         // because the retry carries the SAME attempt id, so a turn that did
         // land comes back as a duplicate instead of being asked twice.
-        setAiTyping(false);
+        //
+        // 🔴 (fix.md F47) `setAiTyping(false)` used to be unconditional, and
+        // that is a regression F09 introduced by releasing the composer without
+        // revisiting a failure path written for the FIRST send. Clearing it is
+        // right when the POST that would have STARTED a run fails: there is
+        // nothing to show. It is wrong for a correction, because the original
+        // run is still streaming — and the panel carrying its partial answer
+        // and its STOP button is gated on this flag. One failed correction made
+        // a live turn look finished, with later frames appending to a `pending`
+        // nobody was rendering, and no way to stop a run still spending money.
+        if (!followingRef.current) setAiTyping(false);
         setSendError(agentErrorText(e));
         setDraft(text);
         return;

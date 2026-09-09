@@ -18,7 +18,7 @@ from agent.runtime import run_turn_sync
 from shared.config import settings
 from agent.sandbox import probe_capabilities
 from shared.errors import safe_error
-from shared.heartbeat import Beater
+from shared.heartbeat import Pulse
 from shared.db import Role, team_session
 
 from shared import observability
@@ -123,7 +123,6 @@ def run_once(worker_id: str | None = None) -> bool:
 #: Shared by the slots: one process, one heartbeat. Each slot has its own
 #: claim identity, but they are all the same worker as far as "is anybody
 #: here" is concerned.
-_beater = Beater("agent", role=Role.AGENT)
 
 
 def _loop(worker_id: str) -> None:
@@ -135,12 +134,12 @@ def _loop(worker_id: str) -> None:
     """
     while not _stopping.is_set():
         try:
-            # Alive, and what it can actually execute with. The API holds no
-            # Docker socket by design, so this is the only process that can
-            # answer the second half (fix.md F33). The probe is passed
-            # UNCALLED: it shells out, and a beat happens once every thirty
-            # seconds while this loop runs constantly.
-            _beater.maybe(probe_capabilities)
+            # 🔴 (fix.md F39) The heartbeat used to be beaten HERE, and
+            # `run_once` below is a whole agent turn. A turn holding every slot
+            # for longer than STALE_SECONDS stopped the beats and readiness
+            # called the workers missing. Liveness now comes from a Pulse in
+            # main(), on its own thread, so being busy cannot look like being
+            # dead.
             if not run_once(worker_id):
                 _stopping.wait(POLL_SECONDS)
         except Exception:  # noqa: BLE001 - a slot must outlive its surprises
@@ -172,13 +171,21 @@ def main() -> None:
         threading.Thread(target=_loop, args=(f"{base}#{i}",), name=f"turn-{i}")
         for i in range(slots)
     ]
-    for thread in threads:
-        thread.start()
-    # Joined rather than left daemon: shutdown means "stop claiming, finish
-    # what is in hand", and a process that exits while a slot is mid-turn
-    # abandons a run that then waits out its whole lease before recovery.
-    for thread in threads:
-        thread.join()
+    # ONE pulse for the process, not one per slot: liveness is a fact about
+    # this process, and a per-slot beat would fall silent exactly when the
+    # slots are busy — which is the defect (fix.md F39).
+    #
+    # It carries what this worker can EXECUTE with. The API deliberately holds
+    # no Docker socket, so this is the only process that can answer that, and
+    # the probe is passed UNCALLED because it shells out.
+    with Pulse("agent", capabilities=probe_capabilities, role=Role.AGENT):
+        for thread in threads:
+            thread.start()
+        # Joined rather than left daemon: shutdown means "stop claiming, finish
+        # what is in hand", and a process that exits while a slot is mid-turn
+        # abandons a run that then waits out its whole lease before recovery.
+        for thread in threads:
+            thread.join()
     logger.info("agent worker drained: %s", base)
 
 

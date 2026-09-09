@@ -160,13 +160,23 @@ def test_nothing_is_replayed_twice(thread):
     )
 
 
-def test_a_thread_with_no_summary_keeps_the_recent_window(thread):
-    """Unchanged behaviour where there is nothing to bridge from."""
+def test_a_thread_with_no_summary_replays_all_of_it(thread):
+    """🔴 REWRITTEN (fix.md F45). This asserted `== agent_history_turns` and
+    called it "unchanged behaviour where there is nothing to bridge from" —
+    which is precisely the defect F45 names. With no summary there is nothing
+    that has been summarised, so the whole thread IS the unsummarised range,
+    and trimming it to 20 loses messages 1-20 of a 40-message thread before
+    anything has represented them anywhere.
+
+    F16 fixed the gap between compactions and left the one before the first;
+    this test was part of how that went unnoticed.
+    """
     _say(thread, 40)
 
     seen = _replayed(thread)
 
-    assert len(seen) == settings.agent_history_turns
+    assert len(seen) == 40
+    assert len(seen) != settings.agent_history_turns
 
 
 def test_a_short_thread_is_shown_whole(thread):

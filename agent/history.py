@@ -78,10 +78,12 @@ def recent_turns(
 ) -> list[types.Content]:
     """This thread's conversation since the summary, oldest first.
 
-    `since` is the summary's compound cursor `(timestamp, id)`. Everything
-    after it is replayed, so the summary and the replay MEET rather than
-    leaving a hole between them; `limit` still applies when there is no
-    summary to bridge from.
+    `since` is the summary's compound cursor `(timestamp, id)`, and passing it
+    at all — including as `(None, None)` — asks for everything not yet
+    summarised. Everything after the cursor is replayed, so the summary and the
+    replay MEET rather than leaving a hole between them, and a thread with no
+    summary is treated as entirely unsummarised rather than trimmed to `limit`
+    (fix.md F16, F45). `limit` governs callers that want a window instead.
 
     exclude_message_id drops the message this turn is about: server/app.py
     persists the member's message BEFORE the runtime runs, so without it the
@@ -98,16 +100,29 @@ def recent_turns(
         # either repeats or vanishes. Fall back to the window rather than
         # guess.
         through = None
-    # Everything since the summary can legitimately exceed `limit`; the
-    # ceiling is what stops a stalled compaction becoming an unbounded prompt.
-    bound = MAX_REPLAY_MESSAGES if through is not None else limit
+    # 🔴 (fix.md F45) Bound on whether the caller ASKED for the unsummarised
+    # range, not on whether a summary happens to exist yet.
+    #
+    # This was `MAX_REPLAY_MESSAGES if through is not None else limit`, and
+    # `through` is null until the first compaction — which waits for
+    # MIN_COMPACT_MESSAGES (40) older than the KEEP_RECENT_MESSAGES (20) it
+    # will not touch, so the first summary arrives at message 60. Until then a
+    # thread replayed its last `limit` (20) messages and nothing else: a
+    # constraint stated in message 1 was invisible from message 21, for forty
+    # messages, on every new thread. F16 fixed the gap BETWEEN compactions and
+    # left the one before the first.
+    #
+    # `since` given at all means "everything not yet summarised"; the empty
+    # cursor is simply the case where that is the whole thread. `limit` still
+    # governs callers that ask for a window instead.
+    bound = MAX_REPLAY_MESSAGES if since is not None else limit
     with user_session(requester_id) as conn:
         rows = conn.execute(
             _SQL,
             (team_id, thread_id, exclude_message_id, through, through, through_id,
              bound),
         ).fetchall()
-    if through is not None and len(rows) >= MAX_REPLAY_MESSAGES:
+    if since is not None and len(rows) >= MAX_REPLAY_MESSAGES:
         logger.warning(
             "thread %s has %d+ unsummarised messages; replay is capped and"
             " compaction is behind", thread_id, MAX_REPLAY_MESSAGES,

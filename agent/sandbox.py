@@ -398,13 +398,35 @@ def deps_env(deps: str | None) -> list[str]:
         return []
     return [
         "-v", f"{deps}:{DEPS_MOUNT}:ro",
+        # 🔴 (fix.md F46) WHERE NODE ACTUALLY LOOKS.
+        #
+        # Packages live in /deps/node_modules and execution relied on
+        # NODE_PATH. Node's ESM resolver ignores NODE_PATH entirely — it walks
+        # up from the importing file looking for `node_modules` — so a
+        # successful install still left every modern Node app and preview
+        # failing with ERR_MODULE_NOT_FOUND. Measured in an isolated
+        # no-network container: `require('leftpad')` returned a function while
+        # `import leftpad from 'leftpad'` threw.
+        #
+        # Mounted INSIDE the checkout, at the path resolution expects, and
+        # still read-only: the run phase uses what setup installed and never
+        # adds to it. `volume-subpath` is what makes that possible without
+        # exposing the rest of the volume there, and the install script always
+        # creates the directory so this mount cannot fail on a Python-only
+        # project — measured too: a missing subpath refuses to start the
+        # container.
+        "--mount", (f"type=volume,source={deps},target={MOUNT}/node_modules,"
+                    f"volume-subpath=node_modules,readonly"),
         # The venv's bin, then node_modules/.bin, then the image's own. A
         # project's pinned tool wins over the image's copy of it, which is the
         # point of installing it.
-        "-e", f"PATH={VENV}/bin:{DEPS_MOUNT}/node_modules/.bin"
+        "-e", f"PATH={VENV}/bin:{MOUNT}/node_modules/.bin"
               ":/usr/local/bin:/usr/bin:/bin",
         "-e", f"VIRTUAL_ENV={VENV}",
-        "-e", f"NODE_PATH={DEPS_MOUNT}/node_modules",
+        # Kept for CommonJS. It was never the problem for `require`, and
+        # removing it would break resolution for anything loaded from outside
+        # the checkout.
+        "-e", f"NODE_PATH={MOUNT}/node_modules",
     ]
 
 

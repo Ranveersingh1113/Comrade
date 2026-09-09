@@ -22,6 +22,7 @@ from psycopg.types.json import Json
 
 logger = logging.getLogger(__name__)
 
+from pipeline.ci import enqueue_pr_link, record_pull_request
 from shared.errors import safe_error
 
 from shared.db import Role, team_session, user_session
@@ -613,14 +614,30 @@ def _exec_repo_open_pr(conn, team_id, requester_id, args) -> dict:
     # Remember whose work this is. Without it a failing check has no thread to
     # report to, and the delivery becomes repository trivia for the wiki while
     # the people who wrote the change hear nothing.
-    from pipeline.ci import record_pull_request
-    from pipeline.repo_pr import branch_for
-
     thread_id = conn.execute(
         "select thread_id from public.consent_queue"
         " where team_id=%s and action_hash=%s order by created_at desc limit 1",
         (team_id, action_hash),
     ).fetchone()
+    _correlate_pull_request(
+        team_id, args, action_hash=action_hash, result=result,
+        thread_id=str(thread_id[0]) if thread_id and thread_id[0] else None,
+    )
+    return result
+
+
+def _correlate_pull_request(
+    team_id: str, args: dict, *, action_hash: str, result: dict,
+    thread_id: str | None,
+) -> None:
+    """Bind an open pull request to the thread whose work it is.
+
+    Its own function so the REPAIR path has a caller a test can reach. It used
+    to be inline, which is part of how the unreachable retry below went
+    unnoticed.
+    """
+    from pipeline.repo_pr import branch_for
+
     number = result.get("number")
     if number is None:
         # 🔴 This used to be `int(result["number"])` against an adapter that
@@ -632,22 +649,43 @@ def _exec_repo_open_pr(conn, team_id, requester_id, args) -> dict:
             "the pull request adapter returned no number, so this work cannot"
             " be correlated with its thread: keys=%s", sorted(result)
         )
-    else:
-        try:
-            record_pull_request(
-                team_id, args["repo_full_name"], int(number),
-                branch_for(action_hash),
-                thread_id=str(thread_id[0]) if thread_id and thread_id[0] else None,
-                action_hash=action_hash,
-                head_sha=result.get("head_sha"),
-            )
-        except Exception as exc:  # noqa: BLE001 - the PR is open either way
-            # Recoverable without opening a second pull request: opening one is
-            # idempotent, so a later attempt returns the same PR through the
-            # already-exists path and writes the mapping then.
-            logger.error("could not record the pull request for %s: %s",
-                         team_id, safe_error(exc))
-    return result
+        return
+    try:
+        record_pull_request(
+            team_id, args["repo_full_name"], int(number),
+            branch_for(action_hash),
+            thread_id=thread_id,
+            action_hash=action_hash,
+            head_sha=result.get("head_sha"),
+        )
+        return
+    except Exception as exc:  # noqa: BLE001 - the PR is open either way
+        # 🔴 (fix.md F41) This used to be the end of it. The comment claimed "a
+        # later attempt returns the same PR and writes the mapping then" — but
+        # `execute_consent` claims the row `executed` BEFORE running this, so a
+        # retry answers `noop` and nothing runs again. The pull request stayed
+        # open, uncorrelated, forever.
+        logger.error("could not record the pull request for %s: %s",
+                     team_id, safe_error(exc))
+
+    try:
+        # DURABLE, and bookkeeping only: the publication has happened and the
+        # consent row is executed, so the repair must neither ask for another
+        # approval nor call GitHub again.
+        enqueue_pr_link(
+            team_id, args["repo_full_name"], int(number),
+            branch_for(action_hash),
+            thread_id=thread_id, action_hash=action_hash,
+            head_sha=result.get("head_sha"),
+        )
+    except Exception as exc:  # noqa: BLE001 - never fatal
+        # The last resort. Loud, because this is a pull request that will stay
+        # uncorrelated until somebody looks — and raising here would fail a
+        # consent whose external action already succeeded.
+        logger.error(
+            "could not queue a repair for pull request %s in %s, so it will"
+            " stay uncorrelated: %s", number, team_id, safe_error(exc),
+        )
 
 
 _PRECHECKS = {

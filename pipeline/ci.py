@@ -11,6 +11,7 @@ import logging
 
 from psycopg.types.json import Json  # noqa: F401 - kept for symmetry with siblings
 
+from pipeline.worker import register
 from shared.db import Role, team_session
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,69 @@ def record_pull_request(
             (team_id, repo_full_name, pr_number, branch, thread_id,
              action_hash, head_sha),
         )
+
+
+def enqueue_pr_link(
+    team_id: str, repo_full_name: str, pr_number: int, branch: str,
+    *, thread_id: str | None, action_hash: str | None, head_sha: str | None,
+) -> str | None:
+    """Queue the one row a completed pull request still needs.
+
+    🔴 (fix.md F41) The correlation write used to fail into a log line that
+    claimed "a later attempt returns the same PR and writes the mapping then".
+    There is no later attempt: `execute_consent` moves the row to `executed`
+    with a CAS BEFORE running the executor, so a retry returns `noop` and the
+    executor never runs again. The pull request stayed open with no thread, so
+    every CI check for it had nowhere to report and the people who asked for
+    the work heard nothing.
+
+    The intent goes on the JOB QUEUE rather than into a table of its own: that
+    queue already has attempts, backoff, and a dedupe key, which is the whole
+    of what a repair intent needs. Deduped on the pull request, so a consent
+    flow that fails repeatedly leaves one repair rather than a heap.
+    """
+    from psycopg.types.json import Json
+
+    payload = {
+        "repo_full_name": repo_full_name, "pr_number": int(pr_number),
+        "branch": branch, "thread_id": thread_id,
+        "action_hash": action_hash, "head_sha": head_sha,
+    }
+    with team_session(Role.PIPELINE, team_id) as conn:
+        row = conn.execute(
+            "insert into public.jobs (team_id, job_type, payload, dedupe_key)"
+            " values (%s,'link_pull_request',%s,%s)"
+            " on conflict (team_id, job_type, dedupe_key)"
+            " where dedupe_key is not null and status in ('pending','processing')"
+            " do nothing returning id",
+            (team_id, Json(payload), f"{repo_full_name}#{pr_number}"),
+        ).fetchone()
+    return str(row[0]) if row else None
+
+
+def handle_pr_link(team_id: str, payload: dict) -> None:
+    """Write the mapping a completed pull request is missing.
+
+    BOOKKEEPING ONLY. It opens nothing and asks nobody: the publication
+    already happened and the consent row is already `executed`, so the repair
+    must not need another approval or a second call to GitHub (fix.md F41).
+    `record_pull_request` upserts, so a queue that delivers this twice
+    converges instead of duplicating.
+    """
+    record_pull_request(
+        team_id,
+        payload["repo_full_name"],
+        int(payload["pr_number"]),
+        payload["branch"],
+        thread_id=payload.get("thread_id"),
+        action_hash=payload.get("action_hash"),
+        head_sha=payload.get("head_sha"),
+    )
+
+
+# Registered at import, like every sibling handler. `pipeline/worker.py`
+# imports this module for exactly that reason.
+register("link_pull_request", handle_pr_link)
 
 
 def _pull_request_for(conn, team_id: str, repo: str, branch: str | None,

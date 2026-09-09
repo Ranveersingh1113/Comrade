@@ -158,38 +158,54 @@ if $COMPOSE config --services | grep -qx caddy; then
     exit 1
   fi
 
-  # 🔴 (fix.md F35 follow-up.) COMPOSE'S OWN ANSWER, not a second parser.
+  # 🔴 (fix.md F35, fifth review.) CADDY'S hostname, read from the container
+  # that is serving the site — not the first COMRADE_HOST Compose prints.
   #
   # The hostname has to come from the deployment's configuration: Compose
-  # interpolates `.env` for the containers and exports nothing into the parent
-  # SSM shell, so a correctly configured host was reaching the unset-host
-  # failure below. The first attempt at that read `.env` with sed — and `.env`
-  # is Compose's format, not a shell's. Given
+  # interpolates for the containers and exports nothing into the parent SSM
+  # shell, so a correctly configured host was reaching the unset-host failure
+  # below. Two attempts at that were wrong in the same direction.
   #
-  #     COMRADE_HOST=comrade.example.test # public hostname
+  # The first read `.env` with sed — but `.env` is Compose's format, not a
+  # shell's. `COMRADE_HOST=comrade.example.test # public hostname` is the
+  # hostname alone to Compose and hostname-plus-comment to sed.
   #
-  # Compose configures `comrade.example.test` and the sed produced
-  # `comrade.example.test # public hostname`, which the probe then asked for.
-  # Inline comments, quoting, whitespace and `${VAR}` interpolation all diverge
-  # the same way, and this check runs AFTER activation — so a healthy release
-  # is reported failed.
+  # The second asked `$COMPOSE config` and took the first matching key. Every
+  # service with `env_file: [.env]` — api, agent-worker, pipeline-worker —
+  # also carries COMRADE_HOST, holding the LITERAL file value. Only caddy is
+  # given the interpolated `${COMRADE_HOST}`. Services print alphabetically, so
+  # the first match was agent-worker's:
   #
-  # `config` is the parser the deployment already relies on. Only the one value
-  # is extracted; nothing else from the resolved configuration is printed.
+  #   .env: from-dotenv.test    shell: from-shell.test
+  #     services.agent-worker.environment.COMRADE_HOST:  from-dotenv.test
+  #     services.api.environment.COMRADE_HOST:           from-dotenv.test
+  #     services.caddy.environment.COMRADE_HOST:         from-shell.test  <- site
+  #     what the release extracted:                      from-dotenv.test
   #
-  # ALWAYS Compose's answer, with no shell short-circuit in front of it.
-  # Measured on Compose 2.39.4: where `.env` sets COMRADE_HOST, `.env` WINS
-  # over an exported shell variable — the opposite of the precedence I had
-  # assumed. Caddy's site is whatever Compose handed the container, so
-  # preferring the shell here would have the probe check a hostname the site is
-  # not serving. One source of truth, and it is the containers'.
-  COMRADE_HOST=$($COMPOSE config 2>/dev/null \
-    | awk -F':[[:space:]]*' '/^[[:space:]]+COMRADE_HOST:/ {print $2; exit}' \
-    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  # So the probe asked for a name Caddy has no site for, which is the original
+  # F35 defect reintroduced by its own fix. It also produced the "Compose
+  # reverses interpolation precedence" claim in the ledger: I had measured the
+  # api's env_file copy, which no shell variable can affect. Ordinary
+  # precedence holds. The shell does win for the interpolated value.
+  #
+  # No parsing this time. docker/Caddyfile's site address is `{$COMRADE_HOST}`,
+  # substituted from the container's environment when Caddy loads its config,
+  # so the running container's variable IS the name the site is served under.
+  # This step already runs after activation, so the container is there to ask.
+  #
+  # NOT piped into `tr`: a pipeline's status is its LAST command's, so `if !`
+  # around a pipe tests the wrong thing — the same mistake that reported this
+  # script's own gate as passing.
+  if ! caddy_host=$($COMPOSE exec -T caddy printenv COMRADE_HOST); then
+    echo "could not read COMRADE_HOST from the running caddy container: it is" \
+         "either not running or has no hostname configured" >&2
+    exit 1
+  fi
+  COMRADE_HOST=$(printf '%s' "$caddy_host" | tr -d '\r')
   export COMRADE_HOST
   if [ -z "${COMRADE_HOST:-}" ]; then
-    echo "COMRADE_HOST is not set in the Compose configuration, so the public" \
-         "site cannot be checked" >&2
+    echo "the caddy container has an empty COMRADE_HOST, so the public site" \
+         "cannot be checked" >&2
     exit 1
   fi
 

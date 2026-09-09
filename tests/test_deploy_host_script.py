@@ -95,12 +95,14 @@ def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
     # The prod overlay has a caddy service, so the release's proxy checks
     # must actually run here rather than being skipped.
     printf 'api\\nfrontend\\ncaddy\\n'; exit 0 ;;
+  *"exec -T caddy printenv COMRADE_HOST")
+    # 🔴 The site's own hostname, read from the container serving it.
+    echo comrade.example.test; exit 0 ;;
   *config)
-    # 🔴 `config` and `config --services` are different questions. The
-    # release reads the hostname out of the RESOLVED configuration now
-    # instead of parsing `.env` itself, so this has to answer it — and
-    # answering it HERE rather than from the environment is the point.
-    printf '      COMRADE_HOST: comrade.example.test\\n'; exit 0 ;;
+    # The resolved model, with an env_file service's copy FIRST — which is what
+    # a key search finds, and is not the name Caddy serves. A release that goes
+    # back to scraping this fails the assertions below instead of passing them.
+    printf '      COMRADE_HOST: from-env-file.test\\n'; exit 0 ;;
   *" build") [ "$FAILURE" != build ] || exit 7 ;;
   *" -T migrate") [ "$FAILURE" != migration ] || exit 8 ;;
   *"validate --config"*) [ "$FAILURE" != proxyconfig ] || exit 6 ;;
@@ -122,8 +124,8 @@ esac
            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
            "DEPLOY_LOG": log.as_posix(), "FAILURE": failure,
            }
-    # NOT set here. The release takes the hostname from Compose's resolved
-    # configuration, which the double above reports, so an inherited variable
+    # NOT set here. The release reads the hostname out of the running caddy
+    # container, which the double above answers, so an inherited variable
     # cannot be what makes this pass.
     env.pop("COMRADE_HOST", None)
     # 🔴 Asserted BEFORE the script runs, and the path put in front INSIDE the
@@ -236,7 +238,8 @@ def _double(path, name, extra=()):
     path.chmod(0o755)
 
 
-def _fake_host(tmp_path, *, failure="", compose_host=None, dotenv_host=None):
+def _fake_host(tmp_path, *, failure="", caddy_host=None, model_host=None,
+               dotenv_host=None):
     """A host with the repository checked out, and every external faked."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -253,16 +256,18 @@ def _fake_host(tmp_path, *, failure="", compose_host=None, dotenv_host=None):
     for name in ("git", "mkdir", "chown", "flock", "sleep"):
         _double(fake_bin / name, name)
     _double(fake_bin / "stat", "stat", ["echo 999"])
-    # The same two questions, answered separately. Only the SHAPE of
-    # `config` output is imitated here; that this shape is what Compose
-    # really emits, for every way the hostname can be written, is what
-    # test_the_release_and_compose_agree_on_the_hostname checks against
-    # real Compose.
+    # Three different questions. `config --services` says which services exist;
+    # `exec -T caddy printenv` is the site's own hostname; `config` is the
+    # resolved model, whose FIRST COMRADE_HOST belongs to an env_file service
+    # and is deliberately a different value here.
     answers = ['case "$*" in',
                '  *"config --services") printf \'api\\nfrontend\\ncaddy\\n\' ;;']
-    if compose_host:
+    if caddy_host:
         answers.append(
-            "  *config) printf '      COMRADE_HOST: %s\\n' ;;" % compose_host)
+            '  *"exec -T caddy printenv COMRADE_HOST") echo %s ;;' % caddy_host)
+    if model_host:
+        answers.append(
+            "  *config) printf '      COMRADE_HOST: %s\\n' ;;" % model_host)
     answers.append('esac')
     _double(fake_bin / "docker", "docker", answers)
     _double(fake_bin / "curl", "curl",
@@ -309,7 +314,7 @@ def test_the_release_runs_the_way_the_workflow_invokes_it(tmp_path):
     the committed helper is at `scripts/proxy_check.sh`. The check I added so a
     healthy deployment would stop being reported broken would itself have
     failed every healthy deployment."""
-    env = _fake_host(tmp_path, compose_host="comrade.example.test")
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
 
     result = _as_the_workflow_does(tmp_path, env)
 
@@ -327,7 +332,7 @@ def test_the_hostname_comes_from_the_deployments_own_configuration(tmp_path):
 
     Nothing is in the environment here — `_fake_host` removes it — and the
     release still has to arrive at the configured name."""
-    env = _fake_host(tmp_path, compose_host="from-compose.test")
+    env = _fake_host(tmp_path, caddy_host="from-compose.test")
 
     result = _as_the_workflow_does(tmp_path, env)
 
@@ -336,24 +341,31 @@ def test_the_hostname_comes_from_the_deployments_own_configuration(tmp_path):
     assert any("from-compose.test" in call for call in calls), calls
 
 
-def test_the_hostname_the_probe_uses_is_the_one_compose_reports(tmp_path):
-    """🔴 REWRITTEN. This asserted that an exported variable beats `.env`,
-    which Compose does not do (measured above) — so the release must not do it
-    either, or the probe checks a name the site is not serving. The release now
-    asks Compose and uses whatever comes back; here the `docker` double reports
-    a specific value and that is what has to reach the probe.
+def test_the_probe_asks_for_the_name_caddy_is_serving(tmp_path):
+    """🔴 THE FIFTH-REVIEW DEFECT, through the complete stdin invocation.
+
+    Three hostnames are in play and only one of them is the site: `.env` holds
+    one (which the release must not parse), the resolved model lists an
+    env_file service's copy FIRST (which a key search finds), and the caddy
+    container has the one Caddy actually serves.
+
+    The probe has to ask for the third. The other two are exactly what the two
+    previous attempts at F35 reached instead.
     """
     env = _fake_host(tmp_path, dotenv_host="only-in-the-file.test",
-                     compose_host="what-compose-says.test")
+                     model_host="first-in-the-model.test",
+                     caddy_host="what-caddy-serves.test")
 
     result = _as_the_workflow_does(tmp_path, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
     calls = (tmp_path / "commands.log").read_text().splitlines()
-    assert any("what-compose-says.test" in call for call in calls), calls
-    # The `.env` sitting right there is not what the release reads. When it
-    # parsed the file itself, this is the value the probe asked for.
+    probe = [call for call in calls if call.startswith("curl ")]
+    assert probe, calls
+    assert all("what-caddy-serves.test" in call for call in probe), probe
+    # The two wrong answers, each one a previous version of this fix.
     assert not any("only-in-the-file.test" in call for call in calls), calls
+    assert not any("first-in-the-model.test" in call for call in calls), calls
 
 
 def test_a_host_configured_nowhere_is_refused(tmp_path):
@@ -370,7 +382,7 @@ def test_a_host_configured_nowhere_is_refused(tmp_path):
 
 def test_a_missing_helper_is_reported_rather_than_skipped(tmp_path):
     """A checkout without the helper is a broken release, not a passed check."""
-    env = _fake_host(tmp_path, compose_host="comrade.example.test")
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
     (tmp_path / "scripts" / "proxy_check.sh").unlink()
 
     result = _as_the_workflow_does(tmp_path, env)
@@ -414,9 +426,11 @@ def test_the_double_directory_is_searched_in_the_shells_own_syntax(tmp_path):
     assert "\\" not in _posix(tmp_path)
     assert _posix("/already/posix") == "/already/posix"
 
+
 # ---------------------------------------------------------------------------
-# F35 follow-up — the hostname is Compose's, not a second parser's
+# F35 — the hostname is CADDY'S, and Caddy is the only service that has it
 # ---------------------------------------------------------------------------
+
 
 def _compose_available() -> bool:
     try:
@@ -441,145 +455,134 @@ HOSTNAME_SHAPES = {
                       "comrade.example.test"),
     "trailing-space": ("COMRADE_HOST=comrade.example.test   ",
                        "comrade.example.test"),
-    "interpolated": ("COMRADE_BASE=example.test\n"
-                     "COMRADE_HOST=comrade.${COMRADE_BASE}",
+    "interpolated": ("COMRADE_BASE=example.test\nCOMRADE_HOST=comrade.${COMRADE_BASE}",
                      "comrade.example.test"),
 }
 
 
-def _extraction_block() -> str:
-    """Everything the release does to decide the hostname, lifted from the
-    release script itself.
+def _project(tmp_path, dotenv_body):
+    """The committed Compose files, with a `.env` of our choosing beside them."""
+    project = tmp_path / "deploy"
+    project.mkdir()
+    for name in ("docker-compose.yml", "docker-compose.prod.yml"):
+        shutil.copy(ROOT / name, project / name)
+    (project / ".env").write_text(
+        "POSTGRES_PASSWORD=secret\nCOMRADE_PREVIEW_DOMAIN=p.test\n"
+        + dotenv_body.replace("\\n", "\n") + "\n",
+        encoding="utf-8", newline="\n")
+    return project
 
-    Read out of the file rather than restated, so this cannot drift into
-    testing a copy that no longer matches what deploys.
 
-    Bounded by the SECTION, from the end of the missing-helper guard to the
-    start of the probe — not by the assignment. Anchored on the assignment,
-    anything put in FRONT of it falls outside the lifted text and this goes
-    blind to it, which is exactly the shape of the mistake measured below.
+def _resolved(project, env=None):
+    """Compose's resolved model, parsed as YAML rather than scraped."""
+    import yaml
+
+    out = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml",
+         "-f", "docker-compose.prod.yml", "config"],
+        cwd=project, env={**os.environ, **(env or {})},
+        capture_output=True, text=True, encoding="utf-8", timeout=180,
+    )
+    assert out.returncode == 0, out.stderr[-400:]
+    return yaml.safe_load(out.stdout), out.stdout
+
+
+@needs_compose
+def test_only_caddy_carries_the_interpolated_hostname(tmp_path):
+    """🔴 THE DEFECT (fix.md, fifth review). Every service with
+    `env_file: [.env]` also carries COMRADE_HOST — holding the LITERAL file
+    value, which no shell variable can affect. Only caddy is given the
+    interpolated `${COMRADE_HOST}`, and caddy is the one serving the site.
+
+    Services are emitted alphabetically, so a search for the first COMRADE_HOST
+    key finds agent-worker's. The release did exactly that, and the probe then
+    asked for a name Caddy has no site for — the original F35 defect, put back
+    by its own fix.
+
+    It also produced the ledger's claim that Compose reverses interpolation
+    precedence. It does not: that was the api's `env_file` copy being read.
     """
-    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
-    helper = script.index("scripts/proxy_check.sh is missing")
-    start = script.index("\n  fi\n", helper) + len("\n  fi\n")
-    end = script.index("if ! sh scripts/proxy_check.sh", start)
-    assert "COMRADE_HOST=$($COMPOSE config" in script[start:end], script[start:end]
-    return script[start:end]
+    project = _project(tmp_path, "COMRADE_HOST=from-dotenv.test")
+
+    model, raw = _resolved(project, {"COMRADE_HOST": "from-shell.test"})
+
+    services = model["services"]
+    assert services["caddy"]["environment"]["COMRADE_HOST"] == "from-shell.test"
+    # The shell does NOT reach the env_file services, because `env_file` copies
+    # the file's literal text rather than interpolating it.
+    for name in ("api", "agent-worker", "pipeline-worker"):
+        assert services[name]["environment"]["COMRADE_HOST"] == "from-dotenv.test"
+
+    # And the first one printed is not caddy's, which is what made a key search
+    # the wrong tool no matter how carefully the key was matched.
+    first = next(line.split(":", 1)[1].strip()
+                 for line in raw.splitlines()
+                 if line.strip().startswith("COMRADE_HOST:"))
+    assert first == "from-dotenv.test", (
+        "the first COMRADE_HOST is caddy's on this Compose version, so this"
+        " test no longer reproduces the finding — check the release still asks"
+        " caddy rather than relying on the order"
+    )
 
 
 @needs_compose
 @pytest.mark.parametrize("shape", sorted(HOSTNAME_SHAPES))
-def test_the_release_and_compose_agree_on_the_hostname(tmp_path, shape):
-    """🔴 THE DEFECT (fix.md F35 follow-up). The hand-written `.env` parser is
-    not Compose's `.env` parser.
+def test_compose_resolves_every_hostname_shape_for_caddy(tmp_path, shape):
+    """The shapes the earlier rounds got wrong, kept: inline comment, both
+    quotings, trailing whitespace, `${VAR}` interpolation.
 
-    Given `COMRADE_HOST=comrade.example.test # public hostname`, Compose
-    configures `comrade.example.test` and the sed produced
-    `comrade.example.test # public hostname` — which the probe then asked for,
-    AFTER activation, so a healthy release was reported failed.
-
-    This runs the committed extraction and real Compose against the same
-    project and requires the same answer, for every shape the finding names.
+    They are Compose's problem now rather than the release's — which is the
+    point of not carrying a second parser — so what is pinned here is that
+    CADDY's resolved value is the bare hostname for each of them.
     """
     body, expected = HOSTNAME_SHAPES[shape]
-    project = tmp_path / "deploy"
-    project.mkdir()
-    shutil.copy(ROOT / "docker-compose.yml", project / "docker-compose.yml")
-    shutil.copy(ROOT / "docker-compose.prod.yml",
-                project / "docker-compose.prod.yml")
-    (project / ".env").write_text(
-        "POSTGRES_PASSWORD=secret\nCOMRADE_PREVIEW_DOMAIN=p.test\n"
-        + body.replace("\\n", "\n") + "\n",
-        encoding="utf-8", newline="\n")
 
-    # What Compose itself resolves, which is what the containers receive.
-    resolved = subprocess.run(
-        ["docker", "compose", "-f", "docker-compose.yml",
-         "-f", "docker-compose.prod.yml", "config"],
-        cwd=project, capture_output=True, text=True, encoding="utf-8",
-        timeout=180,
-    )
-    assert resolved.returncode == 0, resolved.stderr[-400:]
-    from_compose = next(
-        line.split(":", 1)[1].strip().strip("\"'")
-        for line in resolved.stdout.splitlines()
-        if line.strip().startswith("COMRADE_HOST:")
-    )
-    assert from_compose == expected, (shape, from_compose)
+    model, _ = _resolved(_project(tmp_path, body))
 
-    # And what the release script extracts, running the committed block.
-    script = (
-        'COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"\n'
-        + _extraction_block()
-        + '\necho "$COMRADE_HOST"\n'
-    )
-    extracted = subprocess.run(
-        [SH, "-c", script], cwd=project, capture_output=True, text=True,
-        encoding="utf-8", timeout=180,
-    )
-
-    assert extracted.stdout.strip() == from_compose, (
-        f"{shape}: the release asks for {extracted.stdout.strip()!r} while"
-        f" Compose configured {from_compose!r}"
-    )
+    assert model["services"]["caddy"]["environment"]["COMRADE_HOST"] == expected
 
 
 @needs_compose
-def test_the_release_agrees_with_compose_even_under_a_shell_override(tmp_path):
-    """🔴 MEASURED, not assumed. I expected the shell to win over `.env`, which
-    is the documented interpolation precedence. On Compose 2.39.4 it does not:
-    with COMRADE_HOST in `.env`, `.env` wins over an exported variable.
+def test_the_running_caddy_container_reports_the_resolved_hostname(tmp_path):
+    """The release reads `printenv COMRADE_HOST` from the caddy container,
+    because docker/Caddyfile's site address is `{$COMRADE_HOST}` and Caddy
+    substitutes it from the container environment when it loads its config.
 
-    That settles the design rather than complicating it. Caddy's site is
-    whatever Compose handed the container, so the probe must ask for the same
-    thing — agreeing with Compose is the property, and a precedence of the
-    release's own would make it check a hostname the site is not serving.
+    This runs the real image with the value Compose resolved, so the assumption
+    that reading it back is possible at all is checked against the image rather
+    than against a double.
     """
-    project = tmp_path / "deploy"
-    project.mkdir()
-    shutil.copy(ROOT / "docker-compose.yml", project / "docker-compose.yml")
-    shutil.copy(ROOT / "docker-compose.prod.yml",
-                project / "docker-compose.prod.yml")
-    (project / ".env").write_text(
-        "POSTGRES_PASSWORD=secret\nCOMRADE_PREVIEW_DOMAIN=p.test\n"
-        "COMRADE_HOST=from-dotenv.test\n", encoding="utf-8", newline="\n")
+    project = _project(tmp_path, "COMRADE_HOST=from-dotenv.test")
+    model, _ = _resolved(project, {"COMRADE_HOST": "from-shell.test"})
+    resolved = model["services"]["caddy"]["environment"]["COMRADE_HOST"]
+    image = model["services"]["caddy"]["image"]
 
-    script = (
-        'COMPOSE="docker compose -f docker-compose.yml -f docker-compose.prod.yml"\n'
-        + _extraction_block()
-        + '\necho "$COMRADE_HOST"\n'
-    )
     out = subprocess.run(
-        [SH, "-c", script], cwd=project,
-        env={**os.environ, "COMRADE_HOST": "from-shell.test"},
-        capture_output=True, text=True, encoding="utf-8", timeout=180,
+        ["docker", "run", "--rm", "-e", f"COMRADE_HOST={resolved}", image,
+         "printenv", "COMRADE_HOST"],
+        capture_output=True, text=True, encoding="utf-8", timeout=300,
     )
 
-    resolved = subprocess.run(
-        ["docker", "compose", "-f", "docker-compose.yml",
-         "-f", "docker-compose.prod.yml", "config"],
-        cwd=project, env={**os.environ, "COMRADE_HOST": "from-shell.test"},
-        capture_output=True, text=True, encoding="utf-8", timeout=180,
-    )
-    from_compose = next(
-        line.split(":", 1)[1].strip().strip("\"'")
-        for line in resolved.stdout.splitlines()
-        if line.strip().startswith("COMRADE_HOST:")
-    )
-
-    assert out.stdout.strip() == from_compose, (
-        f"the release asks for {out.stdout.strip()!r} while Compose configured"
-        f" {from_compose!r}"
-    )
+    assert out.returncode == 0, out.stderr[-400:]
+    assert out.stdout.strip() == "from-shell.test"
 
 
-def test_the_release_no_longer_carries_its_own_env_parser():
-    """One parser. A second one beside Compose's is what produced a hostname
-    Compose never configured."""
+def test_the_release_reads_caddys_environment_and_parses_nothing():
+    """One source, and it is the container that serves the site. A second
+    parser beside Compose's produced a hostname Compose never configured; a
+    key search across Compose's own output produced another service's."""
     script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
     code = "\n".join(line for line in script.splitlines()
                      if not line.lstrip().startswith("#"))
 
-    assert "$COMPOSE config" in code
+    assert "exec -T caddy printenv COMRADE_HOST" in code
     assert ".env" not in code, "the release reads .env itself again"
-
+    # `config --services` asks a yes/no question about which services exist.
+    # Any OTHER use of `config` means the resolved model is being read, and
+    # every env_file service carries a COMRADE_HOST that is not caddy's.
+    scrapes = [line.strip() for line in code.splitlines()
+               if "$COMPOSE config" in line and "--services" not in line]
+    assert not scrapes, (
+        "the release is reading Compose's resolved model again; caddy's value"
+        f" is not the first one in it: {scrapes}"
+    )

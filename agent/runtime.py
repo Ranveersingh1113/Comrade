@@ -234,11 +234,31 @@ def _permission_wait(step: dict[str, Any]) -> bool:
 # caller. The `if all_steps` guard is what keeps that true. A turn that called
 # a tool and THEN went quiet must never be retried; it would run the tool twice.
 #
-# Three attempts, not more: measured 1-in-8 empty, so a third failure is ~1 in
-# 500 and is more likely to be something systematic than bad luck — at which
-# point the honest `empty` frame below is the right answer rather than a fourth
-# call on the member's budget.
-EMPTY_TURN_ATTEMPTS = 3
+# 🔴 RE-MEASURED 2026-09-09 (fix.md F52), and the rate has moved a long way.
+# The paragraph above sized this at three because a 1-in-8 empty rate makes a
+# third failure ~1 in 500. It is not 1 in 8 any more. Asking the same ordinary
+# question through `stream_turn` 24 times, in two runs:
+#
+#     42 model calls, 19 of them empty          ~45% per call
+#     1 turn in 12 exhausted all three attempts  ~8% of turns answered nothing
+#
+# At 45%, three attempts is ~1 in 11, not 1 in 500 — which is the review's
+# observation exactly, and needs no explanation beyond arithmetic. Six gets it
+# back under 1%. An empty call generates no output tokens, so the cost of the
+# extra attempts is prompt tokens and latency, not answers.
+#
+# 🔴 This is a RECALIBRATION, not a root cause. Why the model returns an empty
+# candidate is still not established; two plausible causes were tested and are
+# not it:
+#
+#   * the experimental JSON_SCHEMA_FOR_FUNC_DECL declaration path — disabling
+#     it made every call empty, 36/36, so it is load-bearing, not the fault;
+#   * request pacing — 8 seconds between turns left the per-call rate at 43%,
+#     so this is not rate limiting.
+#
+# If a later reader finds this number climbing again, the rate is the thing to
+# measure, and raising the constant is not the answer twice.
+EMPTY_TURN_ATTEMPTS = 6
 
 
 async def stream_turn(

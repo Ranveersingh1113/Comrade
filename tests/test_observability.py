@@ -190,3 +190,70 @@ def test_a_turn_binds_its_run_so_the_lines_can_be_found():
     assert "log_context" in source, (
         "a turn is the unit an operator debugs and it opens no context"
     )
+
+
+# ---------------------------------------------------------------------------
+# F52 — the context survives an abandoned async generator
+# ---------------------------------------------------------------------------
+
+def test_context_unwinds_when_a_generator_is_closed_elsewhere():
+    """🔴 THE DEFECT (fix.md F52). `log_context` restored itself with
+    `ContextVar.reset(token)`, and a Token may only be reset in the Context
+    that created it.
+
+    `agent.runtime.stream_turn` holds this open across `yield`, so the contexts
+    differ whenever the generator is finalised somewhere other than where it
+    was driven — a member closing the tab mid-answer, or a cancelled turn. The
+    `aclose()` then raised
+
+        ValueError: <Token ...> was created in a different Context
+
+    out of the cleanup path of a turn that was otherwise done. Observed live at
+    shared/observability.py:54 via agent/runtime.py:272.
+
+    Driving it to exhaustion in one task never showed this, which is why the
+    suite did not.
+    """
+    import asyncio
+    from contextlib import ExitStack
+
+    async def turn():
+        with ExitStack() as stack:
+            stack.enter_context(log_context(team_id="t", thread_id="th"))
+            yield "run"
+            yield "final"
+
+    async def drive():
+        gen = turn()
+        # One frame taken inside one task's context...
+        assert await asyncio.create_task(gen.__anext__()) == "run"
+        # ...and finalised from a different one, which is the abandoned case.
+        await asyncio.create_task(gen.aclose())
+
+    asyncio.run(drive())
+
+
+def test_an_abandoned_generator_still_restores_the_previous_context(captured):
+    """And it restores rather than merely not raising: a field from an
+    abandoned turn must not stay attached to whatever the worker does next."""
+    import asyncio
+    from contextlib import ExitStack
+
+    async def turn():
+        with ExitStack() as stack:
+            stack.enter_context(log_context(team_id="abandoned-team"))
+            yield "run"
+            yield "final"
+
+    async def drive():
+        gen = turn()
+        await gen.__anext__()
+        await asyncio.create_task(gen.aclose())
+
+    logger, records = captured
+    with log_context(team_id="outer-team"):
+        asyncio.run(drive())
+        logger.info("after the abandoned turn")
+
+    assert "outer-team" in records[-1], records[-1]
+    assert "abandoned-team" not in records[-1], records[-1]

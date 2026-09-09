@@ -44,14 +44,34 @@ def log_context(**fields: Any) -> Iterator[None]:
     Scoped rather than global: a worker slot handles one team's job and then
     another's, and context that leaked between them would attribute one team's
     failure to another — worse than having none at all.
+
+    🔴 (fix.md F52) RESTORED BY VALUE, not by token. `ContextVar.reset(token)`
+    requires the token to be reset in the Context it was created in, and
+    `agent.runtime.stream_turn` holds this open across `yield` — so the
+    contexts differ whenever the generator is finalised somewhere other than
+    where it was driven. A member closing the tab mid-answer, or a cancelled
+    turn, abandons the generator; its `aclose()` then runs in another task and
+    the reset raised
+
+        ValueError: <Token ...> was created in a different Context
+
+    out of the cleanup path, on a turn that was otherwise finished. Reproduced
+    deterministically: exhausting the generator in one task is clean, taking
+    one frame and closing it from another is not.
+
+    Saving the previous mapping and putting it back is equivalent here — the
+    var always holds a dict and defaults to `{}`, so there is no "unset" state
+    for a token to restore that a value cannot — and it is indifferent to which
+    context does the restoring.
     """
-    token = _context.set({**_context.get(), **{
+    previous = _context.get()
+    _context.set({**previous, **{
         k: str(v) for k, v in fields.items() if v is not None
     }})
     try:
         yield
     finally:
-        _context.reset(token)
+        _context.set(previous)
 
 
 def bind(**fields: Any) -> None:

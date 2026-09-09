@@ -21,6 +21,9 @@ three times inside a single turn; on top of that these tests will re-ASK, which
 is what a member does, and the number of asks each prompt needed is printed. A
 prompt that never answers fails. An error notice never counts as an answer.
 """
+import os
+import time
+
 import psycopg
 import pytest
 
@@ -34,13 +37,19 @@ pytestmark = [pytest.mark.live, pytest.mark.skipif(
 
 #: How many times a prompt may be re-asked before it counts as unanswered.
 #:
-#: Measured 2026-09-09 against the configured model: 10 of 21 calls came back
-#: with an empty candidate, and 1 turn in 12 exhausted the runtime's own three
-#: attempts. Re-asking is what a member does when a turn comes back empty, and
-#: two asks of a three-attempt turn is what keeps this a test of the product
-#: rather than a coin flip. Raising it to hide a rising empty rate would defeat
-#: the point — the count each prompt needed is reported.
-MAX_ASKS = 2
+#: ONE. A member asks a question once, and the release acceptance is that they
+#: get an answer — not that they get one if they ask twice.
+#:
+#: That is affordable because the retries that matter are INSIDE the turn.
+#: Measured 2026-09-09 against the configured model, 42 calls: ~45% came back
+#: with an empty candidate, so `agent.runtime.EMPTY_TURN_ATTEMPTS = 6` puts a
+#: whole turn's chance of silence under 1%. Six internal attempts, one human
+#: one.
+#:
+#: Overridable for diagnosis only. Raising it to get a green run would be
+#: measuring a different product than the one a member uses, and the asks each
+#: prompt needed are reported either way.
+MAX_ASKS = int(os.environ.get("COMRADE_USEFULNESS_MAX_ASKS", "1"))
 
 #: Facts nothing but the team's real state can supply.
 TASK_TITLE = "Wire the telemetry exporter"
@@ -113,19 +122,25 @@ def _ask(thread_id: str, prompt: str) -> tuple[dict, int]:
     refuses it, which is how this test found its own bug.
     """
     for ask in range(1, MAX_ASKS + 1):
+        started = time.monotonic()
         result = run_turn_sync(TEAM_A, A1, prompt, thread_id=thread_id)
+        elapsed = time.monotonic() - started
+        result["_seconds"] = round(elapsed, 1)
+        result["_asks"] = ask
         if (result.get("reply") or "").strip():
             return result, ask
         if "empty" not in result:
             return result, ask
-        print(f"    [{prompt[:40]!r}] ask {ask}/{MAX_ASKS} came back empty")
-    return {"reply": "", "empty": True}, MAX_ASKS
+        print(f"    [{prompt[:40]!r}] ask {ask}/{MAX_ASKS} empty after"
+              f" {elapsed:.1f}s")
+    return {"reply": "", "empty": True, "_seconds": 0.0, "_asks": MAX_ASKS}, MAX_ASKS
 
 
 def _answers(thread_id: str, prompt: str, *must_contain: str) -> str:
     result, asks = _ask(thread_id, prompt)
     reply = (result.get("reply") or "").strip()
-    print(f"    answered in {asks} ask(s): {reply[:120]!r}")
+    print(f"    LATENCY {result.get('_seconds')}s  ASKS {asks}/{MAX_ASKS}"
+          f"  -> {reply[:100]!r}")
     assert reply, (
         f"{prompt!r} produced no reply in {MAX_ASKS} asks. The member gets an"
         " error notice, which the browser journey accepts and this does not."

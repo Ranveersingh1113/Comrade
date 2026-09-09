@@ -161,7 +161,10 @@ def document_is_ingested() -> None:
         conn.execute(
             "insert into public.documents (id, team_id, uploader_id, kind,"
             " filename, storage_path, status)"
-            " values (%s,%s,%s,'text','post-deploy-check.txt',%s,'pending')",
+            # 🔴 'parsing', not 'pending'. The statuses are parsing, ready and
+            # failed — documents_status_check refused my invented one — and
+            # 'parsing' is what the enqueue path itself sets.
+            " values (%s,%s,%s,'text','post-deploy-check.txt',%s,'parsing')",
             (doc, TEAM, USER, f"{TEAM}/{doc}/post-deploy-check.txt"))
         conn.execute(
             "insert into public.jobs (team_id, job_type, payload, status)"
@@ -176,7 +179,7 @@ def document_is_ingested() -> None:
             row = conn.execute(
                 "select status, coalesce(parsed_text,''), coalesce(parse_error,'')"
                 " from public.documents where id=%s", (doc,)).fetchone()
-        if row and row[0] in ("parsed", "failed"):
+        if row and row[0] in ("ready", "failed"):
             status, parsed, error = row[0], row[1], row[2]
             break
     else:
@@ -185,7 +188,7 @@ def document_is_ingested() -> None:
         return
 
     check("document ingestion: parsed by the running worker",
-          status == "parsed", f"status={status}")
+          status == "ready", f"status={status}")
     check("document ingestion: the text came through",
           DOC_FACT in (parsed or ""), f"{(parsed or '')[:60]!r}")
 

@@ -2509,21 +2509,28 @@ COMRADE_HOST=$($COMPOSE config 2>/dev/null \
   | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
 ```
 
-🔴 **MEASURED, not assumed — and I had it backwards.** I wrote a shell-wins
-short-circuit in front of this, and a test asserting that precedence, believing
-`.env` loses to an exported variable. On Compose 2.39.4 it does not:
+🔴 **RETRACTED — this measurement was of the wrong service.** What stood here
+was: "MEASURED, not assumed — and I had it backwards. On Compose 2.39.4 `.env`
+wins over an exported variable." That is false, and the fifth review caught it.
 
 ```
 no override:   COMRADE_HOST: from-dotenv.test
-with override: COMRADE_HOST: from-dotenv.test
+with override: COMRADE_HOST: from-dotenv.test     <- the API's env_file copy
 shell only:    COMRADE_HOST: from-shell.test
 neither:       COMRADE_HOST: ""
 ```
 
-So the short-circuit is gone, and the two tests asserting a shell-wins rule were
-rewritten to assert AGREEMENT WITH COMPOSE instead. Caddy's site is whatever
-Compose handed the container; a precedence of the release's own would have the
-probe check a name the site is not serving.
+The second line is the api service, which takes COMRADE_HOST through
+`env_file: [.env]` — the literal file text, which no shell variable can affect.
+Caddy, the service that actually serves the site, is given the interpolated
+`${COMRADE_HOST}` and resolved to `from-shell.test` throughout. Ordinary
+interpolation precedence holds. I read the first matching key out of a
+multi-service document and reported it as Compose's behaviour.
+
+The short-circuit removed on the strength of that claim was removed for a bad
+reason, though it stays removed for a good one: the release now asks the caddy
+container directly and has no precedence of its own to apply. See the fifth
+review below.
 
 ```
 sh -n scripts/deploy_host.sh                     ->  syntax OK
@@ -2551,13 +2558,35 @@ is now bounded by the section, not the statement.
 | F43 settlement ownership | yes | yes — 51 tests against real Postgres, 7 lifecycle cases, mutation-checked | migration `20260909130000` has not run outside local |
 | F37 endpoint verification | yes | yes — 44 tests; wildcard/family logic exercised from real `docker port` output shapes | never run against the pilot host's actual mapping |
 | Harness precedence | yes | partly — guards proven to bite by mutation | 🔴 the failing host is not reproducible here |
-| F35 hostname from Compose | yes | yes — six shapes against real Compose 2.39.4 | 🔴 no deploy has run with this |
+| F35 hostname from Compose | 🔴 NO — reopened by the fifth review; the value read was the API's, not Caddy's | the six shapes passed against real Compose and proved nothing, because the assertion repeated the implementation's own wrong lookup | 🔴 no deploy has run with this |
 
 ### The gate
 
-`scripts/gates.sh`, exit 0. The backend lane was re-run on its own afterwards
-with the database to itself, because the first run's output went through `tail`
-and the count was lost:
+🔴 **RETRACTED — `scripts/gates.sh` did not exit 0, and I never measured it.**
+What stood here was "`scripts/gates.sh`, exit 0 … one lane did NOT run: the
+browser journeys … `gates.sh` says so and still exits 0."
+
+The invocation was:
+
+```
+bash scripts/gates.sh 2>&1 | tail -45
+```
+
+A pipeline's status is its LAST command's, so the 0 reported was `tail`'s. The
+gate itself reaches `scripts/gates.sh:125-135`, finds no API on :8000, prints
+the message I quoted, and **exits 1** — `QUICK=0` by default and `--quick` was
+not passed. The message I saw was the failure, not a skip. Demonstrated:
+
+```
+sh -c 'false | tail -1; echo $?'                  ->  0
+sh -c 'set -o pipefail; false | tail -1; echo $?' ->  1
+```
+
+That is the exact defect `scripts/gates.sh` opens by describing — "`uv run
+pytest -q | tail -3 && git commit` does not gate on anything" — committed by
+the person who had just read it. No full gate pass is established for this
+round; what IS established is the lane below, which was run on its own and
+whose exit status was captured directly.
 
 ```
 uv run pytest -q     ->  1672 passed, 8 skipped, 17 deselected  (11m35s)
@@ -2568,12 +2597,12 @@ npm run test:integration   ->   21 passed,  6 files
 ```
 
 Up from 1645 backend last round; the 27 are this round's F43, F37, harness and
-F35 tests. No failures, and nothing newly skipped.
+F35 tests. Those per-lane results were read from the output and are accurate;
+the aggregate claim built on them was not.
 
-🔴 One lane did NOT run: the browser journeys, which need the API answering on
-:8000. `gates.sh` says so and still exits 0. It is the same gap the standing
-ceilings already record — no browser-level evidence anywhere in Phase B — and
-none of the four fixes is claimed on it.
+🔴 The browser journeys did not run, and the standing ceilings already record
+that gap — no browser-level evidence anywhere in Phase B. None of the four fixes
+is claimed on it.
 
 🔴 The realtime integration test failed its first trial ("no realtime event
 within 15000ms") and passed the retry the harness makes for exactly that reason.
@@ -2591,6 +2620,218 @@ the F35 shape tests drive real Compose. None of the four is closed on a mock.
 here has been deployed, and the release script in particular is verified against
 command doubles plus one real-Compose comparison — which is a different claim
 from "the next deploy works".
+
+
+## Fifth review — 2026-09-09, pinned to `f474b48`
+
+Two of the previous round's four repairs were incomplete, one accounting
+lifecycle was missing, and one of my validation claims was false. The reviewer
+independently confirmed the Windows harness fix on the host that reproduced the
+original problem: 53 passed, 1 skipped.
+
+### F35 reopened — the probe read the API's hostname · `a63488f`
+
+The previous fix asked `$COMPOSE config` and took the first matching
+COMRADE_HOST key. Every service with `env_file: [.env]` carries one — api,
+agent-worker, pipeline-worker — holding the LITERAL file value. Only caddy is
+given the interpolated `${COMRADE_HOST}`, and caddy is the service serving the
+site. Compose prints services alphabetically, so the first match was
+agent-worker's.
+
+Reproduced with real Compose against copies of both committed files, `.env`
+`COMRADE_HOST=from-dotenv.test` and shell `COMRADE_HOST=from-shell.test`:
+
+```
+services.agent-worker.environment.COMRADE_HOST:  from-dotenv.test
+services.api.environment.COMRADE_HOST:           from-dotenv.test
+services.caddy.environment.COMRADE_HOST:         from-shell.test   <- the site
+what the release extracted:                      from-dotenv.test
+```
+
+So the probe asked for a name Caddy has no site for: the original F35 defect,
+put back by its own fix, in a check that runs after activation. And the test I
+wrote to accept the fix performed the same first-key search, so it agreed with
+the implementation instead of testing it.
+
+**The invariant was never the problem** — "the probe asks for the name Caddy is
+serving" — and no lookup was going to satisfy it. The release now reads
+`$COMPOSE exec -T caddy printenv COMRADE_HOST`. `docker/Caddyfile`'s site
+address is `{$COMRADE_HOST}`, substituted from the container's environment when
+Caddy loads its config, so the running container's variable IS the name the site
+is served under. This step already runs after activation, so the container is
+there to ask. No parse at all, which is the third and last version of "stop
+writing parsers for other people's formats" in this finding.
+
+```
+sh -n scripts/deploy_host.sh                    ->  syntax OK
+pytest tests/test_deploy_host_script.py         ->  24 passed
+docker run --rm -e COMRADE_HOST=x caddy:2-alpine printenv COMRADE_HOST  ->  x
+```
+
+Acceptance: caddy's exact value under conflicting `.env` and shell values from
+real Compose; that value reaching the probe through the complete stdin
+invocation, with the `.env` value and the model's first value both present as
+decoys and asserted absent; the six quoting/comment/interpolation shapes kept,
+now pinned on caddy's resolved value. Mutation-checked: the first-key scrape
+fails 6 tests, and so does a scrape narrowed to caddy's own section of the
+model.
+
+🔴 **The precedence claim in the fourth review is retracted above.** Ordinary
+Compose interpolation precedence holds; the shell does win. I had measured the
+api's `env_file` copy and reported it as Compose's behaviour.
+
+### F37 reopened — a one-family wildcard does not cover localhost · `023cae1`
+
+Literal-address matching was fixed last round. The NAME branch still read
+`any(address in _WILDCARD for address in matching)`: any matching-port wildcard,
+whatever family it answered for. A container publishing IPv4 `0.0.0.0:54322`
+satisfied a request for `localhost:54322` — while `localhost` resolves `::1`
+FIRST on this host, so a client following the resolver reaches an IPv6 listener
+that may be a separate database or a tunnel, and the fallback then runs
+`docker exec` inside the IPv4 container. For a restore that is not a failed
+operation, it is a successful one against the wrong server.
+
+Measured with publication mocked to `0.0.0.0:54322`, no connection attempted:
+
+```
+_publishes('localhost',  '54322') -> True
+_publishes('::1',        '54322') -> False    <- what localhost reaches first
+_publishes('127.0.0.1',  '54322') -> True
+```
+
+**The invariant:** every address the request can reach belongs to this
+container. Not one of them.
+
+`_resolves_to` asks the resolver what the host really reaches — a literal
+resolves to itself, leaving exact-address matching unchanged; a name resolves to
+everything behind it — and `_publishes` requires ALL of them to be covered by an
+exact match or a same-family wildcard. One uncovered family refuses, naming the
+addresses the request reaches instead of saying "ambiguous" and leaving the
+operator to work out which half is missing.
+
+```
+pytest tests/test_backup_integrity.py tests/test_restore_drill.py
+  ->  47 passed, 1 skipped
+```
+
+One existing test published IPv4 only while asking for `localhost` and now
+refuses; its SETUP was fixed, not its assertion — it is about what the fallback
+preserves, so it gets an unambiguous endpoint. Acceptance covers the dual-family
+refusal, the dual-family acceptance, and a test that takes whatever `localhost`
+resolves to on the host running it, requires publishing exactly that set to be
+accepted and dropping any member to be refused — so it pins the rule rather than
+this machine. Mutation-checked: the one-family branch fails 2, `all` weakened to
+`any` fails 3.
+
+### F49 — a cancelled parked run kept its tokens reserved · `87d2029`
+
+A permission wait checkpoints what the run has spent, drops the lease and
+returns from the runtime. No worker is left. The cancellation route settled only
+runs it found `queued`, so cancelling from `waiting_for_permission` set a
+terminal status and settled nothing — and nothing else ever would. A
+6,000-token reservation stayed charged for the rest of the hour after a turn
+that spent 1,200 was stopped.
+
+`usage_owner`, added for F43, correctly preserves who WAS executing. That is
+what stops a stale worker settling someone else's run. It does not conjure a
+caller: **identity is not a settlement.**
+
+**The invariant:** a run that reaches a terminal state releases its reservation
+exactly once — including when there is no worker left to do it.
+
+`settle_from_checkpoint` takes no identity because it takes no totals either:
+the amount is the checkpoint on the run's own row, written by
+`pause_for_permission` in the same statement that parked it. It is fenced on a
+terminal status AND `worker_id is null` — together, nobody is executing, which
+is the only condition under which a caller that did not do the work may account
+for it.
+
+`cancel_run` returns the status it cancelled FROM, from the same locking CTE
+that does the cancelling. Reading the status first and acting on it after is a
+different transaction from the write, so a claim or a resume landing in between
+would have the server settle a run somebody had just picked up.
+
+This also fixed the resumed-queued case: approval requeues a parked run, and
+settling `queued` as zero would refund budget an earlier segment really spent.
+The checkpoint says what it spent, so both cases become the same rule.
+
+```
+pytest tests/test_run_cancellation.py tests/test_usage_continuity.py
+       tests/test_usage_reservations.py tests/test_agent_resume.py
+       tests/test_agent_run_queue.py tests/test_queue_fairness.py
+       tests/test_run_stream_resume.py            ->  75 passed
+```
+
+Acceptance runs the real HTTP route against real Postgres: park through
+`pause_for_permission`, cancel, and the reservation reconciles to actual usage
+exactly once; cancelling twice does not refund twice; a resumed run cancelled
+before its next claim keeps what it spent; a run that never executed still
+settles nothing; an executing run is still left to its own worker.
+
+🔴 Mutation-checking found the lease fence had no test — every caller reaches it
+through `cancel_run`, which nulls `worker_id` on the way past, so no caller can
+present the state it guards. But `finish_run` sets a terminal status WITHOUT
+clearing `worker_id`, so an ordinary completed run is terminal and still held.
+That state is now reached directly, and the fence bites: settling only `queued`
+fails 2, settling zero instead of the checkpoint fails 3, dropping the fence
+fails 1.
+
+### The gate, measured this time
+
+Run twice, with the exit status captured into a variable immediately after
+`scripts/gates.sh` rather than inferred from a pipeline or a compound command.
+
+**First run, as the previous round left the host — `GATE EXIT: 1`.** The gate
+reaches the API check at `scripts/gates.sh:125-135`, finds nothing on :8000 and
+exits 1. This is what the previous round reported as "exit 0 with the browser
+journeys skipped".
+
+```
+backend      1682 passed, 8 skipped, 17 deselected   (12m02s)
+frontend     229 passed / 34 files;  integration 21 passed / 6 files
+browser      DID NOT RUN — gate exited 1 here
+```
+
+**Second run, after starting the API the gate asks for — `GATE EXIT: 0`.**
+
+```
+uv run uvicorn server.app:app --port 8000
+curl -fsS localhost:8000/health   ->  {"status":"ok","database":"ok"}
+
+=== backend (pytest) ===        1682 passed, 8 skipped, 17 deselected (11m50s)
+=== frontend build ===          ok
+=== frontend lint ===           ok, 3 fast-refresh warnings
+=== frontend unit + component ===   229 passed / 34 files
+=== frontend integration ===        21 passed / 6 files
+=== browser journeys (playwright) ===    8 passed (40.6s)
+=== real GitHub end to end ===      2 skipped, 1705 deselected
+all gates passed                GATE EXIT: 0
+```
+
+Backend is 1682, up from 1672: the ten new F35, F37 and F49 tests. The backend
+lane held the database alone both times.
+
+🔴 The real-GitHub lane SKIPPED — it is written to skip cleanly when no
+credential is configured, and none is here. "all gates passed" includes a lane
+that did not run, and that is a property of the script, not evidence.
+
+🔴 The realtime integration test again failed its first trial ("no realtime
+event within 15000ms") and passed the retry. Same flake, still unresolved,
+recorded rather than treated as noise.
+
+🔴 A third variant of the same mistake showed up while measuring this. The first
+careful re-run ended `... ; echo "GATE EXIT: $?" | tee -a log`, so the HARNESS
+reported exit 0 — the status of `tee` — while the captured `$?` said 1. The
+second run ends `exit $status` so both agree. Reading an exit code is not free
+just because you know the trap exists.
+
+### What each of the three is
+
+| Finding | Implemented | Verified locally | Deployment acceptance |
+|---|---|---|---|
+| F35 caddy's hostname | yes | yes — real Compose for the resolution, the real caddy image for the read-back, the complete stdin invocation for the probe | 🔴 no deploy has run with this, and the `exec` read is only exercised against a double end to end |
+| F37 full candidate set | yes | yes — real resolver, real `docker port` output shapes | never run against the pilot host's actual mapping |
+| F49 parked settlement | yes | yes — real HTTP route, real Postgres, five lifecycle cases | not exercised against a real permission wait driven by a live worker |
 
 ---
 

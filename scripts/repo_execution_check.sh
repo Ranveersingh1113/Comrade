@@ -57,6 +57,14 @@ print(deps_volume('$TEAM', '$repo'))" 2>/dev/null | tr -d '\r')
 }
 trap cleanup EXIT
 
+# 🔴 REMOVED UP FRONT, not only on the way out. A previous run left its volumes
+# behind and the Node install correctly reported "current" — the environment was
+# already up to date — so the run made no network request and the proxy log had
+# nothing in it. A check whose result depends on whether it has been run before
+# is not a check. Starting from no volume makes "installed" and "went through the
+# proxy" both meaningful.
+cleanup
+
 rm -rf "$WS/$TEAM"
 
 # --- the Python repository -------------------------------------------------

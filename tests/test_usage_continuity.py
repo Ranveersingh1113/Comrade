@@ -541,7 +541,7 @@ def test_settlement_without_a_worker_id_still_works(run):
 #   * `recover_expired_agent_runs` past its attempt limit: 'failed', worker
 #     nulled, and the last worker may still be walking its exit path.
 
-def _cancel(run_id: str, requester=A1) -> bool:
+def _cancel(run_id: str, requester=A1) -> str | None:
     from agent.run_queue import cancel_run
 
     return cancel_run(TEAM_A, run_id, requester_id=requester)
@@ -576,7 +576,11 @@ def test_a_stale_worker_cannot_settle_a_cancelled_replacements_run(run):
     finally:
         conn.close()
 
-    assert _cancel(run) is True
+    # 🔴 (fix.md F49) `cancel_run` reports the status it cancelled FROM, so
+    # the caller can tell whether anyone is left to settle. Asserted here
+    # rather than just "it was cancelled": this case turns on the run having
+    # been EXECUTING, and a claim landing first would change the answer.
+    assert _cancel(run) == "running"
     assert _owner_columns(run) == (None, "cancelled")
 
     finalize_usage(TEAM_A, run, 50, worker_id="stale")
@@ -599,7 +603,7 @@ def test_the_worker_that_was_executing_settles_a_cancelled_run(run):
                      " status='running' where id=%s", (run,))
     finally:
         conn.close()
-    assert _cancel(run) is True
+    assert _cancel(run) == "running"
 
     finalize_usage(TEAM_A, run, 800, worker_id="mine")
 
@@ -615,7 +619,7 @@ def test_a_cancelled_queued_run_is_settled_by_the_server(run):
                      " status='queued' where id=%s", (run,))
     finally:
         conn.close()
-    assert _cancel(run) is True
+    assert _cancel(run) == "queued"
 
     finalize_usage(TEAM_A, run, 0)
 
@@ -660,6 +664,47 @@ def test_a_run_recovery_gave_up_on_keeps_its_last_owner(run):
     assert _tokens() == CHUNK, "a stranger settled a run recovery gave up on"
 
     finalize_usage(TEAM_A, run, 900, worker_id="last-owner")
+    assert _tokens() == 900
+
+
+def test_a_finished_run_that_still_names_its_worker_is_not_settled_by_the_server(run):
+    """🔴 (fix.md F49) The fence, exercised where it actually bites.
+
+    `finish_run` sets a terminal status and does NOT clear `worker_id`, so an
+    ordinary completed run is terminal AND still names the worker that did it.
+    `settle_from_checkpoint` takes no identity, so nothing about the CALLER can
+    distinguish that from a parked run — only the row can. Settling it here
+    would replace the worker's real totals with a checkpoint written before its
+    last segment.
+
+    Reached directly rather than through `cancel_run`, which nulls `worker_id`
+    on its way past and so can never present this state.
+    """
+    from shared.usage import settle_from_checkpoint
+
+    conn = _admin()
+    try:
+        conn.execute(
+            "update public.agent_runs set status='done', worker_id='mine',"
+            " input_tokens=100, output_tokens=50 where id=%s", (run,))
+    finally:
+        conn.close()
+
+    settle_from_checkpoint(TEAM_A, run)
+
+    # Untouched: still reserved, still unsettled, still the worker's to close.
+    assert _tokens() == CHUNK
+    conn = _admin()
+    try:
+        assert conn.execute(
+            "select usage_finalized_at from public.agent_runs where id=%s",
+            (run,)).fetchone()[0] is None
+    finally:
+        conn.close()
+
+    # And the worker's own settlement still lands, with the real number.
+    finalize_usage(TEAM_A, run, 900, worker_id="mine")
+
     assert _tokens() == 900
 
 

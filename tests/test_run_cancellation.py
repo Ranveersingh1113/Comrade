@@ -222,3 +222,143 @@ def test_repo_run_hands_the_sandbox_a_way_to_notice_the_stop(monkeypatch):
     )
 
     assert seen["stop"] is not None and seen["stop"]() is True
+
+# ---------------------------------------------------------------------------
+# F49 — a parked run's reservation is released when it is cancelled
+# ---------------------------------------------------------------------------
+#
+# THE INVARIANT: a run that reaches a terminal state releases its reservation
+# exactly once — including when there is no worker left to do it.
+#
+# A permission wait checkpoints what the run has spent, drops the lease and
+# RETURNS from the runtime. Nobody is executing it any more. Cancelling from
+# there set a terminal status and settled nothing, because the cancellation
+# route only settled runs it found `queued`. The estimate stayed on the hour's
+# bucket, so a 6,000-token reservation kept consuming the team's admission
+# budget after a turn that really spent 1,200 was stopped.
+
+
+def _bucket_tokens() -> int:
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        row = conn.execute(
+            "select tokens from public.usage_buckets where team_id=%s"
+            " and bucket=date_trunc('hour', now())", (TEAM_A,),
+        ).fetchone()
+    return row[0] if row else 0
+
+
+def _reserve(run_id: str, tokens: int) -> None:
+    """The admission reservation, as claim_budget leaves it."""
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        conn.execute("delete from public.usage_buckets where team_id=%s", (TEAM_A,))
+        conn.execute(
+            "insert into public.usage_buckets (team_id, bucket, turns, tokens)"
+            " values (%s, date_trunc('hour', now()), 1, %s)", (TEAM_A, tokens))
+        conn.execute(
+            "update public.agent_runs set tokens_reserved=%s,"
+            " usage_bucket=date_trunc('hour', now()) where id=%s",
+            (tokens, run_id))
+
+
+def _usage(run_id: str) -> tuple:
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        return conn.execute(
+            "select coalesce(input_tokens,0), coalesce(output_tokens,0),"
+            " usage_finalized_at is not null from public.agent_runs where id=%s",
+            (run_id,),
+        ).fetchone()
+
+
+def test_cancelling_a_parked_run_releases_its_reservation(seeded):
+    """🔴 THE DEFECT (fix.md F49). The worker has already returned, so no
+    settlement is ever coming from it, and the route settled only `queued`
+    runs. The reservation stayed charged for the rest of the hour."""
+    from shared.agent_runs import pause_for_permission
+
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "ask before deleting"))
+    claimed = claim_next_run("worker-1")
+    assert claimed is not None and str(claimed.id) == run_id
+    _reserve(run_id, 6000)
+    # The real park: checkpoints usage, drops the lease, worker returns.
+    pause_for_permission(TEAM_A, run_id, "worker-1", 900, 300)
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    assert _row(run_id)[0] == "cancelled"
+    _, _, finalized = _usage(run_id)
+    assert finalized, "the run was never settled, so its estimate is still charged"
+    # 6000 reserved, 1200 actually spent: the hour keeps what the turn cost.
+    assert _bucket_tokens() == 1200
+
+
+def test_a_parked_run_is_settled_only_once(seeded):
+    """Cancelling twice must not refund the reservation twice."""
+    from shared.agent_runs import pause_for_permission
+
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "ask first"))
+    claim_next_run("worker-1")
+    _reserve(run_id, 6000)
+    pause_for_permission(TEAM_A, run_id, "worker-1", 900, 300)
+    client = _client(A1)
+
+    first = client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+    second = client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert second.json()["already_finished"] is True
+    assert _bucket_tokens() == 1200
+
+
+def test_a_resumed_run_cancelled_before_its_next_claim_keeps_what_it_spent(seeded):
+    """Approval requeues the run. It is `queued` again, but it is NOT a run
+    that never executed — an earlier segment really spent tokens, and the
+    checkpoint on the row is what says so.
+
+    Settling zero here, which is what the queued branch did, would release
+    budget the team actually used."""
+    from shared.agent_runs import pause_for_permission
+
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "ask, then continue"))
+    claim_next_run("worker-1")
+    _reserve(run_id, 6000)
+    pause_for_permission(TEAM_A, run_id, "worker-1", 900, 300)
+    # Approval puts it back in the queue, with the checkpoint intact.
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        conn.execute("update public.agent_runs set status='queued' where id=%s",
+                     (run_id,))
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    assert _bucket_tokens() == 1200, (
+        "a resumed run was settled as if it had never run"
+    )
+
+
+def test_a_run_that_never_executed_still_settles_nothing(seeded):
+    """The case that already worked, and must keep working: queued, never
+    claimed, no checkpoint. Its whole estimate goes back."""
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "never started"))
+    _reserve(run_id, 6000)
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    assert _bucket_tokens() == 0
+
+
+def test_cancelling_an_executing_run_leaves_settlement_to_its_worker(seeded):
+    """The fence F43 put here stays. A worker is holding this run and is the
+    only thing that knows what the turn has spent, so the server must not
+    settle a stale number from underneath it."""
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "still going"))
+    claim_next_run("worker-1")
+    _reserve(run_id, 6000)
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    _, _, finalized = _usage(run_id)
+    assert not finalized, "the executing worker settles this one on its way out"
+    assert _bucket_tokens() == 6000

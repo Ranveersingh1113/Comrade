@@ -66,7 +66,8 @@ from shared.heartbeat import live_workers
 from shared.db import Role, connect, runtime_urls, team_session, user_session
 from shared.agent_runs import get_thread_runs
 from shared.usage import (
-    BudgetExceeded, finalize_usage, record_reservation, release_turn, reserve_turn,
+    BudgetExceeded, record_reservation, release_turn, reserve_turn,
+    settle_from_checkpoint,
 )
 
 # At import rather than in a main(): the API is started by uvicorn, which
@@ -761,12 +762,21 @@ def agent_run_cancel(run_id: str, req: TeamScoped, user_id: CurrentUserId) -> di
             status.HTTP_403_FORBIDDEN,
             "only the member who asked for this turn can stop it",
         )
-    stopped = cancel_run(req.team_id, run_id, requester_id=user_id)
-    if stopped and run["status"] == "queued":
-        # It never reached the model, so it must not count against the hour.
-        # A running turn settles on its own way out, with the real number.
-        finalize_usage(req.team_id, run_id, 0)
-    return {"status": "cancelled", "already_finished": not stopped}
+    # 🔴 (fix.md F49) The status it was cancelled FROM, out of the cancelling
+    # statement itself. Reading `run["status"]` above and acting on it here is
+    # a different transaction from the write, so a claim or a resume landing in
+    # between would have the server settle a run somebody had just picked up.
+    was = cancel_run(req.team_id, run_id, requester_id=user_id)
+    if was and was != "running":
+        # Nobody was executing it, so nobody is coming to settle it. That
+        # covers a run that never reached the model — which settles zero,
+        # because zero is what its own record says it spent — and a run parked
+        # on a permission wait, whose worker checkpointed its totals and
+        # returned. Settling `queued` alone left the parked case charged for
+        # the rest of the hour, and settled a RESUMED queued run as if it had
+        # never run at all.
+        settle_from_checkpoint(req.team_id, run_id)
+    return {"status": "cancelled", "already_finished": not was}
 
 
 @app.get("/threads/{thread_id}/agent-runs")

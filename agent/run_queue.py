@@ -97,27 +97,46 @@ def renew_lease(run_id: str, worker_id: str) -> bool:
 CANCEL_REASON = "stopped by the member who asked for it"
 
 
-def cancel_run(team_id: str, run_id: str, *, requester_id: str | None) -> bool:
-    """Cancellation is terminal, so a worker cannot later claim this run.
+def cancel_run(team_id: str, run_id: str, *, requester_id: str | None) -> str | None:
+    """Cancel a run and report the status it was cancelled FROM.
+
+    None when nothing was cancelled, so this stays usable as a boolean.
+
+    Cancellation is terminal, so a worker cannot later claim this run.
 
     `requester_id` is not optional by accident: ownership is enforced in this
     one statement rather than by reading the run and then writing it, because
     a check in a different transaction from the write is a check that can be
     raced. Pass None only for cancellation with no requester behind it —
     maintenance, not a person.
+
+    🔴 (fix.md F49) The PRIOR status comes back from the same statement, for
+    the same reason. Whether anyone still has to settle this run's reservation
+    depends on whether a worker was executing it, and the caller reading the
+    status before cancelling can be raced by a claim or a resume landing in
+    between — it would then settle a run somebody had just picked up. The
+    row is locked, read and transitioned together, so the answer describes the
+    transition that actually happened.
     """
     owned = "" if requester_id is None else " and requester_id=%s"
     params: tuple = (run_id,) if requester_id is None else (run_id, requester_id)
     with team_session(Role.AGENT, team_id) as conn:
-        cur = conn.execute(
-                "update public.agent_runs set status='cancelled', finished_at=now(),"
-                " lease_expires_at=null, worker_id=null,"
-                " last_error=coalesce(last_error, %s)"
-                " where id=%s" + owned + " and status in ('queued','running',"
-                " 'waiting_for_permission','waiting_for_user')",
-                (CANCEL_REASON,) + params,
-            )
-    return cur.rowcount == 1
+        row = conn.execute(
+                "with prior as ("
+                "  select id, status from public.agent_runs"
+                "   where id=%s" + owned + " and status in ('queued','running',"
+                "   'waiting_for_permission','waiting_for_user')"
+                "   for update"
+                ")"
+                " update public.agent_runs a"
+                "    set status='cancelled', finished_at=now(),"
+                "        lease_expires_at=null, worker_id=null,"
+                "        last_error=coalesce(a.last_error, %s)"
+                "   from prior p where a.id=p.id"
+                " returning p.status",
+                params + (CANCEL_REASON,),
+            ).fetchone()
+    return row[0] if row else None
 
 
 def get_run(

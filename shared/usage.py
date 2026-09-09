@@ -180,12 +180,60 @@ def finalize_usage(
         if claimed is None:
             return
         reserved, bucket = claimed
-        conn.execute(
-            "update public.usage_buckets"
-            "   set tokens = greatest(tokens - %s + %s, 0)"
-            " where team_id=%s and bucket=%s",
-            (reserved, max(actual_tokens, 0), team_id, bucket),
-        )
+        _release(conn, team_id, reserved, bucket, actual_tokens)
+
+
+def _release(conn, team_id: str, reserved: int, bucket, actual_tokens: int) -> None:
+    """Swap this run's claim on the hour for what it really cost."""
+    conn.execute(
+        "update public.usage_buckets"
+        "   set tokens = greatest(tokens - %s + %s, 0)"
+        " where team_id=%s and bucket=%s",
+        (reserved, max(actual_tokens, 0), team_id, bucket),
+    )
+
+
+def settle_from_checkpoint(team_id: str, run_id: str) -> None:
+    """Settle a terminal run that nobody is executing, from its own record.
+
+    🔴 (fix.md F49) A permission wait checkpoints what the run has spent, drops
+    the lease and RETURNS from the runtime. There is no worker left. Cancelling
+    from there set a terminal status and settled nothing — the cancellation
+    route only settled runs it found `queued` — so a 6,000-token reservation
+    stayed charged against the hour after a turn that really spent 1,200 was
+    stopped, and kept the team out of admission it was entitled to.
+
+    `usage_owner` preserves who WAS executing, which is what stops a stale
+    worker settling someone else's run. It does not conjure a caller: identity
+    is not a settlement. So this one takes no identity at all, because it takes
+    no totals either — the amount is the checkpoint on the run's own row,
+    written by `pause_for_permission` in the statement that parked it.
+
+    Fenced on `worker_id is null` as well as a terminal status: together those
+    mean nobody is executing this run, which is the only condition under which
+    a caller that did not do the work may account for it. A run someone is
+    holding is still theirs to settle.
+    """
+    turn_cap, token_cap = _caps()
+    if turn_cap <= 0 and token_cap <= 0:
+        return
+    with team_session(Role.AGENT, team_id) as conn:
+        claimed = conn.execute(
+            "update public.agent_runs set usage_finalized_at = now()"
+            " where id=%s and team_id=%s and usage_finalized_at is null"
+            "   and status not in ('queued','running','waiting_for_permission',"
+            "                      'waiting_for_user')"
+            "   and worker_id is null"
+            " returning coalesce(tokens_reserved, 0),"
+            "           coalesce(usage_bucket, date_trunc('hour', created_at)),"
+            #  What the run itself recorded, not what any caller believes.
+            "           coalesce(input_tokens, 0) + coalesce(output_tokens, 0)",
+            (run_id, team_id),
+        ).fetchone()
+        if claimed is None:
+            return
+        reserved, bucket, spent = claimed
+        _release(conn, team_id, reserved, bucket, spent)
 
 
 def claimed_tokens(team_id: str, run_id: str) -> int | None:

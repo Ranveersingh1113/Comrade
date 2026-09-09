@@ -442,17 +442,169 @@ def test_an_unverifiable_mapping_is_refused(monkeypatch):
     assert not any(argv[1] == "exec" for argv in seen)
 
 
-@pytest.mark.parametrize("published", [
-    "0.0.0.0:54322", "[::]:54322", "127.0.0.1:54322",
-])
-def test_the_published_port_is_read_however_docker_spells_the_address(
+@pytest.mark.parametrize("published", ["0.0.0.0:54322", "127.0.0.1:54322"])
+def test_the_published_address_is_read_however_docker_spells_it(
     monkeypatch, published,
 ):
-    """`docker port` prints the bind address as well, and it varies by host and
-    by IP family. Matching the whole string would refuse a legitimate mapping
-    on somebody else's machine."""
+    """`docker port` prints the bind address as well, and its spelling varies.
+    Both of these cover the IPv4 loopback and must keep working.
+
+    🔴 REWRITTEN (fix.md F37, third pass). This used to include `[::]:54322`
+    and assert that it too satisfied a request for 127.0.0.1 — which is the
+    defect: an IPv6-only publication does not answer for the IPv4 loopback.
+    The parametrisation was written when only the port was compared, so it
+    encoded exactly the behaviour that had to change.
+    """
     _fallback(monkeypatch, published=published)
 
     assert backup._run("pg_dump", ["-d", "postgres"],
                        "postgresql://u:p@127.0.0.1:54322/postgres") == b"dump"
+
+# ---------------------------------------------------------------------------
+# F37 still open — the bind ADDRESS is half of an endpoint
+# ---------------------------------------------------------------------------
+#
+# THE INVARIANT: the server the tool is run against is the server the url
+# named. `_publishes` compared only the number after the last colon, so a
+# container bound to 127.0.0.2:54322 satisfied a request for 127.0.0.1:54322 —
+# different endpoints, and a separate database or an SSH tunnel can occupy the
+# one that was asked for. Docker supports publishing on a specific host
+# address, so this is a configuration people really have.
+
+def _bound(monkeypatch, *bindings: str):
+    """No local client binaries, and a container publishing `bindings`.
+
+    The output shape is the real one: `docker port <c> 5432` prints bare
+    endpoints, one per line, one per address family.
+    """
+    seen: list[list[str]] = []
+
+    def _run(argv, **kwargs):
+        seen.append(argv)
+        if argv[0] != "docker":
+            raise FileNotFoundError(2, argv[0])
+        if argv[1] == "port":
+            if not bindings:
+                return subprocess.CompletedProcess(argv, 1, b"", b"no mapping")
+            body = "".join(f"{b}\n" for b in bindings).encode()
+            return subprocess.CompletedProcess(argv, 0, body, b"")
+        return subprocess.CompletedProcess(argv, 0, b"dump", b"")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+    return seen
+
+
+def _reached_container(seen) -> bool:
+    return any(argv[0] == "docker" and argv[1] == "exec" for argv in seen)
+
+
+def test_a_different_loopback_address_is_not_this_container(monkeypatch):
+    """🔴 THE DEFECT (fix.md F37, third pass). Same port, different address.
+    127.0.0.2 and 127.0.0.1 are different endpoints; the second can be a
+    tunnel, and the request would be silently executed against the container's
+    own server instead."""
+    seen = _bound(monkeypatch, "127.0.0.2:54322")
+
+    with pytest.raises(RuntimeError):
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@127.0.0.1:54322/postgres")
+
+    assert not _reached_container(seen)
+
+
+def test_a_different_address_family_is_not_this_container(monkeypatch):
+    """An IPv6-only publication does not answer for the IPv4 loopback."""
+    seen = _bound(monkeypatch, "[::1]:54322")
+
+    with pytest.raises(RuntimeError):
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@127.0.0.1:54322/postgres")
+
+    assert not _reached_container(seen)
+
+
+def test_an_ipv4_only_publication_does_not_answer_for_ipv6(monkeypatch):
+    seen = _bound(monkeypatch, "127.0.0.1:54322")
+
+    with pytest.raises(RuntimeError):
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@[::1]:54322/postgres")
+
+    assert not _reached_container(seen)
+
+
+def test_an_exact_address_match_is_accepted(monkeypatch):
+    seen = _bound(monkeypatch, "127.0.0.1:54322")
+
+    assert backup._run("pg_dump", ["-d", "postgres"],
+                       "postgresql://u:p@127.0.0.1:54322/postgres") == b"dump"
+    assert _reached_container(seen)
+
+
+@pytest.mark.parametrize("requested", ["127.0.0.1", "localhost"])
+def test_a_wildcard_ipv4_publication_covers_the_ipv4_loopback(
+    monkeypatch, requested,
+):
+    """`0.0.0.0` is every IPv4 interface, which is the ordinary Supabase
+    local stack and has to keep working."""
+    seen = _bound(monkeypatch, "0.0.0.0:54322", "[::]:54322")
+
+    assert backup._run("pg_dump", ["-d", "postgres"],
+                       f"postgresql://u:p@{requested}:54322/postgres") == b"dump"
+    assert _reached_container(seen)
+
+
+def test_a_wildcard_ipv6_publication_covers_the_ipv6_loopback(monkeypatch):
+    seen = _bound(monkeypatch, "[::]:54322")
+
+    assert backup._run("pg_dump", ["-d", "postgres"],
+                       "postgresql://u:p@[::1]:54322/postgres") == b"dump"
+    assert _reached_container(seen)
+
+
+def test_a_name_against_a_specific_binding_is_ambiguous_and_refused(monkeypatch):
+    """"Reject ambiguous mappings." `localhost` is a NAME: it resolves to
+    127.0.0.1 or ::1 depending on the resolver, so against a container bound to
+    one specific address there is no way to establish that the url and the
+    container mean the same endpoint. Name the address, or bind the wildcard."""
+    seen = _bound(monkeypatch, "127.0.0.1:54322")
+
+    with pytest.raises(RuntimeError) as refused:
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@localhost:54322/postgres")
+
+    assert "ambiguous" in str(refused.value).lower()
+    assert not _reached_container(seen)
+
+
+def test_the_port_still_has_to_match(monkeypatch):
+    """The half that already worked keeps working."""
+    seen = _bound(monkeypatch, "0.0.0.0:54322")
+
+    with pytest.raises(RuntimeError):
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@127.0.0.1:6543/postgres")
+
+    assert not _reached_container(seen)
+
+
+def test_an_unpublished_container_is_refused(monkeypatch):
+    seen = _bound(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@127.0.0.1:54322/postgres")
+
+    assert not _reached_container(seen)
+
+
+def test_the_prefixed_output_shape_is_read_too(monkeypatch):
+    """`docker port <c>` without a port argument prints `5432/tcp -> addr:port`.
+    Both shapes reach this code depending on how it is called, and reading only
+    one of them would refuse a legitimate mapping."""
+    seen = _bound(monkeypatch, "5432/tcp -> 0.0.0.0:54322")
+
+    assert backup._run("pg_dump", ["-d", "postgres"],
+                       "postgresql://u:p@127.0.0.1:54322/postgres") == b"dump"
+    assert _reached_container(seen)
 

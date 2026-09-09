@@ -129,13 +129,23 @@ def _parts(url: str) -> dict[str, str]:
     }
 
 
-def _publishes(port: str) -> bool:
-    """Does the database container publish Postgres on `port` of this host?
+#: Wildcard bind addresses, by the family they answer for. `0.0.0.0` is every
+#: IPv4 interface on the host and `::` every IPv6 one, so either covers the
+#: loopback address of its own family — and neither covers the other's.
+_WILDCARD = {"0.0.0.0": "v4", "::": "v6"}
 
-    `docker port <container> 5432` prints one line per binding, e.g.
-    `5432/tcp -> 0.0.0.0:54322`. The ADDRESS varies by host and IP family, so
-    only the port is compared — matching the whole string would refuse a
-    legitimate mapping on somebody else's machine.
+#: The literal loopback addresses, and which family each belongs to.
+_LOOPBACK = {"127.0.0.1": "v4", "::1": "v6"}
+
+
+def _endpoints() -> list[tuple[str, str]] | None:
+    """(address, port) for every publication of Postgres by the container.
+
+    None when the container cannot be asked at all, which is not the same
+    answer as "it publishes nothing" and is treated the same way: refused.
+
+    Both output shapes are read. `docker port <c> 5432` prints bare endpoints
+    one per line; `docker port <c>` prints `5432/tcp -> addr:port`.
     """
     try:
         done = subprocess.run(  # noqa: S603 - fixed argv
@@ -143,14 +153,55 @@ def _publishes(port: str) -> bool:
             capture_output=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
+        return None
     if done.returncode != 0:
-        return False
+        return None
+    found: list[tuple[str, str]] = []
     for line in done.stdout.decode("utf-8", "replace").splitlines():
         _, _, endpoint = line.rpartition("->")
-        if endpoint.strip().rsplit(":", 1)[-1] == str(port):
-            return True
-    return False
+        endpoint = endpoint.strip()
+        if not endpoint:
+            continue
+        address, _, port = endpoint.rpartition(":")
+        # `[::]:54322` and `[::1]:54322` — the brackets are the notation, not
+        # part of the address.
+        found.append((address.strip("[]"), port))
+    return found
+
+
+def _publishes(host: str, port: str) -> bool:
+    """Is the requested endpoint THIS container's endpoint?
+
+    🔴 (fix.md F37, third pass.) This compared only the number after the last
+    colon. A container bound to `127.0.0.2:54322` therefore satisfied a request
+    for `127.0.0.1:54322` — different endpoints, and the requested one can be a
+    separate database or an SSH tunnel to a production server. Docker publishes
+    on a specific host address whenever it is told to, so this is a
+    configuration people really have.
+
+    An address is half of an endpoint, and the halves are checked together.
+    """
+    endpoints = _endpoints()
+    if not endpoints:
+        return False
+    matching = [address for address, published in endpoints
+                if published == str(port)]
+    if not matching:
+        return False
+
+    requested = host.strip("[]").lower()
+    if requested in _LOOPBACK:
+        family = _LOOPBACK[requested]
+        return any(
+            address == requested
+            or _WILDCARD.get(address) == family
+            for address in matching
+        )
+    # A NAME, not an address. `localhost` resolves to 127.0.0.1 or ::1
+    # depending on the resolver, so it only establishes an endpoint when the
+    # container answers for every interface of a family — a wildcard. Against a
+    # specific binding the mapping is ambiguous, and ambiguous is refused.
+    return any(address in _WILDCARD for address in matching)
 
 
 def _run(tool: str, args: list[str], url: str, *, stdin: bytes | None = None) -> bytes:
@@ -201,12 +252,21 @@ def _run(tool: str, args: list[str], url: str, *, stdin: bytes | None = None) ->
     # translation true: if it publishes 5432 on the requested port, the server
     # the url names IS the server inside. Anything else, including a container
     # that cannot be asked, is an unverified mapping and is refused.
-    if not _publishes(p["port"]):
+    if not _publishes(p["host"], p["port"]):
+        published = _endpoints()
+        detail = ("it could not be asked" if published is None
+                  else ", ".join(f"{a}:{b}" for a, b in published) or "nothing")
+        ambiguous = (p["host"].strip("[]").lower() not in _LOOPBACK
+                     and published)
         raise RuntimeError(
-            f"{tool} is not installed on this host, and {DOCKER_DB_CONTAINER}"
-            f" does not publish port {p['port']} — refusing to run against it"
-            f" instead. localhost:{p['port']} may be another database or a"
-            f" tunnel; loopback does not establish which server is listening."
+            f"{tool} is not installed on this host, and {p['host']}:{p['port']}"
+            f" is not an endpoint of {DOCKER_DB_CONTAINER} (it publishes:"
+            f" {detail}) — refusing to run against it instead."
+            + (" The requested host is a name rather than an address, so"
+               " against a specific binding the mapping is ambiguous; name the"
+               " address or publish on a wildcard."
+               if ambiguous else
+               f" {p['host']}:{p['port']} may be another database or a tunnel.")
         )
     inner = ["-h", "127.0.0.1", "-p", "5432", "-U", p["user"]]
     try:

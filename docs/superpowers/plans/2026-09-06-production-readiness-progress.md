@@ -3204,6 +3204,165 @@ Writing the pattern down did not stop me repeating it four paragraphs later.
 What has actually caught it every time is someone re-deriving the claim from the
 artifact instead of from my account of the artifact.
 
+
+## Ninth review and hackathon preflight — 2026-09-09, pinned to `26b46f5`
+
+F51 was accepted and independently verified. The ninth review also retracted a
+claim of mine — see the correction above the eighth review's gate section. Then
+a release preflight against the live host found three concrete blockers and one
+P1, F52.
+
+### F52 — a passing journey with no answer in it
+
+The browser journey asks "What tasks are open right now?" and accepts either an
+AI message or `[data-agent-note]`. The reasoning behind that is sound and is
+written out in the spec: requiring a reply tests the model, not the product. The
+consequence is that a run in which the agent answered NOTHING passes, and
+nothing anywhere else gated the primary outcome. The review caught the journey
+doing exactly that.
+
+Three separate things came out of it.
+
+**1. The retry budget was sized for a rate that has moved · `2c6a778`**
+
+`EMPTY_TURN_ATTEMPTS = 3` was set because a 1-in-8 empty rate makes a third
+failure ~1 in 500. Re-measured by asking the same question through `stream_turn`
+24 times across two runs:
+
+```
+42 model calls, 19 of them empty            ~45% per call
+1 turn in 12 exhausted all three attempts    ~8% of turns answered nothing
+```
+
+At 45%, three attempts is ~1 in 11, not 1 in 500. That is the review's
+observation with no explanation needed beyond arithmetic. Six attempts puts it
+under 1%; an empty call generates no output tokens, so the extra attempts cost
+prompt tokens and latency rather than answers.
+
+🔴 **A recalibration, not a root cause,** and the comment in the code says so.
+Two plausible causes were tested and are not it:
+
+  * the experimental `JSON_SCHEMA_FOR_FUNC_DECL` declaration path — disabling it
+    made **every** call empty, 36/36, so it is load-bearing rather than the
+    fault;
+  * request pacing — 8 seconds between turns left the rate at 43%, so this is
+    not rate limiting.
+
+Why the model returns a candidate with an empty parts list and `finish_reason
+STOP` is still unestablished. The next reader is told to measure the rate rather
+than raise the constant a second time.
+
+**2. Usefulness is gated now · `b791156`**
+
+`tests/test_agent_usefulness_live.py` asserts on facts only the team's own state
+can supply — a task title, a wiki fact, a member's name — and on a consent
+action reaching the queue without the task being created outright. Wired into
+`gates.sh --with-agent-eval`, which already makes real model calls. The journey
+assertion is untouched and keeps its own subject; its comment now says where
+usefulness lives.
+
+```
+pytest tests/test_agent_usefulness_live.py -m live   ->  4 passed
+
+task lookup   'A2, you have one open task: "Wire the telemetry exporter".'
+wiki          'The team mascot is a quokka.'
+team context  'Team A has two members: A1 (leader) and A2 (member)...'
+consent       card staged, task NOT created outright
+```
+
+Only an `empty` outcome is re-asked, at most twice, and the count each prompt
+needed is printed — the rate is reported, not hidden.
+
+🔴 The fixture was corrected four times BY THE DATABASE rather than by me: a
+documents table that is an uploaded-file model whose ids the agent cannot
+discover from a question, a task that may not be born live, a task only its
+assignee may confirm, and no `open` status at all. Every one would have been
+wrong in a fixture written from the tables' columns. And the first consent test
+re-asked a turn that had parked on its own consent card — not an empty turn but
+the agent doing its job — and the second ask hit
+`one_active_agent_run_per_thread`.
+
+**3. An abandoned turn raised from its own cleanup · `da46ec7`**
+
+`log_context` restored itself with `ContextVar.reset(token)`, and a Token may
+only be reset in the Context that created it. `stream_turn` holds it open across
+`yield`, so a generator finalised anywhere other than where it was driven — a
+member closing the tab, a cancelled turn — raised `ValueError: <Token ...> was
+created in a different Context` out of the cleanup path. Reproduced with no
+model and no database. Restored by value instead.
+
+🔴 NOT claimed to cause the empty responses. The review said not to, and nothing
+measured since supports it.
+
+### The preflight blockers · `26a79e8`
+
+Two of the three are in-repo and are fixed. The third, the restricted registry
+proxy, is provisioning rather than code and is untouched.
+
+**The worker group was a guess the host contradicts.** Both workers mount the
+daemon socket and join `${COMRADE_DOCKER_GID:-999}`; on the pilot host the
+socket's group is 113 and the variable is unset, so the agent worker sat in a
+group owning nothing and could not run a container. `docker-compose.yml` says it
+beside the setting — "the gid differs per host and a wrong one fails at runtime
+rather than at build" — and the release now reads the group off the socket and
+refuses when it cannot, which makes it fail at deploy time instead.
+
+**The sandbox image was never built by the release.** It is not a Compose
+service, so `$COMPOSE build` never touched it and the host kept whatever
+`comrade-sandbox:latest` it had — Python, no Node, while the candidate's
+Dockerfile adds both. Built with the rest of the candidate and before
+activation. A test pins the tag against `shared.config`'s default so the release
+cannot build something `agent/sandbox.py` does not look for.
+
+Mutation-checked: restoring the compose default fails 2, removing the sandbox
+build fails 2.
+
+🔴 The first version of the socket check used `[ -S ... ]`, which no command
+double can intercept, and ten tests failed on a host with no docker socket. It
+asks `stat` instead — the question that actually has to be answerable.
+
+### The gate
+
+```
+curl -fsS localhost:8000/health   ->  {"status":"ok","database":"ok"}
+
+=== backend (pytest) ===        1698 passed, 8 skipped, 21 deselected (12m14s)
+=== frontend build ===          ok
+=== frontend lint ===           ok, 3 fast-refresh warnings
+=== frontend unit + component ===   229 passed / 34 files
+=== frontend integration ===        21 passed / 6 files
+=== browser journeys (playwright) ===    8 passed (34.8s)
+=== real GitHub end to end ===      2 skipped — no credential configured
+all gates passed                GATE EXIT: 0
+```
+
+Selected went 1692 → 1698: two observability tests and four preflight ones.
+Deselected went 17 → 21, which is exactly the four live usefulness tests — so
+the count confirms they are marked correctly and, equally, that **they did not
+run in this gate**. They are in the `--with-agent-eval` lane, which is opt-in;
+the 4/4 above was a deliberate run.
+
+🔴 So the default gate still cannot tell you whether the agent answers. That is
+now a choice rather than an oversight — the lane exists and the journey comment
+points at it — but a green default gate means what it meant before.
+
+🔴 The realtime integration test failed its first trial and passed the retry.
+Fourth round running.
+
+### What this leaves for the release
+
+| | State |
+|---|---|
+| worker docker group | fixed in the release, **not** verified on the host |
+| sandbox image built | fixed in the release, **not** verified on the host |
+| registry proxy | 🔴 untouched — provisioning, and F06's acceptance |
+| agent answers usefully | gated locally, 4/4 on the configured model |
+| empty-turn rate | recalibrated to a measured 45%; root cause unknown |
+| F46 dependency volumes | 🔴 unchecked against the live host |
+
+Nothing here is deployment acceptance. Every one of the preflight findings came
+from probing the live host, and none of the repairs has been near it.
+
 ---
 
 ## Standing ceilings

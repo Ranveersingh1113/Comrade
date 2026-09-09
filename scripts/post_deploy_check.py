@@ -109,11 +109,17 @@ def furnish() -> str:
             " created_by_kind, created_by_id, thread_id)"
             " values (%s,%s,%s,'proposed','user',%s,%s) returning id",
             (TEAM, USER, TASK_TITLE, USER, thread)).fetchone()[0]
-        # Confirmed by its assignee, which is the only writer the guard allows;
-        # as the table owner here, that guard is satisfied by being the assignee.
+        # 🔴 Confirmed AS the assignee. `trg_tasks_confirm_guard` compares
+        # auth.uid() to assignee_id, and an admin connection has no auth.uid()
+        # at all — "only the assignee may confirm their own task". Being the
+        # table owner does not satisfy a check about who is asking, which is the
+        # point of the guard. The claim is set the way tests/_seed.as_user does.
+        conn.execute("select set_config('request.jwt.claims', %s, false)",
+                     (json.dumps({"sub": USER, "role": "authenticated"}),))
         conn.execute(
             "update public.tasks set status='confirmed', confirmed_at=now()"
             " where id=%s", (task,))
+        conn.execute("select set_config('request.jwt.claims', '', false)")
         page = conn.execute(
             "insert into public.memory_pages (team_id, title, description, kind)"
             " values (%s,%s,'What the team has settled','fact') returning id",

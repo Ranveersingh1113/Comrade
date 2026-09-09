@@ -2270,6 +2270,101 @@ unit-tested: the end-to-end installs used the real image and the real generated
 script but bypassed the registry proxy.
 
 
+## Follow-up review — 2026-09-09, pinned to `3b48448`
+
+Six findings, every one of them in the previous two days' repairs. Commit
+`6b421d1`. Each was verified here before being fixed, and two turned out worse
+than reported.
+
+### The guard whose job I did not finish
+
+**F20, reopened a second time.** Ownership was right; what followed it was not.
+The authorised name was INTERPOLATED into a URL string, and a URL is not a
+path. Measured:
+
+    '<team>/restricted.txt?owned' -> path '<team>/restricted.txt' query 'owned'
+    '<team>/secret.txt%3Fx'       -> path '<team>/secret.txt?x'
+    '<team>/a#b.txt'              -> path '<team>/a'
+
+A member uploads a decoy named `<team>/restricted.txt?owned`, files its
+document row, passes every ownership check on that literal name, and the
+service key fetches the restricted object. Supabase permits `?` in a key, so
+the decoy is a legal object and the unique-path index cannot see the collision
+— the two literal names differ.
+
+`canonical_path` rejected traversal and never named URL metacharacters. That is
+the same mistake as the first F20 fix, in the same function: enumerate the
+dangerous shapes, miss one. The lesson is that the guard's stated property —
+*the authorised name and the fetched name are one string* — is testable
+directly, and now is.
+
+### The fix that would have broken every deployment
+
+**F35, reopened.** The workflow pipes the release script into `sh -s <sha>`, so
+`$0` is `sh` and `$(dirname "$0")/proxy_check.sh` resolved to
+`/opt/comrade/proxy_check.sh` — while the committed helper is at
+`scripts/proxy_check.sh`. The check I added so a healthy deployment would stop
+being reported broken would have failed all of them, after activation.
+
+Separately, `COMRADE_HOST` lives in Compose's `.env`; Compose interpolates that
+for containers and exports nothing into the parent SSM shell, so a correctly
+configured host reached my new unset-host failure. Both now tested through the
+exact stdin invocation the workflow uses, which is the only shape either defect
+exists in — calling the script by path hides both completely.
+
+### The rest
+
+**F36 follow-up** — narrowing the dump dropped `supabase_migrations`, so a
+restored target had no record of which migrations had run. Readiness cannot
+confirm the schema and the runner either fails on the missing relation or
+re-applies everything over already-restored objects. The drill now asserts
+every applied version comes back.
+
+**F37, reopened** — refusing remote hosts left every loopback PORT rewritten to
+5432 inside the container, and `localhost:6543` may be another database or a
+tunnel to a production one. The translation is now authorised by the
+container's own publication.
+
+**F43, reopened** — the terminal-status fence stops protecting the moment the
+replacement FINISHES. The stale worker then finds a terminal run and settles
+its own local totals; the real owner's settlement is skipped because
+`usage_finalized_at` is set, and the bucket permanently records the wrong
+number. Settlement is now fenced on worker ownership, with a null `worker_id`
+kept as the cancellation case.
+
+**F48, reopened** — the environment key omitted `.npmrc`,
+`npm-shrinkwrap.json` and `pnpm-workspace.yaml`, so the installer exited as
+already-current BEFORE reaching the cleanup added the day before. `.npmrc` sets
+the registry. The key now hashes `NODE_MANIFESTS` itself: two lists drifting
+apart is how this happened.
+
+### Two of my own tests, again
+
+A test I added yesterday installed from the public npm registry. It failed
+inside the full file at 104s and passed alone at 13s — flaky for reasons
+unrelated to its subject, which teaches people to rerun until green. It now
+places the dependency directly; the mount and the resolution are what it is
+for, and the install script has its own unit coverage. 40 passed, three
+consecutive runs, ten seconds.
+
+And the helper measuring F20 used httpx's `raw_path`, which INCLUDES the query
+— so it reassembled `name?suffix` and reported the decoy as identical, masking
+the exact defect it existed to catch. Caught because `?owned` passed while
+every other case failed.
+
+**Passing:** 1645 backend, 8 skipped, 17 deselected, 0 failed. 229 frontend
+across 34 files. Seven mutations across the six fixes, each biting.
+
+**Ceiling:** 🔴 Three consecutive reviews have each found defects in the
+previous round's repairs — 9 of 15, then 6 of 15. The rate is not obviously
+falling, and nothing here should be read as "the fix.md work is finished". 🔴
+F02 and F17 remain the same open provider decision; F17's acceptance still
+cannot be met from this machine. 🔴 A01–A03 and A05–A12 untouched. 🔴 F06's
+egress policy remains unit-tested only. 🔴 F46's deployment window stands: a
+dependency volume built by the old layout fails runs until the next sync
+rebuilds it.
+
+
 ---
 
 ## Standing ceilings

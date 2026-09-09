@@ -61,7 +61,14 @@ rm -rf "$WS/$TEAM"
 
 # --- the Python repository -------------------------------------------------
 mkdir -p "$WS/$TEAM/$PY_DIR"
-printf 'six==1.17.0\n' > "$WS/$TEAM/$PY_DIR/requirements.txt"
+# 🔴 pytest IS A DEPENDENCY, and finding that out is the point of running this.
+# `python -m venv` makes an ISOLATED environment, so with only six installed the
+# venv has no pytest and PATH falls through to the sandbox image's copy — which
+# runs under the image interpreter and cannot see the project's site-packages.
+# The first version declared only six and read the resulting "No module named
+# 'six'" as a product failure. A project that runs its tests declares its runner;
+# the 3a check below proves the venv itself is sound either way.
+printf 'six==1.17.0\npytest==8.3.4\n' > "$WS/$TEAM/$PY_DIR/requirements.txt"
 cat > "$WS/$TEAM/$PY_DIR/test_disposable.py" <<'PY'
 def test_the_installed_dependency_imports():
     import six
@@ -187,7 +194,13 @@ check "node recipe chosen" "RECIPE package.json" "$node_install"
 check "node install succeeded" "STATUS installed" "$node_install"
 
 echo
-echo "=== 3. RUN the repository's own tests (network off) ==="
+echo "=== 3a. the installed environment is on the interpreter's path ==="
+import_out=$(run_one "$PY_NAME" "['python','-c','import six, sys; print(\"SIX_OK\", sys.prefix)']")
+printf '%s\n' "$import_out" | sed 's/^/    /' | tail -4
+check "the venv python imports the installed dependency" "SIX_OK" "$import_out"
+
+echo
+echo "=== 3b. RUN the repository's own tests (network off) ==="
 pytest_out=$(run_one "$PY_NAME" "['pytest','-q','test_disposable.py']")
 printf '%s\n' "$pytest_out" | sed 's/^/    /' | tail -8
 check "the repository's tests run and pass" "EXIT 0" "$pytest_out"

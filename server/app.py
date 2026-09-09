@@ -766,15 +766,16 @@ def agent_run_cancel(run_id: str, req: TeamScoped, user_id: CurrentUserId) -> di
     # statement itself. Reading `run["status"]` above and acting on it here is
     # a different transaction from the write, so a claim or a resume landing in
     # between would have the server settle a run somebody had just picked up.
+    # 🔴 (fix.md F49, sixth review) `cancel_run` settles inside its own
+    # transaction now. The two used to be separate commits, so a settlement
+    # that failed left the run cancelled and still reserved.
     was = cancel_run(req.team_id, run_id, requester_id=user_id)
-    if was and was != "running":
-        # Nobody was executing it, so nobody is coming to settle it. That
-        # covers a run that never reached the model — which settles zero,
-        # because zero is what its own record says it spent — and a run parked
-        # on a permission wait, whose worker checkpointed its totals and
-        # returned. Settling `queued` alone left the parked case charged for
-        # the rest of the hour, and settled a RESUMED queued run as if it had
-        # never run at all.
+    if was is None:
+        # Already terminal. Repair a reservation that something else left
+        # stranded — an older code path, or an interruption before this was one
+        # transaction. Safe to attempt on every retry because eligibility lives
+        # in the statement: a run still executing, or requeued by lease
+        # recovery with usage nobody has accounted for, is refused.
         settle_from_checkpoint(req.team_id, run_id)
     return {"status": "cancelled", "already_finished": not was}
 

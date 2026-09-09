@@ -362,3 +362,162 @@ def test_cancelling_an_executing_run_leaves_settlement_to_its_worker(seeded):
     _, _, finalized = _usage(run_id)
     assert not finalized, "the executing worker settles this one on its way out"
     assert _bucket_tokens() == 6000
+
+# ---------------------------------------------------------------------------
+# F49 follow-up — a checkpoint is only final if nobody has run since
+# ---------------------------------------------------------------------------
+
+
+def _expire_lease(run_id: str) -> None:
+    """Five minutes of nothing from the worker, without waiting five minutes."""
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        conn.execute(
+            "update public.agent_runs set lease_expires_at = now() - interval"
+            " '1 minute' where id=%s", (run_id,))
+
+
+def _owner(run_id: str) -> tuple:
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        return conn.execute(
+            "select status, worker_id, usage_owner from public.agent_runs"
+            " where id=%s", (run_id,)).fetchone()
+
+
+def test_a_lease_recovered_run_is_not_settled_from_its_stale_checkpoint(seeded):
+    """🔴 THE DEFECT (fix.md, sixth review). `queued` does not mean the old
+    execution finished.
+
+    Lease recovery requeues an expired run and clears `worker_id` while the old
+    worker may still have an in-flight model response — one that has been PAID
+    for and whose usage nothing has checkpointed. Cancelling in that interval
+    found a terminal run with no worker and settled its stale checkpoint,
+    possibly zero. When the paid response landed, the previous owner's exit
+    settlement lost to the `usage_finalized_at` already written, and the tokens
+    were discarded.
+
+    Terminal plus unleased is not the same question as "the record of what this
+    run spent is complete".
+    """
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "expensive question"))
+    claim_next_run("old-worker")
+    _reserve(run_id, 6000)
+    # The lease lapses while a model response is still in flight. Nothing
+    # checkpoints it — that is the whole point.
+    _expire_lease(run_id)
+    from agent.run_queue import recover_expired_runs
+    recover_expired_runs()
+    status, worker, owner = _owner(run_id)
+    assert (status, worker, owner) == ("queued", None, "old-worker"), (
+        status, worker, owner)
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    _, _, finalized = _usage(run_id)
+    assert not finalized, (
+        "the server settled a run whose last execution never reported what it"
+        " spent, so the paid response can no longer be accounted for"
+    )
+    assert _bucket_tokens() == 6000
+
+    # And when the paid response finally arrives, the worker that made it can
+    # still account for it — which is what the reservation was being held for.
+    from shared.usage import finalize_usage
+    finalize_usage(TEAM_A, run_id, 1200, worker_id="old-worker")
+
+    assert _bucket_tokens() == 1200
+
+
+def test_a_failed_settlement_does_not_strand_the_reservation(seeded):
+    """🔴 THE DEFECT (fix.md, sixth review). Cancellation committed before
+    settlement opened its own transaction.
+
+    If the settlement write failed, the run was durably cancelled and still
+    reserved — and retrying STOP made it worse, because `cancel_run` then found
+    nothing to cancel, returned None, and the route skipped settlement
+    entirely. No worker remains for a parked run, so nothing else was coming.
+    """
+    from shared.agent_runs import pause_for_permission
+    import agent.run_queue as run_queue
+
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "ask before deleting"))
+    claim_next_run("worker-1")
+    _reserve(run_id, 6000)
+    pause_for_permission(TEAM_A, run_id, "worker-1", 900, 300)
+
+    calls = {"n": 0}
+    real = run_queue.settle_cancelled
+
+    def _fails_once(conn, team_id, run_id_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("settlement write failed")
+        return real(conn, team_id, run_id_)
+
+    client = _client(A1)
+    run_queue.settle_cancelled = _fails_once
+    try:
+        with pytest.raises(RuntimeError):
+            client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+        # Nothing durable happened: the cancellation rolled back with the
+        # settlement it belongs to, so the member's retry has something to do.
+        assert _row(run_id)[0] == "waiting_for_permission"
+        assert _bucket_tokens() == 6000
+
+        resp = client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+    finally:
+        run_queue.settle_cancelled = real
+
+    assert resp.status_code == 200, resp.text
+    assert _row(run_id)[0] == "cancelled"
+    assert _bucket_tokens() == 1200
+    assert calls["n"] == 2, "the retry has to actually attempt settlement again"
+
+
+def test_a_cancelled_run_left_unsettled_is_repaired_by_a_retry(seeded):
+    """The recovery path for a reservation stranded by anything else — an older
+    code path, or a crash between two writes that are no longer two writes.
+
+    Retrying STOP on an already-cancelled run settles it if it is eligible, and
+    the eligibility rule is what makes that safe: a lease-recovered or still
+    executing run is refused, so this cannot discard unaccounted usage."""
+    from shared.agent_runs import pause_for_permission
+    from agent.run_queue import cancel_run
+
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "ask first"))
+    claim_next_run("worker-1")
+    _reserve(run_id, 6000)
+    pause_for_permission(TEAM_A, run_id, "worker-1", 900, 300)
+    # Cancelled by something that did not settle it.
+    with psycopg.connect(settings.comrade_db_url_admin) as conn:
+        conn.execute(
+            "update public.agent_runs set status='cancelled', finished_at=now(),"
+            " worker_id=null where id=%s", (run_id,))
+    assert _bucket_tokens() == 6000
+
+    resp = _client(A1).post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["already_finished"] is True
+    assert _bucket_tokens() == 1200
+    assert cancel_run(TEAM_A, run_id, requester_id=A1) is None
+
+
+def test_a_retry_does_not_settle_a_lease_recovered_run(seeded):
+    """The two halves together: the repair path above must not become a way to
+    discard the usage the first test protects."""
+    run_id = str(enqueue_turn(TEAM_A, A1, _thread_id(), "expensive question"))
+    claim_next_run("old-worker")
+    _reserve(run_id, 6000)
+    _expire_lease(run_id)
+    from agent.run_queue import recover_expired_runs
+    recover_expired_runs()
+    client = _client(A1)
+    client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    client.post(f"/agent/runs/{run_id}/cancel", json={"team_id": TEAM_A})
+
+    _, _, finalized = _usage(run_id)
+    assert not finalized
+    assert _bucket_tokens() == 6000

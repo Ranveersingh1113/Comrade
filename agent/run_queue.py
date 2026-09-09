@@ -5,6 +5,7 @@ from typing import Any
 from shared.config import settings
 from shared.errors import redact
 from shared.db import Role, team_session, user_session
+from shared.usage import settle_cancelled
 
 MAX_ATTEMPTS = 3
 LEASE_INTERVAL = "5 minutes"
@@ -117,6 +118,17 @@ def cancel_run(team_id: str, run_id: str, *, requester_id: str | None) -> str | 
     between — it would then settle a run somebody had just picked up. The
     row is locked, read and transitioned together, so the answer describes the
     transition that actually happened.
+
+    🔴 (fix.md F49, sixth review) And the SETTLEMENT rides in the same
+    transaction. It used to run after this function had committed, so a failure
+    there left the run durably cancelled and still holding its reservation,
+    with no worker left to release it and a retry that returned
+    `already_finished` without trying again. Cancelling a run and accounting
+    for what it spent are one change to the world or neither.
+
+    `settle_cancelled` decides for itself whether this run is eligible — a
+    still-executing or lease-recovered one is not — so nothing here has to know
+    about usage beyond giving it the connection.
     """
     owned = "" if requester_id is None else " and requester_id=%s"
     params: tuple = (run_id,) if requester_id is None else (run_id, requester_id)
@@ -136,6 +148,8 @@ def cancel_run(team_id: str, run_id: str, *, requester_id: str | None) -> str | 
                 " returning p.status",
                 params + (CANCEL_REASON,),
             ).fetchone()
+        if row is not None:
+            settle_cancelled(conn, team_id, run_id)
     return row[0] if row else None
 
 

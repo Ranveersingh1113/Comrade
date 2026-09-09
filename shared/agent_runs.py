@@ -200,7 +200,15 @@ def pause_for_permission(
             # run. Parking without recording what the run had already spent is
             # how a resume started from zero, and a separate write would leave
             # a window where a crash loses exactly that.
-            "     input_tokens=%s, output_tokens=%s, cost_usd=%s"
+            "     input_tokens=%s, output_tokens=%s, cost_usd=%s,"
+            # 🔴 (fix.md F49, sixth review) And the same statement says the
+            # record is COMPLETE. Parking is the one transition that drops the
+            # lease and writes the totals together, so it is the one that can
+            # promise this; lease recovery drops a lease with a response still
+            # in flight and promises nothing. Without the distinction the
+            # server settled a recovered run's stale totals and discarded
+            # tokens that had already been paid for.
+            "     usage_checkpoint_at=now()"
             " where id=%s"
             " and (%s::text is null or worker_id=%s) and status='running'",
             (input_tokens, output_tokens,

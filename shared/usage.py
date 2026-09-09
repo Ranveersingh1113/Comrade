@@ -210,30 +210,67 @@ def settle_from_checkpoint(team_id: str, run_id: str) -> None:
     written by `pause_for_permission` in the statement that parked it.
 
     Fenced on `worker_id is null` as well as a terminal status: together those
-    mean nobody is executing this run, which is the only condition under which
-    a caller that did not do the work may account for it. A run someone is
-    holding is still theirs to settle.
+    mean nobody is executing this run. A run someone is holding is still theirs
+    to settle.
+
+    🔴 (fix.md F49, sixth review) And that pair is NOT enough. `queued` does not
+    mean the previous execution finished: `recover_expired_agent_runs` requeues
+    an expired run and clears `worker_id` while the old worker may still have an
+    in-flight model response that has been paid for and that nothing has
+    checkpointed. Cancelling in that interval settled the stale totals — often
+    zero — and the real settlement then lost to the `usage_finalized_at` already
+    written, discarding the tokens.
+
+    So the row also has to say its record is COMPLETE:
+
+      * `usage_owner is null` — nothing ever executed this run, so zero is not
+        a stale number, it is the true one;
+      * `usage_checkpoint_at is not null` — a worker wrote its totals and gave
+        up execution in the same statement (`pause_for_permission`), and no
+        claim has invalidated that since.
+
+    A lease-recovered run has neither, so its reservation is HELD until the
+    worker that spent the tokens accounts for them. Holding costs the team
+    admission for the rest of that hour; releasing loses the record of real
+    spend. For a cap, holding is the safe direction.
+    """
+    with team_session(Role.AGENT, team_id) as conn:
+        settle_cancelled(conn, team_id, run_id)
+
+
+def settle_cancelled(conn, team_id: str, run_id: str) -> None:
+    """`settle_from_checkpoint` on a caller's own transaction.
+
+    🔴 (fix.md F49, sixth review) Cancellation used to commit before settlement
+    opened its transaction, so a failed settlement left the run durably
+    cancelled and still reserved — and the retry made it worse, because
+    `cancel_run` then found nothing to cancel and the route skipped settlement
+    entirely. No worker remains for a parked run, so nothing else was coming.
+
+    Taking the caller's connection lets the terminal transition and the
+    accounting for it commit or roll back together, which is what "settled
+    exactly once" requires of a step that can fail.
     """
     turn_cap, token_cap = _caps()
     if turn_cap <= 0 and token_cap <= 0:
         return
-    with team_session(Role.AGENT, team_id) as conn:
-        claimed = conn.execute(
-            "update public.agent_runs set usage_finalized_at = now()"
-            " where id=%s and team_id=%s and usage_finalized_at is null"
-            "   and status not in ('queued','running','waiting_for_permission',"
-            "                      'waiting_for_user')"
-            "   and worker_id is null"
-            " returning coalesce(tokens_reserved, 0),"
-            "           coalesce(usage_bucket, date_trunc('hour', created_at)),"
-            #  What the run itself recorded, not what any caller believes.
-            "           coalesce(input_tokens, 0) + coalesce(output_tokens, 0)",
-            (run_id, team_id),
-        ).fetchone()
-        if claimed is None:
-            return
-        reserved, bucket, spent = claimed
-        _release(conn, team_id, reserved, bucket, spent)
+    claimed = conn.execute(
+        "update public.agent_runs set usage_finalized_at = now()"
+        " where id=%s and team_id=%s and usage_finalized_at is null"
+        "   and status not in ('queued','running','waiting_for_permission',"
+        "                      'waiting_for_user')"
+        "   and worker_id is null"
+        "   and (usage_owner is null or usage_checkpoint_at is not null)"
+        " returning coalesce(tokens_reserved, 0),"
+        "           coalesce(usage_bucket, date_trunc('hour', created_at)),"
+        #  What the run itself recorded, not what any caller believes.
+        "           coalesce(input_tokens, 0) + coalesce(output_tokens, 0)",
+        (run_id, team_id),
+    ).fetchone()
+    if claimed is None:
+        return
+    reserved, bucket, spent = claimed
+    _release(conn, team_id, reserved, bucket, spent)
 
 
 def claimed_tokens(team_id: str, run_id: str) -> int | None:

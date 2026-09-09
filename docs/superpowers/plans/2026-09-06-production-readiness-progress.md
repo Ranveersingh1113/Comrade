@@ -3078,6 +3078,110 @@ settlement leaves the reservation held for the rest of that hour, and nothing
 sweeps it. The migrations have still not been applied FROM EMPTY — that lane
 rebuilds the local database and has not been run.
 
+
+## Eighth review — 2026-09-09, pinned to `6c6387f`
+
+F50 was accepted; the reviewer verified it independently by running both
+migration bodies and the real settlement function against isolated PostgreSQL
+temporary tables, and got 59 passed with the two new upgrade tests deliberately
+excluded. Those two were the finding.
+
+### F51 — the upgrade acceptance broke the developer's database · `b3bbca3`
+
+To build a pre-upgrade schema, the F50 fixture dropped `usage_owner` and
+`usage_checkpoint_at` from the CONFIGURED database and re-applied the migrations
+to put them back. That restores the definitions and destroys the values — for
+every run in the database, not only the seeded team's — and an interruption
+between the two leaves the schema with no settlement columns at all. It ran in
+the ordinary gate, not a reset lane.
+
+🔴 **Restoring the schema is what made it look harmless.** I checked that the
+columns and triggers came back and concluded the fixture was clean. Nothing
+compared a VALUE, which is the only thing a drop-and-recreate actually
+destroys. The same shape as F50 one level up: I verified the thing that is easy
+to verify and called it the question.
+
+The acceptance now runs against a disposable copy — restored from a real backup,
+the way `tests/test_restore_drill.py` does — in `tests/test_settlement_upgrade.py`.
+Building one from the migration chain instead was tried and does not work: a
+fresh database has none of Supabase's platform schema, so the chain fails long
+before reaching these two migrations. The dump carries the whole schema, and the
+roles the policies name are cluster-level and already there.
+
+What is still real in it: the migration bodies are the committed files executed
+as written, and the settlement is `shared.usage.settle_cancelled` itself. It can
+run against another database at all because it takes the caller's connection —
+which it does for the sixth review's reason, so cancellation and settlement can
+share a transaction. What it does not cover is the HTTP route, and nothing there
+needs DDL to exercise; those cases stay in `test_run_cancellation.py` against
+the shared database, touching no schema.
+
+```
+pytest tests/test_settlement_upgrade.py   ->  5 passed
+pytest tests/test_run_cancellation.py     ->  20 passed
+```
+
+Acceptance is the finding's: a sentinel run in the configured database carrying
+a real owner and checkpoint, the whole upgrade exercise against the copy, and
+the sentinel's values AND the schema unchanged afterwards — including when the
+exercise fails partway, which is the interruption case the old fixture could not
+survive.
+
+Mutation-checked both ways: reverting the F50 rule fails the isolated legacy
+test, so moving it off the shared database did not cost it its subject; pointing
+the upgrade helper back at the configured database fails both isolation guards.
+
+**What was actually lost here: nothing.** The old fixture's `finally` restored
+the schema on every run, and this database held no rows with settlement metadata
+— `select count(*) where usage_owner is not null` returns 0, and `agent_runs`
+has one row. The mechanism was exactly as described and would have destroyed
+values on a database that had them; on this machine it destroyed none. Both are
+worth saying, and neither excuses the other.
+
+### The gate
+
+```
+curl -fsS localhost:8000/health   ->  {"status":"ok","database":"ok"}
+
+=== backend (pytest) ===        1692 passed, 8 skipped, 17 deselected (11m54s)
+=== frontend build ===          ok
+=== frontend lint ===           ok, 3 fast-refresh warnings
+=== frontend unit + component ===   229 passed / 34 files
+=== frontend integration ===        21 passed / 6 files
+=== browser journeys (playwright) ===    8 passed (39.7s)
+=== real GitHub end to end ===      2 skipped — no credential configured
+all gates passed                GATE EXIT: 0
+```
+
+1692, up 3 from 1689: two destructive tests removed, five isolated ones added.
+
+And afterwards, on the configured database — the check the previous version of
+this work never made:
+
+```
+leftover databases matching comrade_%:  []
+settlement columns:  usage_checkpoint_at, usage_owner
+triggers:            expire_usage_checkpoint, keep_usage_owner
+```
+
+The gate creates and drops the disposable copy inside a module-scoped fixture,
+so a run that ends leaves nothing behind; the configured database comes out of a
+full gate with its schema and its rows as they went in.
+
+### The reviews, as a series
+
+Eight rounds. The last four found defects in the previous round's repair, and
+three of those four were in code the gate had just passed. The pattern in my own
+work is consistent enough to name: each time, I verified the property that was
+easy to observe and treated it as the property that mattered.
+
+  * F49 → terminal-and-unleased observed; "the record is complete" assumed.
+  * F50 → a NULL column observed; "nothing ever executed" assumed.
+  * F51 → the schema restored observed; "the database is unharmed" assumed.
+
+The fix each time was to find evidence that predates the question being asked —
+`attempts`, a value rather than a definition, a database nothing else uses.
+
 ---
 
 ## Standing ceilings

@@ -368,6 +368,91 @@ def test_the_probe_asks_for_the_name_caddy_is_serving(tmp_path):
     assert not any("first-in-the-model.test" in call for call in calls), calls
 
 
+# ---------------------------------------------------------------------------
+# Hackathon preflight — the two things the live host was missing
+# ---------------------------------------------------------------------------
+
+def test_the_worker_group_comes_from_the_socket_not_a_default(tmp_path):
+    """🔴 THE DEFECT (fix.md, hackathon preflight). Both workers join
+    `${COMRADE_DOCKER_GID:-999}` and mount the daemon socket. 999 is a guess;
+    on the pilot host the socket's group is 113, so the agent worker sat in a
+    group that owns nothing and could not run a container at all.
+
+    docker-compose.yml says it beside the setting — "the gid differs per host
+    and a wrong one fails at runtime rather than at build" — and this is what
+    makes it fail at deploy time instead. The double reports 4242, and that is
+    what the release has to carry into Compose.
+    """
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
+    # Two different questions of the same command: the workspaces OWNER (%u)
+    # and the socket's GROUP (%g). Answering both with one number is how the
+    # first version of this test made the release refuse its own workspaces.
+    _double(tmp_path / "bin" / "stat", "stat",
+            ['case "$*" in', '  *"%g"*) echo 4242 ;;', '  *) echo 999 ;;',
+             'esac'])
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "docker socket group: 4242" in result.stdout, result.stdout
+
+
+def test_an_unreadable_socket_stops_the_release(tmp_path):
+    """Refused rather than defaulted. A release that activates workers which
+    cannot reach the daemon is the outage this exists to prevent, and it is
+    invisible until someone asks for repository work."""
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
+    _double(tmp_path / "bin" / "stat", "stat",
+            ['[ "$*" = "-c %g /var/run/docker.sock" ] && exit 1', "echo 999"])
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode != 0
+    assert "docker.sock" in result.stderr, result.stderr
+    calls = (tmp_path / "commands.log").read_text().splitlines()
+    assert not any(" up " in call for call in calls), (
+        "the stack was activated with workers that cannot reach the daemon"
+    )
+
+
+def test_the_sandbox_image_is_built_with_the_candidate(tmp_path):
+    """🔴 THE DEFECT (fix.md, hackathon preflight). The sandbox image is not a
+    Compose service, so `$COMPOSE build` never touched it and the host kept
+    whatever `comrade-sandbox:latest` it already had — one with Python and no
+    Node, while the candidate's Dockerfile adds both. Every JavaScript
+    repository task failed on a release that reported success."""
+    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = (tmp_path / "commands.log").read_text().splitlines()
+    built = [c for c in calls
+             if "build" in c and "docker/sandbox.Dockerfile" in c]
+    assert built, f"the sandbox image was never built: {calls}"
+    assert "comrade-sandbox:latest" in built[0], built[0]
+
+    # Before activation, with the rest of the candidate: a broken sandbox
+    # Dockerfile has to stop the deploy, not the first member who asks.
+    order = {c: i for i, c in enumerate(calls)}
+    up = next(i for c, i in order.items() if " up " in c)
+    assert order[built[0]] < up, calls
+
+
+def test_the_sandbox_image_matches_the_one_the_agent_looks_for():
+    """One name. `agent/sandbox.py` tells the member to build
+    `comrade-sandbox:latest` when it is missing, and `shared/config.py`
+    defaults to it; a release that built a different tag would leave the same
+    error message pointing at an image that now exists under another name."""
+    from shared.config import settings
+
+    release = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+
+    assert f"-t {settings.comrade_sandbox_image} ." in release, (
+        "the release builds a tag the agent does not look for"
+    )
+
+
 def test_a_host_configured_nowhere_is_refused(tmp_path):
     """Still fails closed: checking `localhost` against a named site is the
     original defect, so an unknown hostname stops the release rather than

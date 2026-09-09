@@ -58,9 +58,40 @@ if [ "$owner" != "$SANDBOX_UID" ] && [ "$owner" != "999" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 3b. The group that can actually reach the daemon.
+# ---------------------------------------------------------------------------
+# 🔴 (fix.md, hackathon preflight.) Both workers mount /var/run/docker.sock and
+# join `${COMRADE_DOCKER_GID:-999}`. 999 is a guess, and on the pilot host the
+# socket's group is 113 — so the agent worker was in a group that owns nothing
+# and could not run a container at all. docker-compose.yml says as much beside
+# the setting: "the gid differs per host and a wrong one fails at runtime
+# rather than at build". This is what makes it fail at DEPLOY time instead.
+#
+# Read from the socket, not defaulted and not inherited: an exported guess is
+# exactly what was wrong. The socket is the only thing that knows.
+if ! COMRADE_DOCKER_GID="$(stat -c %g /var/run/docker.sock 2>/dev/null)"; then
+  echo "cannot read the group of /var/run/docker.sock, so the workers cannot" \
+       "be given a group that reaches the daemon" >&2
+  exit 5
+fi
+export COMRADE_DOCKER_GID
+echo "docker socket group: $COMRADE_DOCKER_GID"
+
+# ---------------------------------------------------------------------------
 # 4. Build the candidate. Nothing is activated yet.
 # ---------------------------------------------------------------------------
 $COMPOSE build
+
+# 🔴 (fix.md, hackathon preflight.) The sandbox image is NOT a Compose service,
+# so `$COMPOSE build` never touched it and the host kept whatever
+# `comrade-sandbox:latest` it happened to have — one with Python and no Node,
+# while the candidate's Dockerfile adds both. Every JavaScript repository task
+# failed on a release that reported success.
+#
+# Built here, with the rest of the candidate and before activation, so a broken
+# sandbox Dockerfile stops the deploy rather than the first member who asks for
+# a repo command.
+docker build -f docker/sandbox.Dockerfile -t comrade-sandbox:latest .
 
 # ---------------------------------------------------------------------------
 # 4b. Validate the proxy configuration, using the image that will run it.

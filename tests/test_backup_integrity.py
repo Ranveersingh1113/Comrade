@@ -94,8 +94,14 @@ def test_the_container_fallback_keeps_the_database_and_user(monkeypatch):
         if argv[0] != "docker":
             raise FileNotFoundError(2, argv[0])
         if argv[1] == "port":
+            # 🔴 SETUP FIXED, not the assertion (fix.md F37, fifth review).
+            # This published IPv4 only while asking for `localhost`, which also
+            # resolves to ::1 on most hosts — an endpoint the container does not
+            # answer for. That is now refused, and rightly; this test is about
+            # what the fallback PRESERVES, so it gets an unambiguous endpoint.
             return subprocess.CompletedProcess(
-                argv, 0, b"5432/tcp -> 0.0.0.0:54322\n", b"")
+                argv, 0, b"5432/tcp -> 0.0.0.0:54322\n5432/tcp -> [::]:54322\n",
+                b"")
         return subprocess.CompletedProcess(argv, 0, b"", b"")
 
     monkeypatch.setattr(subprocess, "run", _only_docker)
@@ -498,6 +504,15 @@ def _reached_container(seen) -> bool:
     return any(argv[0] == "docker" and argv[1] == "exec" for argv in seen)
 
 
+def _families_of(host: str) -> set[tuple[str, str]]:
+    """What `host` really resolves to here, straight from the resolver.
+
+    The tests below are written against this rather than against an assumed
+    dual-stack localhost, so they say the same thing on a v4-only host.
+    """
+    return backup._resolves_to(host, "54322")
+
+
 def test_a_different_loopback_address_is_not_this_container(monkeypatch):
     """🔴 THE DEFECT (fix.md F37, third pass). Same port, different address.
     127.0.0.2 and 127.0.0.1 are different endpoints; the second can be a
@@ -563,18 +578,89 @@ def test_a_wildcard_ipv6_publication_covers_the_ipv6_loopback(monkeypatch):
 
 
 def test_a_name_against_a_specific_binding_is_ambiguous_and_refused(monkeypatch):
-    """"Reject ambiguous mappings." `localhost` is a NAME: it resolves to
-    127.0.0.1 or ::1 depending on the resolver, so against a container bound to
-    one specific address there is no way to establish that the url and the
-    container mean the same endpoint. Name the address, or bind the wildcard."""
+    """"Reject ambiguous mappings." `localhost` is a NAME: against a container
+    bound to one specific address there is no way to establish that the url and
+    the container mean the same endpoint. Name the address, or bind every
+    family the name reaches."""
     seen = _bound(monkeypatch, "127.0.0.1:54322")
 
     with pytest.raises(RuntimeError) as refused:
         backup._run("pg_dump", ["-d", "postgres"],
                     "postgresql://u:p@localhost:54322/postgres")
 
-    assert "ambiguous" in str(refused.value).lower()
+    assert "does not publish all of them" in str(refused.value)
     assert not _reached_container(seen)
+
+
+@pytest.mark.skipif(len(_families_of("localhost")) < 2,
+                    reason="localhost reaches one family on this host, so there"
+                           " is no cross-family mapping to refuse")
+def test_a_one_family_wildcard_does_not_cover_a_dual_family_name(monkeypatch):
+    """🔴 THE DEFECT (fix.md F37, fifth review). The name branch accepted ANY
+    matching-port wildcard, whatever family it answered for.
+
+    The container publishes IPv4 `0.0.0.0:54322`. `localhost` also resolves to
+    ::1 — first, on this host — so a client following the resolver reaches an
+    IPv6 listener that may be a separate database or a tunnel, while the
+    fallback runs `docker exec` inside the IPv4 container. Measured before the
+    fix: `_publishes('localhost', '54322')` returned True against `0.0.0.0`
+    alone, while the literal `::1` was correctly refused.
+    """
+    seen = _bound(monkeypatch, "0.0.0.0:54322")
+
+    with pytest.raises(RuntimeError) as refused:
+        backup._run("pg_dump", ["-d", "postgres"],
+                    "postgresql://u:p@localhost:54322/postgres")
+
+    # The message names what the request reaches, rather than saying
+    # "ambiguous" and leaving the operator to work out which half is missing.
+    message = str(refused.value)
+    assert "does not publish all of them" in message
+    for _, address in _families_of("localhost"):
+        assert address in message, message
+    assert not _reached_container(seen)
+
+
+@pytest.mark.skipif(len(_families_of("localhost")) < 2,
+                    reason="needs a dual-family localhost to be worth asserting")
+def test_a_name_is_accepted_when_every_family_it_reaches_is_published(monkeypatch):
+    """The other side of the same rule: publish both and `localhost` is
+    unambiguous, because wherever the resolver sends the client it arrives at
+    this container. This is the ordinary Supabase local setup."""
+    seen = _bound(monkeypatch, "0.0.0.0:54322", "[::]:54322")
+
+    backup._run("pg_dump", ["-d", "postgres"],
+                "postgresql://u:p@localhost:54322/postgres")
+
+    assert _reached_container(seen)
+
+
+def test_the_real_resolver_decides_which_families_must_be_published(monkeypatch):
+    """No mocked resolver anywhere in this one.
+
+    Whatever `localhost` resolves to on the host running the tests, publishing
+    exactly those addresses must be accepted and dropping any one of them must
+    be refused. That holds on a v4-only host, a v6-only host and a dual host,
+    so it says something about the RULE rather than about this machine.
+    """
+    reachable = _families_of("localhost")
+    assert reachable, "localhost does not resolve here at all"
+
+    exact = [f"[{address}]:54322" if family == "v6" else f"{address}:54322"
+             for family, address in sorted(reachable)]
+
+    seen = _bound(monkeypatch, *exact)
+    backup._run("pg_dump", ["-d", "postgres"],
+                "postgresql://u:p@localhost:54322/postgres")
+    assert _reached_container(seen), exact
+
+    for dropped in range(len(exact)):
+        short = [b for i, b in enumerate(exact) if i != dropped]
+        seen = _bound(monkeypatch, *short)
+        with pytest.raises(RuntimeError):
+            backup._run("pg_dump", ["-d", "postgres"],
+                        "postgresql://u:p@localhost:54322/postgres")
+        assert not _reached_container(seen), short
 
 
 def test_the_port_still_has_to_match(monkeypatch):

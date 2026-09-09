@@ -35,6 +35,7 @@ import json
 import os
 import shlex
 import secrets
+import socket
 import shutil
 import subprocess
 import sys
@@ -189,19 +190,53 @@ def _publishes(host: str, port: str) -> bool:
     if not matching:
         return False
 
-    requested = host.strip("[]").lower()
-    if requested in _LOOPBACK:
-        family = _LOOPBACK[requested]
-        return any(
-            address == requested
-            or _WILDCARD.get(address) == family
-            for address in matching
-        )
-    # A NAME, not an address. `localhost` resolves to 127.0.0.1 or ::1
-    # depending on the resolver, so it only establishes an endpoint when the
-    # container answers for every interface of a family — a wildcard. Against a
-    # specific binding the mapping is ambiguous, and ambiguous is refused.
-    return any(address in _WILDCARD for address in matching)
+    # 🔴 (fix.md F37, fifth pass.) EVERY address the request can reach must be
+    # this container's, not just one of them.
+    #
+    # The name branch here accepted any matching-port wildcard, whatever its
+    # family. A container publishing IPv4 `0.0.0.0:54322` therefore satisfied a
+    # request for `localhost:54322` — while on this host `localhost` resolves
+    # `::1` FIRST, so a client following the resolver reaches an IPv6 listener
+    # that may be a different database or a tunnel, and the fallback then runs
+    # inside the IPv4 container. Measured before the change: `localhost` -> True
+    # against `0.0.0.0` alone, while the literal `::1` was correctly refused.
+    #
+    # So resolve the request and check the whole candidate set. A literal
+    # resolves to itself, which is the exact-address rule unchanged; a name
+    # resolves to everything it can reach, and one uncovered family refuses.
+    reachable = _resolves_to(host, port)
+    if not reachable:
+        return False
+    return all(
+        any(address == candidate or _WILDCARD.get(address) == family
+            for address in matching)
+        for family, candidate in reachable
+    )
+
+
+def _resolves_to(host: str, port: str) -> set[tuple[str, str]]:
+    """(family, address) for everything a request for `host` can reach.
+
+    A literal resolves to itself. A name resolves to every address behind it,
+    which is the set the caller has to account for: `localhost` is two
+    listeners on most hosts, and they need not be the same server.
+    """
+    try:
+        infos = socket.getaddrinfo(host.strip("[]"), int(port),
+                                   type=socket.SOCK_STREAM,
+                                   proto=socket.IPPROTO_TCP)
+    except (OSError, ValueError):
+        # Unresolvable, or a port that is not a number. Either way there is no
+        # endpoint here that anyone can show belongs to the container.
+        return set()
+    return {
+        ("v6" if family == socket.AF_INET6 else "v4",
+         # A scope suffix (`fe80::1%eth0`) names the local interface, not the
+         # address Docker published.
+         sockaddr[0].lower().partition("%")[0])
+        for family, _, _, _, sockaddr in infos
+        if family in (socket.AF_INET, socket.AF_INET6)
+    }
 
 
 def _run(tool: str, args: list[str], url: str, *, stdin: bytes | None = None) -> bytes:
@@ -256,16 +291,22 @@ def _run(tool: str, args: list[str], url: str, *, stdin: bytes | None = None) ->
         published = _endpoints()
         detail = ("it could not be asked" if published is None
                   else ", ".join(f"{a}:{b}" for a, b in published) or "nothing")
-        ambiguous = (p["host"].strip("[]").lower() not in _LOOPBACK
-                     and published)
+        # What the request can actually reach, named in full. A host that
+        # resolves to two families is the case this refusal exists for, and
+        # "ambiguous" without saying which address is uncovered leaves the
+        # operator to guess.
+        reachable = sorted(address for _, address in _resolves_to(p["host"], p["port"]))
+        spread = (p["host"].strip("[]").lower() not in reachable
+                  and len(reachable) > 1)
         raise RuntimeError(
             f"{tool} is not installed on this host, and {p['host']}:{p['port']}"
             f" is not an endpoint of {DOCKER_DB_CONTAINER} (it publishes:"
             f" {detail}) — refusing to run against it instead."
-            + (" The requested host is a name rather than an address, so"
-               " against a specific binding the mapping is ambiguous; name the"
-               " address or publish on a wildcard."
-               if ambiguous else
+            + (f" {p['host']} resolves to {', '.join(reachable)}, and the"
+               " container does not publish all of them — a connection could"
+               " reach a different server than the one the fallback would run"
+               " inside. Name one address, or publish every family."
+               if spread else
                f" {p['host']}:{p['port']} may be another database or a tunnel.")
         )
     inner = ["-h", "127.0.0.1", "-p", "5432", "-U", p["user"]]

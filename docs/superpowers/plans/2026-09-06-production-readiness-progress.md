@@ -4023,6 +4023,42 @@ before a `--with-reset` holds handles to a dropped database, and Playwright
 would adopt it. The backend guard covers that better: nothing can be answering
 on :8000 by the time this lane runs, so Playwright always starts a fresh one.
 
+### Release preconditions, before pushing
+
+```
+rollback images for the build that was running
+  comrade-{api,agent-worker,pipeline-worker,frontend}:rollback-e2aae4e
+  (rollback-460f161 and rollback-5c73fd0 still present)
+
+backup, taken through the migrate image
+  20260910T125849Z-1e7f9239/  database.sql 864K, globals.sql 9.1K
+
+VERIFIED BY RESTORING IT, not by existing:
+  restored in 215.3s                       exit 0
+  tables=43  policies=128  rls_tables=41   migrations=106
+  teams=2  messages=10  threads=5  pages=33
+  restored copy: MealShare, MLOps          comrade roles in globals.sql: 5
+  scratch left behind: 0                   LIVE teams untouched
+```
+
+Four of my own mistakes on the way there, none of them product defects:
+`python scripts/backup.py` instead of the documented `python -m scripts.backup`
+(the path form puts `scripts/` on `sys.path` and `shared` disappears); `--out`
+instead of a positional directory; a bind mount owned by root while the image
+runs as uid 10001; and a raw `psql -f` that failed on `schema "public" already
+exists` because it skipped `prepare_target`, which is the whole point of the
+supported path.
+
+One of them is worth keeping as a note rather than a mistake: I wrote
+`... | tail` and read `$?` as the backup's status. It is `tail`'s. That is the
+same trap as the earlier `gates.sh | tail -1` retraction, so the status is
+captured before any pipe now.
+
+🔴 **The backup sits on the same host and the same disk as the database it
+came from.** Verified restorable, but it is not off-host, so it does not cover
+losing the instance or the volume. Naming the limit rather than letting
+"verified backup" imply more than it is.
+
 ### The gate took five runs, and each failure was a different real thing
 
 Recorded in full rather than as the green one at the end.

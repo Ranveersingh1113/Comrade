@@ -51,8 +51,16 @@ def admin():
     return conn
 
 
-def teardown() -> None:
-    """By id, never by pattern. Ordered so foreign keys do not object."""
+def teardown() -> list[str]:
+    """Remove every fixture root. By id, never by pattern.
+
+    🔴 (fix.md F55) RETURNS ITS FAILURES. This used to catch each delete, print
+    it, and return None — so a run whose cleanup failed still reported
+    POST-DEPLOY OK and exited 0. A cleanup that fails quietly is worse than one
+    that never ran, because it leaves rows in a real database and says it did
+    not.
+    """
+    failures: list[str] = []
     with admin() as conn:
         for sql in (
             "delete from public.jobs where team_id=%s",
@@ -62,8 +70,9 @@ def teardown() -> None:
             "delete from public.memory_pages where team_id=%s",
             "delete from public.agent_steps where run_id in"
             " (select id from public.agent_runs where team_id=%s)",
-            "delete from public.agent_runs where team_id=%s",
+            "delete from public.permission_grants where team_id=%s",
             "delete from public.consent_queue where team_id=%s",
+            "delete from public.agent_runs where team_id=%s",
             "delete from public.tasks where team_id=%s",
             "delete from public.messages where team_id=%s",
             "delete from public.thread_participants where team_id=%s",
@@ -74,12 +83,40 @@ def teardown() -> None:
             try:
                 conn.execute(sql, (TEAM,))
             except Exception as exc:                     # noqa: BLE001
-                print(f"    (teardown: {str(exc)[:80]})")
-        try:
-            conn.execute("delete from public.profiles where id=%s", (USER,))
-            conn.execute("delete from auth.users where id=%s", (USER,))
-        except Exception as exc:                          # noqa: BLE001
-            print(f"    (teardown: {str(exc)[:80]})")
+                failures.append(f"{sql.split()[2]}: {str(exc)[:90]}")
+        for sql in (
+            "delete from public.profiles where id=%s",
+            # auth.identities too: a browser sign-in needs one, and the first
+            # version of this did not know it existed.
+            "delete from auth.identities where user_id=%s",
+            "delete from auth.users where id=%s",
+        ):
+            try:
+                conn.execute(sql, (USER,))
+            except Exception as exc:                     # noqa: BLE001
+                failures.append(f"{sql.split()[2]}: {str(exc)[:90]}")
+    return failures
+
+
+def fixture_rows_left() -> dict:
+    """🔴 EVERY root, not just the team (fix.md F55). A leftover profile or auth
+    user coexisting with a clean team count is exactly the shape that let a
+    failed cleanup report success."""
+    with admin() as conn:
+        return {
+            "team": conn.execute(
+                "select count(*) from public.teams where id=%s", (TEAM,)).fetchone()[0],
+            "profile": conn.execute(
+                "select count(*) from public.profiles where id=%s", (USER,)).fetchone()[0],
+            "auth_user": conn.execute(
+                "select count(*) from auth.users where id=%s", (USER,)).fetchone()[0],
+            "identity": conn.execute(
+                "select count(*) from auth.identities where user_id=%s", (USER,)).fetchone()[0],
+            "runs": conn.execute(
+                "select count(*) from public.agent_runs where team_id=%s", (TEAM,)).fetchone()[0],
+            "consent": conn.execute(
+                "select count(*) from public.consent_queue where team_id=%s", (TEAM,)).fetchone()[0],
+        }
 
 
 def furnish() -> str:
@@ -196,9 +233,14 @@ def document_is_ingested() -> None:
 def main() -> int:
     print("=== a designated test team, created here and removed at the end ===")
     teardown()
-    thread_id = furnish()
-    print(f"  team {TEAM}  thread {thread_id}\n")
+    # 🔴 (fix.md F55) The fixture is created INSIDE the try. It used to be
+    # built before it, so a furnish() that failed halfway — a guard refusing a
+    # write, a column that is not what I thought — left its rows behind with no
+    # teardown at all.
     try:
+        thread_id = furnish()
+        print(f"  team {TEAM}  thread {thread_id}")
+        print()
         print("=== an actual agent answer, on the deployed stack ===")
         agent_answers(thread_id)
         print()
@@ -207,12 +249,13 @@ def main() -> int:
     finally:
         print()
         print("=== teardown ===")
-        teardown()
-        with admin() as conn:
-            left = conn.execute(
-                "select count(*) from public.teams where id=%s", (TEAM,)
-            ).fetchone()[0]
-        check("the test team is gone", left == 0, f"rows left: {left}")
+        cleanup_failures = teardown()
+        for failure in cleanup_failures:
+            print(f"    *** {failure}")
+        left = fixture_rows_left()
+        remaining = {k: v for k, v in left.items() if v}
+        check("every fixture row is gone", not remaining and not cleanup_failures,
+              f"left: {remaining or 'none'}")
 
     failed = [label for label, ok, _ in results if not ok]
     print()

@@ -4103,6 +4103,36 @@ probes — because those interrogate the deployed stack rather than trusting the
 release. The gap was between `up -d` and the badge, and everything measured on
 the far side of it stands.
 
+### Post-deploy acceptance on the build that actually activated
+
+Re-run against `dca9019`, because until F58 was fixed the provenance of what
+was running could not be relied on:
+
+```
+POST-DEPLOY OK   exit 0
+  task lookup    28.6s  PASS
+  wiki question  25.4s  PASS
+  team context   32.6s  PASS   <- after "empty turn from the model (attempt 1/6)"
+  document ingestion: parsed by the running worker    PASS  status=ready
+  teardown: every fixture row is gone                 PASS  left: none
+```
+
+That empty turn replaces an "unmeasured" note earlier in this document with a
+figure: **empty turns still occur on this build**, one in three answers here,
+and `EMPTY_TURN_ATTEMPTS` absorbed it on the first retry. The answer still
+arrived within one user ask, which is the property that was asked for — but
+"the thinking budget fixed the empty turns" would be the wrong reading. It
+reduced them; the retry is still load-bearing.
+
+🔴 **The canonical gate has NOT been run against `dca9019`.** It went green on
+`ed7f527` (GATE EXIT 0, all lanes, browser journeys included) and the commits
+after that touch `.github/workflows/deploy-pilot.yml`, `scripts/deploy_host.sh`,
+its test file, and documentation — nothing any product image imports. What ran
+instead is that file's own tests, with both new ones mutation-checked. The full
+gate could not run because local Docker lost every container mid-session and the
+Supabase stack it needs had not come back; `npx supabase start` was still
+pulling when this was written. Stated rather than papered over.
+
 ### Release preconditions, before pushing
 
 ```

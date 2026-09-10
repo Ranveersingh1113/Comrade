@@ -3692,6 +3692,192 @@ images.
 Not verified: a browser sign-in on the deployed host, and reliable agent answers
 at one ask under the model's current behaviour.
 
+
+## Twelfth review follow-up — 2026-09-10, F52 root cause, F54, F55
+
+### F52 — the cause was ours, and my "upstream" claim was wrong
+
+🔴 **RETRACTED.** I wrote that the empty responses were "an upstream,
+time-varying condition on the configured Gemini key/model" that "I cannot fix in
+code". The reviewer said that was unsupported by my experiments, and they were
+right. Successful bare calls, a bare tool-equipped runner and fresh-thread turns
+rule out some hypotheses; they do not establish that the assembled request is
+innocent. I had stopped at the point where a cause was inconvenient.
+
+The cause is configuration and it is ours: `gemini-2.5-flash` runs with DYNAMIC
+thinking by default, and on ordinary lookups it returned a normal STOP candidate
+with no parts. Interleaved six-sample comparison on the same question, full
+prompt, all tools:
+
+```
+thinking_budget -1 (dynamic)   empty 4/6
+thinking_budget 4096           empty 2/6
+thinking_budget 1024           empty 0/6      and 9/9 on raw calls
+```
+
+`agent/agent.py` now sets `thinking_budget=1024`, keeping reasoning enabled with
+every tool and the whole safety prompt (`cabc70b`).
+
+Measured after it, locally, with the runtime's empty-turn retries DISABLED so
+nothing masks a first-attempt failure:
+
+```
+task lookup    4.0s   1 ask   answered
+team context   4.3s   1 ask   answered
+wiki question  4/5 over five runs, 3.5-5.2s
+```
+
+Latency fell with it: the deployed browser session before this change took 25-54
+seconds per answer, and these take three to five.
+
+🔴 **A DIFFERENT GAP REMAINS, and it is not the empty turn.** The one wiki
+failure in five answered from chat history — "The chat history does not show a
+decision about the team mascot" — instead of reading the wiki page that holds it.
+The turn produced a reply, so the empty-turn retry does not apply and would not
+have helped. That is tool selection, roughly 80% on this prompt at one ask, and
+it is a usefulness gap I am naming rather than rounding up. I have no clean
+before-measurement to say whether the thinking budget changed it.
+
+### F54 — `--internal` is not isolation · `c3508b4`
+
+`_internal_network` created the per-run setup network with
+`docker network create --internal`, and the docstring asserted that this "gives
+it no gateway". It does not. An internal bridge blocks EXTERNAL routing and
+still has a gateway address on the host, so a dependency hook — pip's setup.py,
+npm's postinstall, running as root with the network on — can open a TCP
+connection to whatever the host has bound there. Squid is not in that path.
+
+Reproduced on the pilot host with a controlled listener rather than SSH, and
+with a positive control proving the listener was genuinely up
+(`scripts/setup_isolation_check.sh`):
+
+```
+docker network create --internal        .Internal=true   gateway=172.20.0.1
+a sandbox container on that network     REACHED the host listener
+...with gateway_mode_ipv4=isolated      BLOCKED (OSError)
+...and the registry proxy on it         still OK 200
+```
+
+🔴 **My own escape probes could not have caught this, and I read them as if they
+could.** They run in the RUN phase, which uses `--network none`, and they aim at
+`172.17.0.1` — the DEFAULT bridge, not the per-run one. Refusals there say
+nothing about the setup phase's network. I reported "all four escapes blocked"
+as though it covered both phases.
+
+The fix removes the gateway on both address families, and READS THE TOPOLOGY
+BACK: `.Internal` was true on the network that reached the host, so the flag
+proves nothing by itself. Any gateway is refused, which also covers a network
+left over from a release predating this. The gateway list is parsed as JSON
+rather than through a Go template, because `{{.Gateway}}` prints the literal
+string `invalid IP` when empty and a future Docker spelling it differently would
+silently flip the answer. An unparseable IPAM configuration is an error, not an
+allow.
+
+Mutation-checked: removing the isolated options and the read-back fails 3 tests.
+
+### F55 — a failed cleanup reported success · `e2aae4e`
+
+Three defects in one lifecycle. `teardown()` caught each delete failure, printed
+it and returned None, so a run whose cleanup failed still exited 0. The final
+check counted the team row only, so a leftover profile or auth user could coexist
+with success. And `furnish()` ran BEFORE the `try/finally`, so a fixture that
+failed halfway left its rows with no teardown at all.
+
+All three fixed, and proved by injection without a database, the way the finding
+reproduced them:
+
+```
+a teardown deletion fails             -> exit 1, not POST-DEPLOY OK
+a fixture root survives the teardown  -> exit 1
+furnish fails halfway                 -> teardown still ran
+an ordinary clean run                 -> exit 0
+```
+
+`auth.identities` is in the teardown now. A browser sign-in needs one and the
+first version did not know it existed — which is exactly how the previous
+fixture left one behind.
+
+### The live fixture that was left in production, and removing it
+
+The `cabc70b` browser verification created a real team, user, profile, identity,
+wiki page, task, thread, six messages, four agent runs and two consent rows in
+the production database, and left them there. Removed by id, with every root
+verified afterwards:
+
+```
+removed  12 agent_steps   2 consent_queue   4 agent_runs   1 memory_versions
+          1 memory_entries 1 memory_pages   1 tasks        6 messages
+          1 threads        1 memberships    1 teams        1 profiles
+          1 auth.identities 1 auth.users
+LEFTOVER  {team 0, profile 0, auth_user 0, identity 0, runs 0, consent 0, tasks 0}
+REAL_TEAMS_REMAINING  2  MLOps, MealShare
+```
+
+### What that verification did prove, before it was cleaned up
+
+A real browser sign-in on the deployed host — the thing I had explicitly not
+done — with password authentication through the live form, then:
+
+```
+"Who is on this team?"                  -> "The team has one member: F52 Checker."
+"What did we decide the deployment
+  mascot would be?"                     -> "The deployment mascot is a quokka.
+                                            This decision is recorded in the
+                                            'Deployment decisions' wiki page."
+"Please propose a task ... assigned
+  to me."                               -> consent card, AWAITING YOUR APPROVAL
+before approval                         -> tasks 0, consent [pending task_create]
+after Approve once                      -> card COMPLETED, task created 'proposed'
+worker log for that team                -> every request got a response;
+                                           no empty turns at all
+```
+
+The consent gate held: zero tasks existed while the card was pending, and the
+task appeared only after approval.
+
+🔴 One of those four runs later ended `failed` after 79s, and a follow-up
+question left a second run parked at `waiting_for_permission` with an unanswered
+card. Both were cleaned up with the fixture rather than diagnosed.
+
+### Still open
+
+🔴 **The Supabase admin API key is rejected.** Creating the test user through
+`/auth/v1/admin/users` returned `401 Invalid API key` with the configured
+`SUPABASE_SECRET_KEY`, under both the `apikey`-only and `Authorization: Bearer`
+shapes. The fixture was created by direct database insert instead. Nothing in the
+product uses that endpoint today, but `shared/storage.py` sends the same key to
+Storage — so either the key is wrong for the admin API only, or document
+downloads are running on borrowed time. Not diagnosed here.
+
+🔴 Tool-selection reliability on the wiki prompt, above.
+
+🔴 F36's fresh-cluster restore: `scripts/backup.py` sends the globals file to
+`psql` with `ON_ERROR_STOP=1` while its own printed instructions omit the flag,
+and restoring globals into a cluster that already has `postgres` fails. The five
+comrade roles do come back. The supported path has still not been run on a fresh
+target.
+
+### Deployed and verified on the host
+
+```
+master e2aae4e, six containers up, api healthy
+
+the DEPLOYED _internal_network makes:
+    .Internal = true      gateways = NONE
+    options   = {"com.docker.network.bridge.gateway_mode_ipv4":"isolated",
+                 "com.docker.network.bridge.gateway_mode_ipv6":"isolated"}
+
+and a real install through it, in the deployed agent-worker:
+    INSTALL installed 3.6s     RUN exit 0
+    proxy log: TCP_TUNNEL/200 pypi.org, files.pythonhosted.org
+    no leftover setup networks, dependency volume removed
+
+scripts/gates.sh   GATE EXIT: 0
+    backend 1720 passed, 8 skipped, 21 deselected  (exclusive DB)
+    frontend 229 / 34 files; integration 21 / 6; browser journeys 8
+    real GitHub 2 skipped - no credential configured
+```
+
 ---
 
 ## Standing ceilings

@@ -4023,6 +4023,86 @@ before a `--with-reset` holds handles to a dropped database, and Playwright
 would adopt it. The backend guard covers that better: nothing can be answering
 on :8000 by the time this lane runs, so Playwright always starts a fresh one.
 
+### F58 — the release could skip migration and activation and report success
+
+The most serious thing found today, and it was found only because F56 made me
+look at what a deploy actually did rather than at whether it went green.
+
+The workflow ran the release as `git show $SHA:scripts/deploy_host.sh | sh -s
+$SHA`, so the script is its own stdin. `docker compose run` reads stdin, and can
+therefore swallow **the rest of the script**: `sh` reaches end of input, exits
+0, and the deploy reports success having never migrated, never activated and
+never checked readiness.
+
+Measured on the pilot host, twice:
+
+```
+the 0d933af deploy          6 seconds, workflow green
+  output stopped dead at step 4b's "Valid configuration"
+  all four containers still on the PREVIOUS images afterwards
+  the running api did not contain the scripts/ of the commit it had "deployed"
+  api log lines during the deploy window: 0   (step 7 never ran)
+
+re-run by hand, exactly as the workflow invokes it:
+  323 lines, last line "Valid configuration", REDEPLOY EXIT: 0
+```
+
+🔴 **It is a race**, between how much `sh` has buffered and when the one-off
+container grabs the pipe. That is why some releases activated and some did not,
+and why no single passing run can demonstrate a fix. A probe of the same shape
+truncated on one run and completed on the next.
+
+So the fix is structural rather than empirical: **the workflow writes the script
+to a file and runs it**, and there is then no shared stdin for anything to
+drain. The exit code is preserved across the cleanup, so a failed deploy cannot
+report success that way either. Belt and braces, every one-off container in the
+release also redirects from `/dev/null`.
+
+Verified by the next deploy, which is the only proof that counts here:
+
+```
+deployed dca9019           79 seconds, against 19 for the broken one
+api / agent-worker / pipeline-worker / frontend    SAME (activated)
+created 14:09:33-34, inside the deploy window 14:09:10-14:10:29
+the running api carries this commit's scripts/     4 redirects present
+readiness ran                                      1 api log line, was 0
+/api/ready all eight ok    /  200    POST /api/agent/turn  401
+```
+
+#### Four wrong hypotheses, and the pattern in them
+
+🔴 I blamed the missing `-T` flag on the caddy validate step. **Adding `-T`
+changes nothing** — measured, both forms truncate. The flag controls the TTY,
+not whether stdin is attached.
+
+🔴 My first probe used `sudo docker compose`; the release does not. 🔴 My second
+used a four-line script, small enough that `sh` had already read all of it
+before the container started. Neither could contain the defect. It reproduced
+the moment the probe was 155 lines, like the real thing.
+
+🔴 **And the regression test I first wrote had no teeth.** It ran the release
+past a stdin-draining docker double and asserted it still migrated — but piped,
+on this machine, it still migrated, so the test passed on the broken shape. I
+deleted it rather than keep it as reassurance. What replaced it is the part that
+is checkable anywhere: the workflow must not pipe the release into `sh`, and no
+`$COMPOSE run` may inherit its stdin. Both mutation-checked — restore the pipe
+and one fails, drop a redirect and the other does.
+
+That is the same failure as F56's first test and as the F54 escape probes: a
+fixture that does not contain the thing it is guarding. Four times in one day,
+which is why it is now written down in the memory rather than just here.
+
+#### What this means for the earlier entries in this ledger
+
+🔴 **Every "deployed and verified" line above this one is weaker than it reads.**
+A green deploy did not establish that the release ran to completion, so which of
+those releases actually activated is unknown. What is still sound is anything
+checked directly against the running system afterwards — the isolation and
+install checks, the post-deploy acceptance, the public HTTPS and auth-boundary
+probes — because those interrogate the deployed stack rather than trusting the
+release. The gap was between `up -d` and the badge, and everything measured on
+the far side of it stands.
+
 ### Release preconditions, before pushing
 
 ```

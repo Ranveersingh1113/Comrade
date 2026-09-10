@@ -36,6 +36,7 @@ stranger; the surface is new, the rule is not.
 """
 import collections
 import contextlib
+import json
 import threading
 import types
 import logging
@@ -324,16 +325,58 @@ def _kill(name: str) -> None:
         logger.warning("could not kill sandbox container %s", name)
 
 
-def _internal_network(name: str, attach: str) -> str:
-    """An internal Docker network with one container attached, verified.
+def _network_gateways(name: str) -> list[str]:
+    """Every gateway address configured on a Docker network.
 
-    `--internal` gives it no gateway, so nothing on it can reach the internet,
-    a host service, another team's sandbox, or a cloud metadata endpoint. The
-    read-back matters: "a network with this name exists" is not "this network
-    has no route out", and only the second one contains anything.
+    Read as JSON rather than through a Go template: `{{.Gateway}}` prints the
+    string `invalid IP` when the field is empty, so a template comparison would
+    have to know that spelling, and a future Docker that spells it differently
+    would silently start reporting a gateway where there is none — or worse,
+    none where there is one.
     """
+    raw = _docker_cmd(
+        ["docker", "network", "inspect", "-f", "{{json .IPAM.Config}}", name]
+    ).strip()
     try:
-        _docker_cmd(["docker", "network", "create", "--internal", name])
+        config = json.loads(raw) or []
+    except ValueError:
+        raise SandboxError(
+            f"could not read the IPAM configuration of {name}: {raw[:120]}"
+        ) from None
+    return [entry["Gateway"] for entry in config
+            if isinstance(entry, dict) and entry.get("Gateway")]
+
+
+def _internal_network(name: str, attach: str) -> str:
+    """A Docker network with NO ROUTE TO THE HOST, one container attached.
+
+    🔴 (fix.md F54) `--internal` ALONE DOES NOT DO THIS, and the sentence that
+    used to be here — "`--internal` gives it no gateway" — was simply wrong.
+    An internal bridge blocks EXTERNAL routing and still has a gateway address
+    on the host. Anything the host has bound there is one TCP connect away, and
+    Squid never sees it, so the registry allowlist is not in the path at all.
+
+    Measured on the pilot host with a listener bound to that gateway:
+
+        docker network create --internal   ->  .Internal=true  gateway=172.20.0.1
+        a sandbox container on it          ->  REACHED the host listener
+        ...with gateway_mode_ipv4=isolated ->  BLOCKED, and the proxy still works
+
+    So the gateway is removed, and — because "created with the right flag" is
+    not "has no gateway" — the result is READ BACK and refused if one is there.
+    That check is also what protects against a network left over from a release
+    that predates this, which would otherwise be reused as-is.
+    """
+    create = [
+        "docker", "network", "create", "--internal",
+        # Both families: a deployment that enables IPv6 later must not quietly
+        # get a routable gateway back on the other one.
+        "-o", "com.docker.network.bridge.gateway_mode_ipv4=isolated",
+        "-o", "com.docker.network.bridge.gateway_mode_ipv6=isolated",
+        name,
+    ]
+    try:
+        _docker_cmd(create)
     except SandboxError as exc:
         if "already exists" not in str(exc):
             raise
@@ -343,6 +386,15 @@ def _internal_network(name: str, attach: str) -> str:
     if internal not in ("true", ""):
         raise SandboxError(
             f"{name} exists but is not internal; refusing to run with a route out."
+        )
+    # 🔴 THE TOPOLOGY, not the flag. `.Internal` was true on the network that
+    # reached the host.
+    gateways = _network_gateways(name)
+    if gateways:
+        raise SandboxError(
+            f"{name} still has a gateway address ({', '.join(gateways)}), so a"
+            " dependency hook could reach the host directly instead of going"
+            " through the registry proxy; refusing to run setup on it."
         )
     if attach:
         try:

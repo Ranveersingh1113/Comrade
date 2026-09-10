@@ -152,3 +152,98 @@ def test_setup_still_refuses_to_run_without_the_proxy(monkeypatch):
         run_setup(["true"], root=ROOT, deps="comrade-deps-nonexistent")
 
     assert "COMRADE_SETUP_PROXY_URL" in str(refused.value)
+
+
+# ---------------------------------------------------------------------------
+# F54 — `--internal` is not isolation
+# ---------------------------------------------------------------------------
+
+def _fake_docker(monkeypatch, answers):
+    """Record the argv the sandbox would run, and answer inspects from a dict."""
+    from agent import sandbox
+
+    seen: list[list[str]] = []
+
+    def _cmd(argv):
+        seen.append(argv)
+        if argv[:3] == ["docker", "network", "inspect"]:
+            return answers[argv[argv.index("-f") + 1]]
+        return ""
+
+    monkeypatch.setattr(sandbox, "_docker_cmd", _cmd)
+    return seen
+
+
+def test_the_setup_network_is_created_without_a_gateway(monkeypatch):
+    """🔴 THE DEFECT (fix.md F54). `--internal` blocks EXTERNAL routing and
+    leaves a gateway address on the host, so a dependency hook can open a TCP
+    connection to whatever the host has bound there — with Squid nowhere in the
+    path.
+
+    Measured on the pilot host: `.Internal=true`, `gateway=172.20.0.1`, and a
+    sandbox container on that network reached a listener bound to it. With
+    `gateway_mode_ipv4=isolated` the same address is refused and the registry
+    proxy still works.
+    """
+    from agent import sandbox
+
+    seen = _fake_docker(monkeypatch, {
+        "{{.Internal}}": "true",
+        "{{json .IPAM.Config}}": '[{"Subnet": "172.30.0.0/16"}]',
+    })
+
+    sandbox._internal_network("comrade-setupnet-test", "")
+
+    created = next(a for a in seen if a[:3] == ["docker", "network", "create"])
+    assert "com.docker.network.bridge.gateway_mode_ipv4=isolated" in created
+    assert "com.docker.network.bridge.gateway_mode_ipv6=isolated" in created, (
+        "a deployment that enables IPv6 later would get a routable gateway back"
+    )
+
+
+def test_a_network_that_still_has_a_gateway_is_refused(monkeypatch):
+    """🔴 THE TOPOLOGY, not the flag. `.Internal` was true on the network that
+    reached the host, so checking it proves nothing on its own — and a network
+    left over from a release that predates this would otherwise be reused."""
+    from agent import sandbox
+
+    _fake_docker(monkeypatch, {
+        "{{.Internal}}": "true",
+        "{{json .IPAM.Config}}": '[{"Subnet": "172.20.0.0/16",'
+                                 ' "Gateway": "172.20.0.1"}]',
+    })
+
+    with pytest.raises(sandbox.SandboxError) as refused:
+        sandbox._internal_network("comrade-setupnet-stale", "")
+
+    assert "172.20.0.1" in str(refused.value)
+    assert "registry proxy" in str(refused.value)
+
+
+def test_a_non_internal_network_is_still_refused(monkeypatch):
+    """The older check, kept: both have to hold."""
+    from agent import sandbox
+
+    _fake_docker(monkeypatch, {
+        "{{.Internal}}": "false",
+        "{{json .IPAM.Config}}": "[]",
+    })
+
+    with pytest.raises(sandbox.SandboxError):
+        sandbox._internal_network("comrade-setupnet-open", "")
+
+
+def test_an_unreadable_ipam_configuration_is_an_error_not_an_allow(monkeypatch):
+    """Fail closed. A gateway list that cannot be parsed must not read as
+    "no gateways"."""
+    from agent import sandbox
+
+    _fake_docker(monkeypatch, {
+        "{{.Internal}}": "true",
+        "{{json .IPAM.Config}}": "not json",
+    })
+
+    with pytest.raises(sandbox.SandboxError) as refused:
+        sandbox._internal_network("comrade-setupnet-broken", "")
+
+    assert "IPAM" in str(refused.value)

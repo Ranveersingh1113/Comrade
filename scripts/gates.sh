@@ -135,62 +135,22 @@ step "frontend unit + component"
 step "frontend integration"
 (cd frontend && npm run test:integration)
 
-api_log="${TMPDIR:-/tmp}/comrade-gates-api.$$.log"
-
 if [ "$QUICK" -eq 0 ]; then
-  # 🔴 The browser journeys drive the real API, and one of them failed because
-  # the API's connection pool still held handles to a database that a previous
-  # `--with-reset` had dropped and recreated. Every request failed with "could
-  # not receive data from server" while /health returned 200, because /health
-  # returned {"status":"ok"} without touching anything.
+  # 🔴 NOT STARTED HERE, and no longer demanded of the operator either
+  # (fix.md F57). frontend/playwright.config.ts already starts the API, the
+  # agent worker and the dev server as its own `webServer` entries, each with
+  # a url it waits on — so this lane was self-sufficient the whole time, and
+  # the precondition check that used to sit here only ever told the operator
+  # to put a second writer on the database for the lane above.
   #
-  # /health now reports the database, so asking it is worth something. A long-
-  # running API must be restarted after a reset, and this is what says so
-  # instead of letting a journey fail on a dependency the test never mentions.
-  # 🔴 STARTED HERE, not by the operator (fix.md F57). Telling them to start it
-  # themselves is what put a second writer on the database during the backend
-  # lane above. It is started after that lane and stopped again, so one
-  # invocation of this file can satisfy both requirements — which it could not
-  # before: an API up meant a flaky backend, an API down meant this lane exited
-  # 1 without running.
-  gates_api_pid=""
-  stop_gates_api() {
-    [ -n "$gates_api_pid" ] || return 0
-    kill "$gates_api_pid" 2>/dev/null
-    wait "$gates_api_pid" 2>/dev/null
-    gates_api_pid=""
-  }
-  trap stop_gates_api EXIT INT TERM
-
-  uv run uvicorn server.app:app --port 8000 >"$api_log" 2>&1 &
-  gates_api_pid=$!
-
-  api_health=""
-  waited=0
-  while [ "$waited" -lt 60 ]; do
-    api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
-    case "$api_health" in *'"database":"ok"'*) break ;; esac
-    # A dead process will never become healthy; say so now rather than in 60s.
-    kill -0 "$gates_api_pid" 2>/dev/null || break
-    sleep 1
-    waited=$((waited + 1))
-  done
-
-  case "$api_health" in
-    *'"database":"ok"'*) ;;
-    *)
-      echo "the API this lane started never became healthy: ${api_health:-no answer}" >&2
-      echo "--- its output ---" >&2
-      tail -20 "$api_log" >&2
-      exit 1 ;;
-  esac
-
+  # `reuseExistingServer: true` means it would adopt a server that is already
+  # running, which is what the old check was really worried about: a pool
+  # opened before a `--with-reset` holds handles to a dropped database. The
+  # backend guard above refuses to run at all while anything answers on :8000,
+  # so by the time we reach here there is nothing stale to adopt and Playwright
+  # starts a fresh one.
   step "browser journeys (playwright)"
   (cd frontend && npm run test:e2e)
-
-  # Stopped before the lanes below, so nothing after this runs against a second
-  # writer either.
-  stop_gates_api
 
   # The lane that does not fake its dependencies. Everything above runs against
   # a local bare repository through the `_url_for` and `_create_pr` seams —

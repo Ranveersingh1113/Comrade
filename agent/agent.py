@@ -8,6 +8,7 @@ import os
 from google.adk.agents import LlmAgent
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.apps import App
+from google.genai import types
 
 from agent.permission_plugin import ChokepointPlugin
 from agent.plan_tools import plan_update
@@ -257,6 +258,11 @@ root_agent = LlmAgent(
     name="comrade",
     model=MODEL,
     instruction=build_instruction,
+    # F52: dynamic thinking produced empty STOP responses on ordinary lookups.
+    # Keep reasoning enabled; the explicit budget is checked by live acceptance.
+    generate_content_config=types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_budget=1024),
+    ),
     tools=[
         team_get_state,
         member_activity,

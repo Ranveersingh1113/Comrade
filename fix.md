@@ -2032,3 +2032,179 @@ images.
 
 Not verified: a browser sign-in on the deployed host, and reliable agent answers
 at one ask under the model's current behaviour.
+
+
+## Twelfth review — deployed `460f161`, ledger `5b04cc4`
+
+**Deployment confirmed; F52 remains a material judge-experience problem, and
+setup isolation has a newly reproduced hole.**
+
+Independent live SSM checks confirmed `460f16173e90ba048feff933b833710042f81cab`
+on EC2, six services running, both worker containers reaching Docker 29.1.3,
+and public HTTPS `/api/ready` reporting all eight checks OK. Focused local
+registry/deployment tests: **41 passed in 37.11s**. This review did not rerun the
+full gate, authenticate a production browser, repeat live-model prompts, or
+restore the production backup. Those boundaries distinguish independent
+verification from the implementation ledger's evidence.
+
+### F54 — Dependency setup can reach services on the Docker host
+
+- [ ] **P1 — sandbox network boundary.** `agent/sandbox.py:327–353`
+  (`_internal_network`), called by `run_setup`; acceptance gaps in
+  `scripts/proxy_egress_check.sh` and `scripts/repo_execution_check.sh:129–130`.
+- `_internal_network` creates an ordinary `docker network create --internal`
+  bridge and attaches the registry proxy. Internal bridge mode blocks external
+  routing, but retains the host bridge address. A dependency hook can connect
+  directly to services bound to that address or all host interfaces, without
+  asking Squid. The Squid hostname allowlist cannot block traffic bypassing it.
+- **Reproduced on the actual pilot host:** created a disposable `--internal`
+  network, attached the existing registry proxy as setup does, and ran the
+  deployed sandbox image with read-only filesystem, all capabilities dropped,
+  no-new-privileges, and resource limits. A plain TCP connection from that
+  container to its actual bridge address **172.20.0.1:22 succeeded**:
+  `HOST_SSH_TCP_REACHABLE`. No authentication was attempted and no application
+  data, credentials, or metadata were read. This proves host-service reachability,
+  NOT SSH authentication or host compromise. The client exited and the temporary
+  proxy attachment/network were removed successfully.
+- Evidence: SSM command `fa311dce-6325-49fb-b018-40fa8e5b238c` returned Success.
+  Docker's documented distinction is explicit:
+  https://docs.docker.com/engine/network/port-publishing/#gateway-modes
+  (`internal` versus gateway mode `isolated`).
+- Existing acceptance missed this: the proxy check's direct probe only tries
+  public PyPI, while the four escape probes are in the **run** phase, which uses
+  `--network none`. Its `172.17.0.1` is not the per-setup bridge address, and
+  `127.0.0.1:54322` inside a sandbox is that sandbox's own loopback, not the
+  deployed hosted database. Refusals there do not prove setup-to-host isolation.
+- **Required fix:** create setup bridges without host-address reachability,
+  e.g. supported `isolated` gateway mode for the enabled address families, or
+  equivalent narrowly scoped enforced filtering. Keep registry-proxy transport
+  working. Verify the resulting topology, not only `.Internal=true`. Apply the
+  shared network helper's contract consistently to every caller; do not enable
+  unsafe previews as part of the repair.
+- **Acceptance:** exercise real `run_setup` with a known reachable host listener
+  as a positive control, then prove the setup container cannot connect to it
+  directly (IPv4 and IPv6 where enabled). Test actual platform endpoints and
+  metadata, arbitrary direct egress, and forbidden proxy requests separately.
+  A locked dependency install through the proxy must still pass. Clean up all
+  test resources and propagate cleanup errors. This can be repaired without
+  rolling back unrelated application improvements.
+
+### F55 — Post-deploy acceptance can succeed despite failed cleanup
+
+- [ ] **P2 — acceptance reliability / fixture lifecycle.**
+  `scripts/post_deploy_check.py:52–78,198–215`; related shell cleanup in
+  `scripts/proxy_egress_check.sh` and `scripts/repo_execution_check.sh`.
+- `teardown()` catches delete failures, prints them, and never marks the run
+  failed. The final check counts only the team row; leftover profiles/auth users
+  can therefore coexist with `POST-DEPLOY OK` and exit 0. `furnish()` also runs
+  before the `try/finally`, so a partially failed fixture is not cleaned up.
+- **Reproduced without a database:** injected a connection that refuses profile
+  deletion but reports the team gone; `main()` printed `POST-DEPLOY OK` and
+  returned **0**. Injected a partial `furnish()` failure; observed initial
+  teardown, partial fixture creation, then exception with no final teardown.
+- **Required fix:** protect fixture creation with the same `try/finally` as the
+  checks. Aggregate/raise cleanup failures and make them affect process exit.
+  Verify all owned fixture roots (including auth user/profile), not just the
+  team. The shell acceptance scripts should likewise fail if their owned
+  network/container/volume cleanup fails, rather than swallow or merely print it.
+- **Acceptance:** inject a mid-fixture failure and a teardown deletion failure;
+  prove cleanup is attempted and a nonzero outcome is preserved. An ordinary
+  passing run must leave no owned fixture rows/resources. Do not add broad
+  cleanup patterns or remove real-team data.
+
+### F52 remains open — upstream attribution is not established
+
+The deployment ledger reports 2/3 then 1/3 useful host answers, sometimes taking
+roughly 40–54 seconds. This is still a primary demo failure despite a successful
+infrastructure release. Raising retries is mitigation, not diagnosis.
+
+The claim that this is necessarily upstream and cannot be fixed in code is not
+supported by those experiments. Successful bare calls, a bare tool-equipped
+runner, and fresh-thread turns leave Comrade's full assembled request, replayed
+history, session state, plugins, and response/event conversion as live hypotheses.
+In particular, fresh-thread success does not rule OUT a history-dependent defect.
+Comparisons must control the request and timing, not just the key/model name.
+
+**Next fix method:** on a designated test team, capture safe structural provider
+response diagnostics (candidate/part counts, finish/block reason, usage, errors)
+and corresponding ADK events before Comrade filters them. Compare the same
+failing request through the direct provider call, minimal ADK, and full runtime,
+then change one request/history/plugin factor at a time. Keep private content and
+credentials out of logs. Stop labelling the cause upstream until that comparison
+supports it; do not raise retries again as the only fix. Require one-user-ask
+usefulness and latency measurements on the deployed request path.
+
+### Recovery evidence caveat — F36 fresh-cluster acceptance remains incomplete
+
+The deployment ledger itself records globals restoration failing on the existing
+`postgres` role and platform-role grants. `scripts/backup.py:510–512` still sends
+that globals file to `psql` with `ON_ERROR_STOP=1`; its printed manual commands at
+`:564–565` omit that flag and bypass the preparation contract. A manual partial
+or adapted restore is not proof that the supported fresh-cluster restore path
+works. Preserve the useful backup artifacts, document/implement exact role and
+platform provisioning, and rerun the supported recovery procedure on a fresh
+disposable target with failure propagation. No new destructive restore was run
+by this review.
+
+**Disposition:** keep the functioning application deployment; prioritize F54 and
+F52. Close F55 and the explicit recovery-procedure gap without calling local
+counts or readiness proof of a useful authenticated judge journey. Browser
+sign-in on production remains unverified.
+
+
+## F52 implementation — 2026-09-10 (local verification)
+
+The empty response reaches Comrade directly from Gemini: a normal STOP candidate
+with no parts and no output/thinking tokens. The earlier conclusion that this
+could not be improved in application configuration was unsupported.
+
+Controlled comparisons used the same synthetic task question, full system prompt,
+22 tools and Gemini 2.5 Flash. Three initial baseline calls were empty; a short
+replacement instruction and a one-tool configuration each answered 3/3. Merging
+user messages and changing "silent teammate" did not reliably fix it. Neither
+change ships. Appending an instruction to answer also still failed.
+
+Thinking-budget comparison: explicit 1024 answered 9/9 raw calls. In the final
+interleaved six-sample comparison, dynamic (-1) was empty 4/6, 4096 was empty 2/6,
+and 1024 was empty 0/6. This isolates a usable provider configuration, not the
+provider's internal reason for its empty STOP response. No claim of a permanent
+zero-error rate follows from this sample.
+
+**Change:** `agent/agent.py` sets `thinking_budget=1024`, keeping reasoning enabled,
+all tools and the full safety prompt. Existing bounded empty-turn retries remain;
+no model switch, new dependency, prompt weakening or extra retry was added.
+The budget limits reasoning headroom for harder repository tasks; those need
+separate acceptance before claiming equivalent complex-task quality.
+
+**Regression:** the four live usefulness tests now disable runtime retries and
+permit exactly one ask with no environment override. Before the change, task,
+wiki and team-context tests failed with empty replies (3 failed, 1 passed). After
+it, the four scenarios passed in three consecutive runs (12/12), including real
+tool results and consent staging without execution. A local configuration guard
+also fails before the fix. Focused agent/empty-turn tests: 15 passed.
+
+Full gate and deployment status are recorded below when measured. This entry does
+not close F54/F55 or claim production acceptance. Temporary provider request
+captures and diagnostic tests were removed.
+
+Provider documentation: [Gemini thinking budgets](https://ai.google.dev/gemini-api/docs/generate-content/thinking?hl=en)
+documents dynamic (-1), disabled (0), and explicit budgets for 2.5 Flash. It does
+not document the root cause of this empty-output behavior.
+
+Additional live coverage: wiki-fact retrieval passed. The legacy history test
+failed before a model call because `_resolve_thread` no longer accepts a thread
+type or returns a scope object. Updated that test to resolve its seeded private
+thread through the current helper; removed its second-ask allowance and disabled
+runtime retries so recall is also measured at one ask. Result pending below.
+
+**Full gate:** `scripts/gates.sh` exited **0**, captured from the process itself
+(no output pipeline): backend **1716 passed, 8 skipped, 21 deselected**; frontend
+build/lint passed; unit **229/34 files**; integration **21/6 files**; browser
+**8 passed**. Real GitHub **2 skipped** (credentials unavailable). The realtime
+integration's first subscription trial timed out and its built-in retry passed;
+this remains a known flake, not a first-trial pass. Gate log:
+`.codex-f52-gates.log`. No production deployment performed for this change.
+
+**History acceptance:** repaired live recall test passed (1/1), with runtime
+retries disabled and no second ask. F52 is implemented and verified locally;
+production acceptance remains pending.

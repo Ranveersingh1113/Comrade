@@ -12,6 +12,7 @@ import pytest
 from agent.runtime import run_turn
 from server.app import _persist_ai_reply, _persist_user_message, _resolve_thread
 from shared.config import settings
+from shared.db import user_session
 from tests._seed import A1, TEAM_A
 
 pytestmark = [
@@ -24,19 +25,24 @@ pytestmark = [
 CODENAME = "Falcon Ridge"
 
 
-def _turn(text: str, thread_type: str = "private") -> str:
-    scope = _resolve_thread(A1, TEAM_A, None, thread_type)
+def _turn(text: str) -> str:
+    with user_session(A1) as conn:
+        thread_id = conn.execute(
+            "select id from public.threads where team_id=%s and owner_id=%s",
+            (TEAM_A, A1),
+        ).fetchone()[0]
+    scope = _resolve_thread(A1, TEAM_A, thread_id)
     message_id = _persist_user_message(A1, TEAM_A, scope, text)
     result = asyncio.run(run_turn(
         TEAM_A, A1, text,
-        thread_id=scope.id, exclude_message_id=message_id,
+        thread_id=scope, exclude_message_id=message_id,
     ))
     if result["reply"]:
         _persist_ai_reply(TEAM_A, scope, result["reply"])
     return result["reply"]
 
 
-def test_the_second_turn_remembers_the_first(seeded):
+def test_the_second_turn_remembers_the_first(seeded, monkeypatch):
     """Turn 2 can only answer if turn 1 is in its context.
 
     Turn 1's REPLY is deliberately not asserted on. Measured across three
@@ -48,23 +54,12 @@ def test_the_second_turn_remembers_the_first(seeded):
     turn 2 as history. Asserting on turn 1's text made this test flaky for a
     reason that has nothing to do with memory.
     """
+    monkeypatch.setattr("agent.runtime.EMPTY_TURN_ATTEMPTS", 1)
     _turn(
         f"Just noting something down: we are calling this release {CODENAME}."
         " Nothing to do about it."
     )
-    # Two attempts, because this asserts on the output of a stochastic system.
-    # A single sample occasionally comes back as a clarifying question or a
-    # decline; measured at roughly one full-suite run in five. Retrying is not
-    # hiding the flake — a genuinely broken history feature fails BOTH attempts,
-    # since the fact exists nowhere else in the team's state or wiki. What the
-    # retry removes is a red suite caused by sampling noise, which is worse
-    # than useless: it trains people to ignore red.
-    attempts = []
-    for _ in range(2):
-        answer = _turn(
-            "What name did I just give the release? Reply with the name only."
-        )
-        attempts.append(answer)
-        if "falcon" in answer.lower():
-            return
-    raise AssertionError(f"neither attempt recalled the codename: {attempts!r}")
+    answer = _turn(
+        "What name did I just give the release? Reply with the name only."
+    )
+    assert CODENAME.lower() in answer.lower(), answer

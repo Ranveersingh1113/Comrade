@@ -32,3 +32,11 @@ def test_tools_registered():
         "member_send_nudge",
         "plan_update",
     }
+
+
+def test_agent_uses_an_explicit_thinking_budget():
+    # F52: Gemini dynamic thinking returned STOP with zero output on real
+    # judge prompts. Keep reasoning enabled with an explicit budget.
+    config = root_agent.generate_content_config
+    assert config is not None
+    assert config.thinking_config.thinking_budget == 1024

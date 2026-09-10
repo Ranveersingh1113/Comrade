@@ -213,51 +213,12 @@ def _permission_wait(step: dict[str, Any]) -> bool:
     )
 
 
-# How many times to re-ask when the model returns literally nothing.
-#
-# 🔴 ROOT CAUSE, measured 2026-09-01. The empty turn is not an ADK bug and not
-# ours: Gemini intermittently returns a candidate with an EMPTY parts list and
-# a perfectly normal finish_reason of STOP. Instrumented, one looks like this —
-#
-#     finish_reason  STOP          error_code  None      n_parts  0
-#     content        not None      prompt_token_count  3180
-#                                  total_token_count   3180   <- 0 output
-#
-# No safety block, no truncation, no error, no exception: it was handed 3180
-# tokens of prompt and generated none at all. Nothing downstream can
-# distinguish that from a model with nothing to say, which is why it reached
-# the member as silence.
-#
-# Retrying is safe HERE and would not be anywhere else, and that is the whole
-# argument for this fix: an empty turn is by definition a turn with no side
-# effects — no tool ran, no consent row was written, nothing was yielded to the
-# caller. The `if all_steps` guard is what keeps that true. A turn that called
-# a tool and THEN went quiet must never be retried; it would run the tool twice.
-#
-# 🔴 RE-MEASURED 2026-09-09 (fix.md F52), and the rate has moved a long way.
-# The paragraph above sized this at three because a 1-in-8 empty rate makes a
-# third failure ~1 in 500. It is not 1 in 8 any more. Asking the same ordinary
-# question through `stream_turn` 24 times, in two runs:
-#
-#     42 model calls, 19 of them empty          ~45% per call
-#     1 turn in 12 exhausted all three attempts  ~8% of turns answered nothing
-#
-# At 45%, three attempts is ~1 in 11, not 1 in 500 — which is the review's
-# observation exactly, and needs no explanation beyond arithmetic. Six gets it
-# back under 1%. An empty call generates no output tokens, so the cost of the
-# extra attempts is prompt tokens and latency, not answers.
-#
-# 🔴 This is a RECALIBRATION, not a root cause. Why the model returns an empty
-# candidate is still not established; two plausible causes were tested and are
-# not it:
-#
-#   * the experimental JSON_SCHEMA_FOR_FUNC_DECL declaration path — disabling
-#     it made every call empty, 36/36, so it is load-bearing, not the fault;
-#   * request pacing — 8 seconds between turns left the per-call rate at 43%,
-#     so this is not rate limiting.
-#
-# If a later reader finds this number climbing again, the rate is the thing to
-# measure, and raising the constant is not the answer twice.
+# Bounded recovery for a completely empty model turn. Retry only before any
+# steps: replaying a turn after a tool ran could duplicate side effects.
+# F52: the provider returned STOP with no parts under dynamic thinking. An
+# explicit thinking budget in agent.py addresses the measured failure; live
+# usefulness tests disable these retries so they cannot mask a regression.
+# This remains a transient-failure fallback, not a reliability guarantee.
 EMPTY_TURN_ATTEMPTS = 6
 
 

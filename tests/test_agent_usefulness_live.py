@@ -16,12 +16,11 @@ case-insensitively on substance rather than phrasing. Asserting on wording is
 what made two earlier versions of the journey assertion depend on the model's
 style; asserting on a seeded fact does not.
 
-EMPTY TURNS ARE NOT CONCEALED. `agent/runtime.py` already retries an empty turn
-three times inside a single turn; on top of that these tests will re-ASK, which
-is what a member does, and the number of asks each prompt needed is printed. A
-prompt that never answers fails. An error notice never counts as an answer.
+EMPTY TURNS ARE NOT CONCEALED. The fixture disables runtime empty-turn retries:
+each prompt must work on its first attempt, including the response after a tool.
+Production retains bounded retries for transient failures. These tests establish
+usefulness without relying on them.
 """
-import os
 import time
 
 import psycopg
@@ -35,21 +34,8 @@ pytestmark = [pytest.mark.live, pytest.mark.skipif(
     not settings.gemini_api_key, reason="no GEMINI_API_KEY configured"
 )]
 
-#: How many times a prompt may be re-asked before it counts as unanswered.
-#:
-#: ONE. A member asks a question once, and the release acceptance is that they
-#: get an answer — not that they get one if they ask twice.
-#:
-#: That is affordable because the retries that matter are INSIDE the turn.
-#: Measured 2026-09-09 against the configured model, 42 calls: ~45% came back
-#: with an empty candidate, so `agent.runtime.EMPTY_TURN_ATTEMPTS = 6` puts a
-#: whole turn's chance of silence under 1%. Six internal attempts, one human
-#: one.
-#:
-#: Overridable for diagnosis only. Raising it to get a green run would be
-#: measuring a different product than the one a member uses, and the asks each
-#: prompt needed are reported either way.
-MAX_ASKS = int(os.environ.get("COMRADE_USEFULNESS_MAX_ASKS", "1"))
+# One member ask, one model attempt. No environment override can weaken this gate.
+MAX_ASKS = 1
 
 #: Facts nothing but the team's real state can supply.
 TASK_TITLE = "Wire the telemetry exporter"
@@ -59,7 +45,7 @@ PAGE_ANSWER = "quokka"
 
 
 @pytest.fixture
-def furnished(seeded):
+def furnished(seeded, monkeypatch):
     """A designated team with a live task and a wiki page to be asked about.
 
     "Open" is the member's word, not the schema's: the statuses are proposed,
@@ -73,6 +59,8 @@ def furnished(seeded):
     question, which a fixture invented from the tool's docstring would have
     missed.
     """
+    # F52: retries must not turn an empty first attempt into a green acceptance.
+    monkeypatch.setattr("agent.runtime.EMPTY_TURN_ATTEMPTS", 1)
     with psycopg.connect(settings.comrade_db_url_admin, autocommit=True) as conn:
         thread_id = conn.execute(
             "select id from public.threads where team_id=%s and title='General'",

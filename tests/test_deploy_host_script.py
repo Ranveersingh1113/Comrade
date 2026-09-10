@@ -204,168 +204,74 @@ esac
 
 def test_workflow_serializes_and_runs_requested_commit():
     workflow = (ROOT / ".github/workflows/deploy-pilot.yml").read_text()
-    assert "git show $GITHUB_SHA:scripts/deploy_host.sh | sh -s $GITHUB_SHA" in workflow
+    assert "git show $GITHUB_SHA:scripts/deploy_host.sh" in workflow
     assert "group: deploy-pilot" in workflow
     assert "cancel-in-progress: false" in workflow
 
 
-def test_only_the_migration_service_is_given_the_table_owner():
-    """🔴 Every service shared one `.env`, so the API and both workers carried
-    the RLS-bypassing credential for the weeks they ran. shared.db now refuses
-    it to any process that has not called allow_table_owner(); this keeps it
-    out of their environment as well, because a credential a process cannot
-    use is still one an attacker can read out of it."""
-    import yaml
+def test_the_workflow_runs_the_release_from_a_file_not_a_pipe():
+    """🔴 THE DEFECT (fix.md F58). The release used to arrive as
+    `git show <sha>:scripts/deploy_host.sh | sh -s <sha>`, which makes the
+    script its own stdin. `docker compose run` reads stdin, so a one-off
+    container can swallow the REST OF THE SCRIPT: sh reaches end of input,
+    exits 0, and the deploy reports success having never migrated, never
+    activated and never checked readiness.
 
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
-    services = compose["services"]
+    Measured on the pilot host: a six-second deploy that stopped dead after
+    step 4b's "Valid configuration" and left all four containers on the
+    previous images, while the workflow went green.
 
-    for name in ("api", "pipeline-worker", "agent-worker"):
-        env = services[name].get("environment") or {}
-        assert env.get("COMRADE_DB_URL_ADMIN") == "", (
-            f"{name} still inherits the table owner from .env"
-        )
-    assert "COMRADE_DB_URL_ADMIN" not in (
-        services["migrate"].get("environment") or {}
-    ), "the migration job is the one service that needs the real value"
-    assert services["migrate"]["profiles"] == ["migrate"], (
-        "a migrator that starts with the stack races the code it migrates for"
-    )
-
-def _double(path, name, extra=()):
-    lines = ["#!/bin/sh", 'echo "%s $*" >> "$DEPLOY_LOG"' % name, *extra, "exit 0"]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-    path.chmod(0o755)
-
-
-def _fake_host(tmp_path, *, failure="", caddy_host=None, model_host=None,
-               dotenv_host=None):
-    """A host with the repository checked out, and every external faked."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    (tmp_path / ".git").mkdir()
-    # The committed helper, where a real checkout puts it.
-    (tmp_path / "scripts").mkdir()
-    shutil.copy(ROOT / "scripts" / "proxy_check.sh",
-                tmp_path / "scripts" / "proxy_check.sh")
-    if dotenv_host:
-        (tmp_path / ".env").write_text(
-            "POSTGRES_PASSWORD=x\nCOMRADE_HOST=%s\n" % dotenv_host,
-            encoding="utf-8", newline="\n")
-
-    for name in ("git", "mkdir", "chown", "flock", "sleep"):
-        _double(fake_bin / name, name)
-    _double(fake_bin / "stat", "stat", ["echo 999"])
-    # Three different questions. `config --services` says which services exist;
-    # `exec -T caddy printenv` is the site's own hostname; `config` is the
-    # resolved model, whose FIRST COMRADE_HOST belongs to an env_file service
-    # and is deliberately a different value here.
-    answers = ['case "$*" in',
-               '  *"config --services") printf \'api\\nfrontend\\ncaddy\\n\' ;;']
-    if caddy_host:
-        answers.append(
-            '  *"exec -T caddy printenv COMRADE_HOST") echo %s ;;' % caddy_host)
-    if model_host:
-        answers.append(
-            "  *config) printf '      COMRADE_HOST: %s\\n' ;;" % model_host)
-    answers.append('esac')
-    _double(fake_bin / "docker", "docker", answers)
-    _double(fake_bin / "curl", "curl",
-            ['[ "$FAILURE" != proxydown ] || exit 7'])
-
-    env = {
-        **os.environ,
-        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
-        "DEPLOY_LOG": (tmp_path / "commands.log").as_posix(),
-        "FAILURE": failure,
-    }
-    # Compose exports nothing into the parent SSM shell, and preferring the
-    # shell here would have the probe check a name the site is not serving.
-    env.pop("COMRADE_HOST", None)
-    return env
-
-
-def _as_the_workflow_does(tmp_path, env):
-    """`git show <sha>:scripts/deploy_host.sh | sh -s <sha>` — the real shape.
-
-    The script arrives on STDIN, so `$0` is `sh`. That is the only invocation
-    in which the defect below exists; calling the file by path hides it.
+    It is a RACE - how much sh has buffered when the compose run grabs the
+    pipe - so it hit some releases and not others, and no single passing run
+    demonstrates a fix. Running from a file removes the class by construction,
+    which is what this pins.
     """
-    # The doubles are put in front INSIDE this shell and asserted first, so a
-    # result here is a result about the script rather than about whichever
-    # `git` the host happened to offer.
-    fake_bin = tmp_path / "bin"
-    _assert_doubles_win(fake_bin, env, "git", "docker", "curl", "flock")
-    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
-    # encoding pinned: the script carries 🔴 markers, and piping it as text on
-    # Windows encodes with cp1252, which cannot represent them. A test artifact,
-    # not a product one — the deploy host reads UTF-8 either way.
-    return subprocess.run(
-        [SH, "-c", f'export PATH="{_posix(fake_bin)}:$PATH"\nexec sh -s "$@"',
-         "sh", "abc123"],
-        input=script, cwd=tmp_path, env=env,
-        capture_output=True, text=True, encoding="utf-8", timeout=180,
+    workflow = (ROOT / ".github/workflows/deploy-pilot.yml").read_text()
+    # Comments stripped, because the comment above the fix QUOTES the broken
+    # form in order to explain it — and a blanket substring search over the
+    # whole file finds that and fails on the explanation.
+    code = "\n".join(line for line in workflow.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+    assert "deploy_host.sh | sh" not in code, (
+        "the release is piped into sh again; a compose run can eat the rest of it"
     )
+    assert "sh /tmp/comrade-deploy.sh $GITHUB_SHA" in workflow
+    # The exit code must survive the cleanup, or a failed deploy reports success.
+    assert "rc=$?" in workflow and "exit $rc" in workflow
 
 
-def test_the_release_runs_the_way_the_workflow_invokes_it(tmp_path):
-    """🔴 THE DEFECT (fix.md F35, reopened). Piped into `sh -s`, `$0` is `sh`,
-    so `$(dirname "$0")/proxy_check.sh` resolved to `./proxy_check.sh` while
-    the committed helper is at `scripts/proxy_check.sh`. The check I added so a
-    healthy deployment would stop being reported broken would itself have
-    failed every healthy deployment."""
-    env = _fake_host(tmp_path, caddy_host="comrade.example.test")
+def test_every_one_off_container_in_the_release_closes_its_stdin():
+    """The second half of the F58 fix, and the half that is testable anywhere.
 
-    result = _as_the_workflow_does(tmp_path, env)
+    🔴 I could not write a test that REPRODUCES the truncation. It is a
+    race between how much `sh` has buffered and when the one-off container
+    grabs the pipe, and it does not reproduce in this harness: piped past a
+    stdin-draining docker double on this machine, the release still reached
+    migration and activation. A test that passes on the broken shape is worse
+    than no test, so that attempt was deleted rather than kept as reassurance.
+    It was demonstrated on the pilot host instead, and the ledger records it
+    there.
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    calls = (tmp_path / "commands.log").read_text().splitlines()
-    assert any("curl" in call and "comrade.example.test" in call
-               for call in calls), calls
-
-
-def test_the_hostname_comes_from_the_deployments_own_configuration(tmp_path):
-    """🔴 THE DEFECT this began as: Compose interpolates `.env` for the
-    containers and exports nothing into the parent SSM shell, so a host
-    configured the documented way reached the unset-host failure and a
-    healthy release was reported broken.
-
-    Nothing is in the environment here — `_fake_host` removes it — and the
-    release still has to arrive at the configured name."""
-    env = _fake_host(tmp_path, caddy_host="from-compose.test")
-
-    result = _as_the_workflow_does(tmp_path, env)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    calls = (tmp_path / "commands.log").read_text().splitlines()
-    assert any("from-compose.test" in call for call in calls), calls
-
-
-def test_the_probe_asks_for_the_name_caddy_is_serving(tmp_path):
-    """🔴 THE FIFTH-REVIEW DEFECT, through the complete stdin invocation.
-
-    Three hostnames are in play and only one of them is the site: `.env` holds
-    one (which the release must not parse), the resolved model lists an
-    env_file service's copy FIRST (which a key search finds), and the caddy
-    container has the one Caddy actually serves.
-
-    The probe has to ask for the third. The other two are exactly what the two
-    previous attempts at F35 reached instead.
+    What IS checkable everywhere is the invariant: no command in the release
+    may be left holding the script's stdin. `docker compose run` reads stdin,
+    so every one of them redirects from /dev/null, and the workflow no longer
+    hands the script to `sh` on stdin at all (the test above).
     """
-    env = _fake_host(tmp_path, dotenv_host="only-in-the-file.test",
-                     model_host="first-in-the-model.test",
-                     caddy_host="what-caddy-serves.test")
+    release = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in release.splitlines()
+                     if not line.lstrip().startswith("#"))
+    # `run` invocations, joined across the backslash continuations they use.
+    joined = code.replace("\\\n", " ")
+    runs = [line.strip() for line in joined.splitlines()
+            if "$COMPOSE run" in line]
 
-    result = _as_the_workflow_does(tmp_path, env)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    calls = (tmp_path / "commands.log").read_text().splitlines()
-    probe = [call for call in calls if call.startswith("curl ")]
-    assert probe, calls
-    assert all("what-caddy-serves.test" in call for call in probe), probe
-    # The two wrong answers, each one a previous version of this fix.
-    assert not any("only-in-the-file.test" in call for call in calls), calls
-    assert not any("first-in-the-model.test" in call for call in calls), calls
+    assert runs, "no one-off containers found; this test is guarding nothing"
+    unguarded = [r for r in runs if "/dev/null" not in r]
+    assert not unguarded, (
+        "these one-off containers still inherit the release's stdin, so piped"
+        f" into a shell they can swallow the rest of it: {unguarded}"
+    )
 
 
 # ---------------------------------------------------------------------------

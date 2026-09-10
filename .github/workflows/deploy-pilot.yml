@@ -29,6 +29,22 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::276833795981:role/ComradePilotGithubDeploy
           aws-region: eu-north-1
+      # 🔴 A FILE, NOT A PIPE (fix.md F58). This used to be
+      #   `git show $SHA:scripts/deploy_host.sh | sh -s $SHA`
+      # and the release is then its own stdin. `docker compose run` reads
+      # stdin, so it can swallow the REST OF THE SCRIPT: sh reaches end of
+      # input, exits 0, and the deploy reports success having never migrated,
+      # never activated and never checked readiness.
+      #
+      # Measured on the pilot host: a deploy that finished in six seconds,
+      # stopping dead after step 4b's "Valid configuration", left all four
+      # containers on the previous images while the workflow went green.
+      #
+      # It is a RACE - how much of the script sh has already read when the
+      # compose run grabs the pipe - so it struck some releases and not
+      # others, and no single passing run demonstrates a fix. Running from a
+      # file removes the class by construction: there is no shared stdin left
+      # for anything to drain.
       - name: Deploy exact commit through SSM
         env:
           INSTANCE_ID: i-0e5e97d751ffbd262
@@ -37,7 +53,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "Deploy Comrade $GITHUB_SHA" \
-            --parameters "commands=[\"cd /opt/comrade && git fetch --depth=1 origin $GITHUB_SHA && git show $GITHUB_SHA:scripts/deploy_host.sh | sh -s $GITHUB_SHA\"]" \
+            --parameters "commands=[\"cd /opt/comrade && git fetch --depth=1 origin $GITHUB_SHA && git show $GITHUB_SHA:scripts/deploy_host.sh > /tmp/comrade-deploy.sh && sh /tmp/comrade-deploy.sh $GITHUB_SHA; rc=$?; rm -f /tmp/comrade-deploy.sh; exit $rc\"]" \
             --query 'Command.CommandId' --output text)
           # SSM's built-in waiter gives a Docker build only ~100 seconds.
           # The host build routinely exceeds that, so wait for its real terminal state.

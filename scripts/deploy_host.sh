@@ -146,8 +146,12 @@ docker build -f docker/sandbox.Dockerfile -t comrade-sandbox:latest .
 # Validation happens HERE, before activation, so an incomplete or unsupported
 # proxy configuration fails while the healthy stack is still serving.
 if $COMPOSE config --services | grep -qx caddy; then
-  $COMPOSE run --rm --no-deps --entrypoint caddy caddy \
-    validate --config /etc/caddy/Caddyfile --adapter caddyfile
+  # -T and </dev/null: belt and braces for F58. The workflow no longer pipes
+  # this file into `sh`, which is the real fix, but anyone who does — by hand,
+  # or from some future runner — must not have a one-off container eat the
+  # rest of the release.
+  $COMPOSE run --rm --no-deps -T --entrypoint caddy caddy \
+    validate --config /etc/caddy/Caddyfile --adapter caddyfile </dev/null
 fi
 
 # ---------------------------------------------------------------------------
@@ -162,7 +166,7 @@ fi
 # Migrating through `exec` would need the new stack already running, which is
 # the ordering this file exists to prevent. Expand/contract means this is safe against the OLD code still
 # serving traffic while it runs.
-$COMPOSE run --rm --no-deps -T migrate
+$COMPOSE run --rm --no-deps -T migrate </dev/null
 
 # ---------------------------------------------------------------------------
 # 6. Activate. The first irreversible step.

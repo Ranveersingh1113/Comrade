@@ -90,6 +90,29 @@ for svc in db realtime rest auth storage; do
   fi
 done
 
+# 🔴 THE DATABASE ALONE (fix.md F57). The backend suite seeds and cleans a
+# fixed set of teams per test, so ANY other process on the same database is a
+# competing writer. A long-running API is the one an operator is most likely to
+# have up — and this file's own browser lane used to tell them to start it,
+# which is how the trap gets set.
+#
+# Measured, same commit, two runs an hour apart:
+#   API down   1722 passed
+#   API up     1721 passed, 1 failed — test_agent_history, the seeded thread
+#              came back missing a message it had just written
+# and that test passes 3/3 on its own with the API up, so it is contention
+# rather than the API's mere existence.
+#
+# Refused rather than warned: a flake that appears in one lane and points at
+# another costs far more than being told to stop a server.
+if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+  echo "an API is already answering on :8000." >&2
+  echo "the backend suite needs the database to itself — a second writer makes" >&2
+  echo "it fail intermittently somewhere unrelated. Stop it and rerun; the" >&2
+  echo "browser lane below starts its own and stops it again." >&2
+  exit 1
+fi
+
 step "backend (pytest)"
 uv run pytest -q
 
@@ -112,6 +135,8 @@ step "frontend unit + component"
 step "frontend integration"
 (cd frontend && npm run test:integration)
 
+api_log="${TMPDIR:-/tmp}/comrade-gates-api.$$.log"
+
 if [ "$QUICK" -eq 0 ]; then
   # 🔴 The browser journeys drive the real API, and one of them failed because
   # the API's connection pool still held handles to a database that a previous
@@ -122,21 +147,50 @@ if [ "$QUICK" -eq 0 ]; then
   # /health now reports the database, so asking it is worth something. A long-
   # running API must be restarted after a reset, and this is what says so
   # instead of letting a journey fail on a dependency the test never mentions.
-  api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
+  # 🔴 STARTED HERE, not by the operator (fix.md F57). Telling them to start it
+  # themselves is what put a second writer on the database during the backend
+  # lane above. It is started after that lane and stopped again, so one
+  # invocation of this file can satisfy both requirements — which it could not
+  # before: an API up meant a flaky backend, an API down meant this lane exited
+  # 1 without running.
+  gates_api_pid=""
+  stop_gates_api() {
+    [ -n "$gates_api_pid" ] || return 0
+    kill "$gates_api_pid" 2>/dev/null
+    wait "$gates_api_pid" 2>/dev/null
+    gates_api_pid=""
+  }
+  trap stop_gates_api EXIT INT TERM
+
+  uv run uvicorn server.app:app --port 8000 >"$api_log" 2>&1 &
+  gates_api_pid=$!
+
+  api_health=""
+  waited=0
+  while [ "$waited" -lt 60 ]; do
+    api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
+    case "$api_health" in *'"database":"ok"'*) break ;; esac
+    # A dead process will never become healthy; say so now rather than in 60s.
+    kill -0 "$gates_api_pid" 2>/dev/null || break
+    sleep 1
+    waited=$((waited + 1))
+  done
+
   case "$api_health" in
     *'"database":"ok"'*) ;;
-    '')
-      echo "the API on :8000 is not answering; the browser journeys need it." >&2
-      echo "  uv run uvicorn server.app:app --port 8000" >&2
-      exit 1 ;;
     *)
-      echo "the API is up but cannot reach the database: $api_health" >&2
-      echo "restart it — a pool opened before a db reset holds dead handles." >&2
+      echo "the API this lane started never became healthy: ${api_health:-no answer}" >&2
+      echo "--- its output ---" >&2
+      tail -20 "$api_log" >&2
       exit 1 ;;
   esac
 
   step "browser journeys (playwright)"
   (cd frontend && npm run test:e2e)
+
+  # Stopped before the lanes below, so nothing after this runs against a second
+  # writer either.
+  stop_gates_api
 
   # The lane that does not fake its dependencies. Everything above runs against
   # a local bare repository through the `_url_for` and `_create_pr` seams —

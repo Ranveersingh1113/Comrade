@@ -8,8 +8,8 @@
 # connection straight to whatever the host has bound there — without asking
 # Squid, so the registry allowlist never sees it.
 #
-# The escape probes in scripts/repo_execution_check.sh did not catch this. They
-# run in the RUN phase, which uses `--network none`, and they aim at
+# The escape probes in scripts/repo_execution_check.sh could not have caught it.
+# They run in the RUN phase, which uses `--network none`, and they aim at
 # 172.17.0.1 — the DEFAULT bridge, not the per-run one. Refusals there say
 # nothing about the setup phase's own network.
 #
@@ -40,15 +40,16 @@ cleanup() {
       echo "  *** could not remove $net"; FAILED=1
     fi
   done
+  rm -f /tmp/comrade-f54-*.py
 }
 trap cleanup EXIT
 
-# The listener. Bound to the per-run bridge's own gateway address, so it stands
-# in for anything the host has on that interface without touching a real service.
-start_listener() {  # address
-  python3 - "$1" "$PORT" >/dev/null 2>&1 &
-  LISTENER=$!
-} <<'PY'
+# 🔴 FILES, not a heredoc on a function definition. That form is re-read on
+# every call and does not survive backgrounding, so the first version handed
+# python3 no program at all and its own positive control reported
+# ConnectionRefusedError against a listener that had never bound. The control
+# caught it, which is what a control is for.
+cat > /tmp/comrade-f54-listener.py <<'PY'
 import socket, sys, time
 address, port = sys.argv[1], int(sys.argv[2])
 server = socket.socket()
@@ -66,16 +67,29 @@ while time.time() < deadline:
         pass
 PY
 
-probe() {  # network, address -> prints REACHED or BLOCKED
-  docker run --rm --network "$1" --read-only --cap-drop ALL \
-    --security-opt no-new-privileges --entrypoint python "$IMAGE" \
-    -c "$(printf 'import socket\ntry:\n    s = socket.create_connection((%s, %s), timeout=6)\n    print("REACHED", s.recv(32))\nexcept Exception as exc:\n    print("BLOCKED", type(exc).__name__)\n' "'$2'" "$PORT")" 2>&1 | tail -1
-}
+cat > /tmp/comrade-f54-connect.py <<'PY'
+import socket, sys
+try:
+    s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=6)
+    print(sys.argv[3], s.recv(32))
+    s.close()
+except Exception as exc:
+    print("BLOCKED", type(exc).__name__)
+PY
 
-make_net() {  # name, extra opts
-  shift_opts="$2"
-  # shellcheck disable=SC2086
-  docker network create --internal $shift_opts "$1" >/dev/null 2>&1
+cat > /tmp/comrade-f54-hop.py <<'PY'
+import urllib.request
+try:
+    print("OK", urllib.request.urlopen("https://pypi.org/simple/", timeout=25).status)
+except Exception as exc:
+    print("FAILED", type(exc).__name__)
+PY
+
+probe() {  # network, address -> REACHED / BLOCKED
+  docker run --rm --network "$1" --read-only --cap-drop ALL \
+    --security-opt no-new-privileges \
+    -v /tmp/comrade-f54-connect.py:/probe.py:ro \
+    --entrypoint python "$IMAGE" /probe.py "$2" "$PORT" REACHED 2>&1 | tail -1
 }
 
 echo "docker: $(docker version --format 'server {{.Server.Version}}')"
@@ -85,7 +99,7 @@ echo
 # The topology run_setup builds today.
 # ---------------------------------------------------------------------------
 CUR="${NET}-current"
-make_net "$CUR" ""
+docker network create --internal "$CUR" >/dev/null
 GW=$(docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "$CUR" 2>/dev/null)
 echo "=== the network run_setup creates today ==="
 echo "    .Internal=$(docker network inspect -f '{{.Internal}}' "$CUR")   gateway=${GW:-<none>}"
@@ -93,17 +107,12 @@ echo "    .Internal=$(docker network inspect -f '{{.Internal}}' "$CUR")   gatewa
 if [ -z "$GW" ]; then
   say "a gateway address exists at all" "SKIP" "no gateway; nothing to reach"
 else
-  start_listener "$GW"
+  python3 /tmp/comrade-f54-listener.py "$GW" "$PORT" >/dev/null 2>&1 &
+  LISTENER=$!
   sleep 2
-  # POSITIVE CONTROL: the listener must be reachable from the host itself, or a
-  # 'blocked' below would only mean the listener never started.
-  control=$(python3 -c "
-import socket
-try:
-    s = socket.create_connection(('$GW', $PORT), timeout=5); print('UP', s.recv(16)); s.close()
-except Exception as exc:
-    print('DOWN', type(exc).__name__)
-" 2>&1 | tail -1)
+  # POSITIVE CONTROL. Without it, "blocked" below could just mean the listener
+  # never started — which is exactly what happened the first time.
+  control=$(python3 /tmp/comrade-f54-connect.py "$GW" "$PORT" UP 2>&1 | tail -1)
   case "$control" in
     UP*) say "positive control: the host listener is up" "PASS" "$control" ;;
     *)   say "positive control: the host listener is up" "***FAIL" "$control"
@@ -112,7 +121,7 @@ except Exception as exc:
 
   current=$(probe "$CUR" "$GW")
   case "$current" in
-    REACHED*) say "today: setup container reaches the host" "SHOWN" "$current  <- the defect" ;;
+    REACHED*) say "today: setup container reaches the host" "SHOWN" "$current" ;;
     *)        say "today: setup container reaches the host" "not seen" "$current" ;;
   esac
 fi
@@ -123,7 +132,8 @@ fi
 echo
 echo "=== with the gateway removed (isolated gateway mode) ==="
 FIX="${NET}-isolated"
-if ! make_net "$FIX" "-o com.docker.network.bridge.gateway_mode_ipv4=isolated"; then
+if ! docker network create --internal \
+       -o com.docker.network.bridge.gateway_mode_ipv4=isolated "$FIX" >/dev/null 2>&1; then
   say "isolated gateway mode is supported" "***FAIL" "daemon refused the option"
   FAILED=1
 else
@@ -141,13 +151,8 @@ else
   if docker network connect "$FIX" "$PROXY" >/dev/null 2>&1; then
     hop=$(docker run --rm --network "$FIX" \
       -e http_proxy="http://$PROXY:3128" -e https_proxy="http://$PROXY:3128" \
-      --entrypoint python "$IMAGE" -c "
-import urllib.request
-try:
-    print('OK', urllib.request.urlopen('https://pypi.org/simple/', timeout=25).status)
-except Exception as exc:
-    print('FAILED', type(exc).__name__)
-" 2>&1 | tail -1)
+      -v /tmp/comrade-f54-hop.py:/hop.py:ro \
+      --entrypoint python "$IMAGE" /hop.py 2>&1 | tail -1)
     case "$hop" in
       OK*) say "isolated: the registry proxy still works" "PASS" "$hop" ;;
       *)   say "isolated: the registry proxy still works" "***FAIL" "$hop"; FAILED=1 ;;

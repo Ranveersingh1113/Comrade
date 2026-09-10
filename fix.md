@@ -2394,3 +2394,197 @@ scripts/gates.sh   GATE EXIT: 0
     frontend 229 / 34 files; integration 21 / 6; browser journeys 8
     real GitHub 2 skipped - no credential configured
 ```
+
+
+### F56 — the release migrates through an image it never builds
+
+Found by running the post-deploy acceptance the way its own docstring says to,
+and getting `No module named scripts.post_deploy_check` out of a container that
+had been built two deploys earlier.
+
+`migrate` is gated behind a Compose profile, and `docker compose build` builds
+only the default profile. So `deploy_host.sh` step 4 never touched it:
+
+```
+compose config --services            api agent-worker pipeline-worker
+                                     frontend caddy registry-proxy
+  --profile migrate config --services ...and migrate
+
+comrade-api        built 2026-09-10 11:15   (e2aae4e)
+comrade-migrate    built 2026-09-09 21:27   (30df774, two deploys behind)
+  missing from it: post_deploy_check.py, setup_isolation_check.sh
+```
+
+🔴 **The check script is not the consequence that matters.** Step 5 applies
+migrations with `$COMPOSE run --rm --no-deps -T migrate`. A release that adds a
+migration runs the OLD migrator, which does not contain the new file, and
+reports success having applied nothing — new code against an unmigrated schema,
+with the deploy green. The migration counts happened to match here (106 = 106)
+only because the last two releases were Python-only. That is luck, not a
+control.
+
+Fixed with `--profile "*"` rather than the name, so a service gated behind some
+later profile is built on the day it is added. Verified on the host: the build
+then reports `migrate Built` and the image carries the whole `scripts/`.
+
+🔴 **My first version of the real-compose test passed against the live defect.**
+`compose config` without a profile omits gated services from the model
+entirely, so it compared the same six services to themselves. It enumerates
+from `--profile "*" config` now and asserts `migrate` is in that set.
+
+### Post-deploy acceptance, on the deployed stack
+
+The designated test team, created and removed by the run itself — the first
+time this has been executed against production rather than reasoned about:
+
+```
+POST-DEPLOY OK   exit 0   116s
+
+agent answers: task lookup    PASS  28.7s  'There is one open task: "Verify the
+                                            telemetry exporter", ass...'
+agent answers: wiki question  PASS  25.3s  'The team decided the deployment
+                                            mascot is a quokka.'
+agent answers: team context   PASS  25.0s  'The team has one member: Checker.'
+document ingestion: parsed by the running worker   PASS  status=ready
+document ingestion: the text came through          PASS  'pomegranate...'
+teardown: every fixture row is gone                PASS  left: none
+
+real teams before / after: MealShare, MLOps  (untouched)
+fixture team rows 0, fixture auth users 0
+```
+
+Three prompts, three useful answers, **one ask each**, no error notices. The
+wiki question is the one I flagged at roughly 80% — it answered from the wiki
+here rather than from chat history.
+
+🔴 **Latency is 25-29s on the host against 3.5-5.2s locally, and I have not
+established why.** Each question here pays a cold start: the check runs the
+agent in-process in a fresh one-off container, and the ADK client is
+constructed twice per answer. That is a plausible explanation and it is not a
+measurement, so it stays open rather than being written off.
+
+🔴 **Skipped lane: the agent WORKER path.** These three answers were produced
+in-process and created no `agent_runs` rows, so the queue, the lease, and the
+empty-turn retry did not run. Worth stating precisely rather than implying
+coverage: the last time that lane ran was the `cabc70b` browser session (four
+runs, every request answered, no empty turns), and `git diff cabc70b..HEAD`
+touches only `agent/sandbox.py` — `agent/agent.py`, `agent/runtime.py`,
+`server/`, `shared/` and `pipeline/` are unchanged. The answer path deployed
+now is the one that was exercised there.
+
+🔴 **The empty-turn rate on this build is unmeasured, not zero.** Grepping the
+worker for retry lines returned 0 — out of 0 turns, because the worker restarted
+at 11:16 and nothing has queued a run since. `agent_runs` holds four rows all
+time and none in the last 24 hours.
+
+### No judge traffic during any of this
+
+`select status, count(*) from agent_runs where created_at > now() - interval
+'24 hours'` returns nothing at all, so the container recreation these releases
+performed interrupted no one.
+
+### F57 — the gate could not be run correctly in one invocation
+
+Found by running it. The browser lane needs an API on :8000 and told the
+operator to start one; the backend lane needs the database to itself. Doing
+what the message said produced a failure in a lane that had nothing to do with
+it.
+
+Same commit, two runs an hour apart:
+
+```
+API down   1722 passed, 8 skipped        browser lane EXITED 1 without running
+                                         "the API on :8000 is not answering"
+API up     1721 passed, 1 FAILED         browser lane never reached
+           test_agent_history::test_stream_turn_seeds_the_session_with_the_thread_history
+           AssertionError: at index 0 'A1 private note' != 'earlier question'
+           - the thread came back missing a message the test had just written
+
+that same test, alone, with the API still up:   3/3 passed
+```
+
+So it is contention, not the API's existence. `seeded` is function-scoped and
+cleans up either side, the suite has no random ordering and no xdist, and the
+insert timestamps cannot reorder — the row was simply not there when the
+session was seeded.
+
+🔴 **The failing assertion is not root-caused and I am not claiming it is.**
+What is established is the trigger (a second writer) and that it is unrelated
+to F56: the diff touches `scripts/deploy_host.sh` and its test only, and the
+run with no competing writer passed all 1722. The underlying question — why a
+concurrent writer makes history seeding drop a committed row — stays open.
+
+Fixed in the harness so the trap cannot be set again:
+
+- the backend lane REFUSES to start while anything answers on :8000, naming the
+  reason, instead of flaking thirteen minutes later somewhere unrelated;
+- the browser lane starts its own API afterwards and stops it on the way out,
+  so one invocation satisfies both.
+
+Verified: with an API up the gate now exits 1 in under a second with that
+message.
+
+I got the second half wrong first. I made the browser lane start its own API,
+which broke it two ways: `wait` on a killed process returns non-zero and `set
+-e` took that as the gate failing, so a run in which every lane passed — 1722
+backend, 229 frontend, 21 integration, and the 8 browser journeys that had
+never run before — still exited 1 after the last of them. And it was redundant:
+`frontend/playwright.config.ts` already starts the API, the agent worker and
+the dev server as its own `webServer` entries. The lane was self-sufficient the
+whole time; the precondition check only ever talked the operator into putting a
+second writer on the database for the lane above. Removed, net 40 lines shorter
+than the version I first committed.
+
+`reuseExistingServer: true` is why the old check existed at all — a pool opened
+before a `--with-reset` holds handles to a dropped database, and Playwright
+would adopt it. The backend guard covers that better: nothing can be answering
+on :8000 by the time this lane runs, so Playwright always starts a fresh one.
+
+### The gate took five runs, and each failure was a different real thing
+
+Recorded in full rather than as the green one at the end.
+
+```
+run 1  backend 1722 pass    browser lane refused: no API on :8000
+                            (I had stopped it earlier in the session)
+run 2  backend 1721 / 1 F   the API left up during the backend lane -> F57
+run 3  ALL LANES PASS       exit 1 anyway, from the teardown I had just added
+       1722 / 229 / 21 / browser 8 passed (36.8s)
+run 4  backend 1721 / 1 F   google 503 UNAVAILABLE in an unmarked test
+run 5  ALL GREEN         GATE EXIT: 0, "all gates passed"
+```
+
+🔴 **`tests/test_remember_this.py::test_the_compilation_records_that_a_human_asked`
+calls the live model and carries no marker.** `pyproject.toml` deselects
+`live`, `realgithub` and `scenario`, and this test has none of them, so the
+default backend lane depends on Google being up: a 503 there fails the whole
+canonical gate. It passed on re-run in 12.19s. Left as a finding rather than
+fixed — marking it `live` removes real coverage from the default lane and
+stubbing the call is a test-strategy decision, neither of which belongs in a
+deployment change.
+
+Run 3 is the one worth keeping for what it proved, since it was the first time
+every lane ran together on this commit: the browser journeys pass 8/8,
+including the consent journey and a real agent turn against `gemini-2.5-flash`
+— two 200s, no empty turns — driven through an agent worker that Playwright
+started itself.
+
+### Gate
+
+```
+[1m=== frontend lint ===[0m
+[1m=== frontend unit + component ===[0m
+ Test Files  34 passed (34)
+      Tests  229 passed (229)
+[1m=== frontend integration ===[0m
+[realtime] first trial failed (no realtime event within 15000ms — is the table published, the realtime container up, and its replication stream settled?); retrying once in case the replication stream was restarting.
+ Test Files  6 passed (6)
+      Tests  21 passed (21)
+[1m=== browser journeys (playwright) ===[0m
+  8 passed (44.8s)
+[1m=== real GitHub end to end ===[0m
+============================== warnings summary ===============================
+2 skipped, 1749 deselected, 5 warnings in 9.41s
+[1;32mall gates passed[0m
+```
+

@@ -724,3 +724,97 @@ def test_a_stale_socket_group_in_the_env_is_replaced(tmp_path):
     written = (tmp_path / ".env").read_text()
     assert "COMRADE_DOCKER_GID=4242" in written, written
     assert "COMRADE_DOCKER_GID=999" not in written, written
+
+
+# ---------------------------------------------------------------------------
+# F56 — the release migrates through an image it never builds
+# ---------------------------------------------------------------------------
+
+
+def _build_flags() -> list[str]:
+    """The flags the release passes to its own `compose build`.
+
+    Quotes removed the way the shell removes them: the script writes
+    `--profile "*"` so the glob never reaches pathname expansion, and a test
+    that forwarded the quote characters would be asking Compose for a profile
+    literally named `"*"`.
+    """
+    script = (ROOT / "scripts" / "deploy_host.sh").read_text(encoding="utf-8")
+    line = next(l.strip() for l in script.splitlines()
+                if l.strip().startswith("$COMPOSE") and l.strip().endswith(" build"))
+    return [word.strip("\"'") for word in line.split()[1:-1]]
+
+
+def test_the_release_builds_the_services_it_is_going_to_run():
+    """🔴 THE DEFECT (fix.md F56, found on the pilot host). `migrate` is
+    profile-gated, and a bare `compose build` builds only the services in the
+    DEFAULT profile — so the release never rebuilt it. Measured: `comrade-api`
+    built 2026-09-10 11:15 for e2aae4e while `comrade-migrate` still said
+    2026-09-09 21:27, two deploys behind.
+
+    That image is not incidental. `deploy_host.sh` applies migrations with
+    `$COMPOSE run --rm --no-deps -T migrate`, so a release adding a migration
+    would run the OLD migrator, which does not contain the new file, and report
+    success having applied nothing — new code against an unmigrated schema.
+
+    Derived from the Compose file rather than naming `migrate`, so a second
+    profile-gated service added later is covered by this test on the day it
+    appears.
+    """
+    import yaml
+
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    gated = {name for name, spec in compose["services"].items()
+             if spec.get("profiles") and spec.get("build")}
+    assert gated, "no profile-gated buildable service; this test has nothing to guard"
+
+    flags = _build_flags()
+
+    assert "--profile" in flags, (
+        f"the release builds with {flags or 'no flags'}, so the default profile"
+        f" is all it builds — {sorted(gated)} keeps whatever image the host"
+        " already had, including the one that applies migrations"
+    )
+    enabled = {flags[i + 1] for i, f in enumerate(flags) if f == "--profile"}
+    assert "*" in enabled or gated <= enabled, (
+        f"the release enables {sorted(enabled)} but has to build {sorted(gated)}"
+    )
+
+
+@needs_compose
+def test_no_buildable_service_is_skipped_by_the_release_build(tmp_path):
+    """The same invariant, asked of Compose itself rather than of an argv.
+
+    `--profile` semantics are Compose's, not ours, and this runs the release's
+    own flags through the committed files: every service with a build context
+    has to appear in the service list that build sees.
+    """
+    project = _project(tmp_path, "COMRADE_HOST=comrade.example.test")
+    # 🔴 EVERY profile, to enumerate. The first version of this test asked
+    # `config` with no profile — which OMITS the gated services from the model
+    # entirely — so `buildable` was the six default services, `visible` was the
+    # same six, and it passed against the live defect. A test that cannot see
+    # the thing it guards is not one.
+    everything = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml",
+         "-f", "docker-compose.prod.yml", "--profile", "*", "config"],
+        cwd=project, capture_output=True, text=True, encoding="utf-8", timeout=180,
+    )
+    assert everything.returncode == 0, everything.stderr[-400:]
+    import yaml
+
+    model = yaml.safe_load(everything.stdout)
+    buildable = {name for name, spec in model["services"].items() if spec.get("build")}
+    assert "migrate" in buildable, sorted(buildable)
+
+    listed = subprocess.run(
+        ["docker", "compose", "-f", "docker-compose.yml",
+         "-f", "docker-compose.prod.yml", *_build_flags(), "config", "--services"],
+        cwd=project, capture_output=True, text=True, encoding="utf-8", timeout=180,
+    )
+    assert listed.returncode == 0, listed.stderr[-400:]
+    visible = set(listed.stdout.split())
+
+    assert buildable <= visible, (
+        f"{sorted(buildable - visible)} would never be rebuilt by the release"
+    )

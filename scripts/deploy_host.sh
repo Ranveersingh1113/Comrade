@@ -102,7 +102,19 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Build the candidate. Nothing is activated yet.
 # ---------------------------------------------------------------------------
-$COMPOSE build
+#
+# 🔴 --profile "*" (fix.md F56). A bare `compose build` builds the DEFAULT
+# profile, and `migrate` is gated behind one — so the release never rebuilt it.
+# Measured on the pilot host: comrade-api built 2026-09-10 11:15 for e2aae4e
+# while comrade-migrate still said 2026-09-09 21:27, two deploys behind.
+#
+# That image is the one step 5 applies migrations with. A release adding a
+# migration would run the OLD migrator, which does not contain the new file,
+# and report success having applied nothing — new code on an unmigrated schema.
+#
+# The wildcard rather than the name, so a service gated behind some later
+# profile is built on the day it is added instead of drifting silently.
+$COMPOSE --profile "*" build
 
 # 🔴 (fix.md, hackathon preflight.) The sandbox image is NOT a Compose service,
 # so `$COMPOSE build` never touched it and the host kept whatever

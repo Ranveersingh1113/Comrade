@@ -1,9 +1,10 @@
 """Four people build a snake game, and Comrade is in the room.
 
 Plain chat is inserted as each member under their own RLS. Anything addressed
-to Comrade goes through POST /agent/turn with that member's token, which is
-exactly what the browser does — so the agent sees the same history, the same
-tools and the same permissions it would in the product.
+to Comrade is admitted and then FOLLOWED through the durable run stream with
+that member's token, which is exactly what the browser does — so the agent sees
+the same history, the same tools and the same permissions it would in the
+product, and this sees the same answer the member would.
 
 The chat is written to contain DECISIONS, because the wiki compiler's whole job
 is to notice them. Whether it does is part of what this measures.
@@ -11,6 +12,7 @@ is to notice them. Whether it does is part of what this measures.
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -62,52 +64,356 @@ REPO = "Ranveersingh1113/test"
 TRANSCRIPT: list[dict] = []
 
 
+#: Resolved once per run, per person. 🔴 (fix.md F64) `thread_type` is the
+#: PRE-THREAD-ROWS contract and no longer exists anywhere: `TurnRequest`
+#: requires a `thread_id`, and `messages.thread_type` was dropped when
+#: `messages.thread_id` became not-null. This scenario was speaking to an API
+#: and a schema that had both moved on, so its first chat line raised and its
+#: first ask would have been rejected 422.
+_THREADS: dict[str, str] = {}
+
+
+def _thread_for(person: dict, thread: str = "group") -> str:
+    """The real thread row this line belongs in.
+
+    "group" is the team's General thread, which a trigger creates with the team
+    (`uq_threads_general` — one per team, so it is SELECTED, never inserted).
+    "private" is a restricted thread owned by the asker, created the way the
+    product's own policy allows: `au_threads_insert` accepts a thread whose
+    `created_by` is the member, and `au_thread_participants_insert` accepts the
+    creator adding themselves. Resolved under that member's own session, so a
+    thread they could not legitimately reach is not one this can use.
+    """
+    key = "group" if thread == "group" else f"private:{person['id']}"
+    if key in _THREADS:
+        return _THREADS[key]
+    with user_session(person["id"]) as conn:
+        if thread == "group":
+            row = conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and visibility='team' and kind='discussion' and title='General'",
+                (TEAM,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "the team has no General thread; run sim/setup.py first"
+                )
+            resolved = str(row[0])
+        else:
+            title = f"Private — {person['name']}"
+            row = conn.execute(
+                "select id from public.threads where team_id=%s"
+                " and visibility='restricted' and created_by=%s and title=%s",
+                (TEAM, person["id"], title),
+            ).fetchone()
+            if row is None:
+                # 🔴 THE ID IS GENERATED HERE, and there is no `returning id`.
+                # Found by running this against the real database rather than
+                # a double: `au_threads_select` is `can_access_thread`, which
+                # for a restricted thread means a `thread_participants` row —
+                # and the creator has none yet at the moment of the INSERT. So
+                # `returning id` fails the SELECT policy on the row it just
+                # wrote ("new row violates row-level security policy"), and
+                # there is no way to look the id up afterwards either.
+                #
+                # Supplying the id breaks the deadlock without weakening
+                # anything: the participant row is what `is_thread_creator`
+                # authorises, and that function is security definer, so the
+                # creator can add themselves to a thread they cannot yet read.
+                resolved = str(uuid.uuid4())
+                conn.execute(
+                    "insert into public.threads"
+                    " (id, team_id, title, visibility, kind, created_by)"
+                    " values (%s,%s,%s,'restricted','discussion',%s)",
+                    (resolved, TEAM, title, person["id"]),
+                )
+                conn.execute(
+                    "insert into public.thread_participants"
+                    " (thread_id, team_id, user_id, added_by)"
+                    " values (%s,%s,%s,%s) on conflict do nothing",
+                    (resolved, TEAM, person["id"], person["id"]),
+                )
+            else:
+                resolved = str(row[0])
+    _THREADS[key] = resolved
+    return resolved
+
+
 def say(tag: str, text: str) -> None:
     """Plain chat, inserted as that member."""
     person = WHO[tag]
+    thread_id = _thread_for(person, "group")
     with user_session(person["id"]) as conn:
         conn.execute(
-            "insert into public.messages (team_id, thread_type, sender_kind,"
-            " sender_id, body) values (%s,'group','user',%s,%s)",
-            (TEAM, person["id"], text),
+            "insert into public.messages (team_id, thread_id, sender_kind,"
+            " sender_id, body) values (%s,%s,'user',%s,%s)",
+            (TEAM, thread_id, person["id"], text),
         )
     print(f"  {person['name']:14} {text}")
     TRANSCRIPT.append({"kind": "chat", "who": person["name"], "text": text})
 
 
-def ask(tag: str, text: str, thread: str = "group") -> dict:
-    """Address Comrade, through the endpoint the browser uses."""
-    person = WHO[tag]
-    print(f"\n  {person['name']:14} → Comrade: {text}")
-    started = time.time()
-    resp = httpx.post(
-        f"{API}/agent/turn",
-        headers={"Authorization": f"Bearer {person['token']}",
-                 "Content-Type": "application/json"},
-        json={"team_id": TEAM, "text": text, "thread_type": thread},
-        timeout=240,
-    )
-    took = time.time() - started
-    if resp.status_code != 200:
-        print(f"  {'COMRADE':14} [{resp.status_code}] {resp.text[:160]}")
-        TRANSCRIPT.append({"kind": "error", "who": person["name"],
-                           "text": text, "detail": resp.text[:300]})
-        if CHECK_MODE:
-            raise RuntimeError(
-                f"agent turn failed for {person['name']}: "
-                f"{resp.status_code} {resp.text[:200]}"
+#: One turn's whole life, approvals included. These turns clone repositories,
+#: run tests and open pull requests, so this is generous on purpose — but it is
+#: a bound, because a scenario that hangs is a scenario nobody runs.
+TURN_TIMEOUT_SECONDS = 900
+#: How many permission waits one turn may pass through. "Create tasks for the
+#: three work items" parks once per task, so three is the real number and the
+#: fourth is the margin; beyond that it is a loop, not a conversation.
+MAX_APPROVALS_PER_TURN = 4
+#: The run is over and will produce nothing more (server/app.py).
+TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+WAITING_STATUSES = {"waiting_for_permission", "waiting_for_user"}
+
+
+def _headers(person: dict) -> dict:
+    return {"Authorization": f"Bearer {person['token']}",
+            "Content-Type": "application/json"}
+
+
+def _note_failure(person: dict, text: str, detail: str) -> dict:
+    """Record an HTTP-level failure the way score_team_scenario reads it."""
+    print(f"  {'COMRADE':14} {detail[:160]}")
+    TRANSCRIPT.append({"kind": "error", "who": person["name"],
+                       "text": text, "detail": detail[:300]})
+    if CHECK_MODE:
+        raise RuntimeError(f"agent turn failed for {person['name']}: {detail[:200]}")
+    return {}
+
+
+def _remaining(deadline: float) -> float:
+    """What is left of this turn's budget, on a monotonic clock."""
+    return deadline - time.monotonic()
+
+
+def _stream_segment(person: dict, state: dict, deadline: float,
+                    method: str, url: str, **kwargs) -> str | None:
+    """One stream of run frames, bounded by what is LEFT of the turn's budget.
+
+    Returns a description of an HTTP or transport failure, or None — a turn
+    that ran out of time is not a failure of this call, it is recorded on the
+    state and handled once, at the end of the turn.
+    """
+    remaining = _remaining(deadline)
+    if remaining <= 0:
+        state["timed_out"] = True
+        return None
+    try:
+        with httpx.stream(
+            method, url, headers=_headers(person),
+            timeout=httpx.Timeout(remaining, connect=min(30.0, remaining)),
+            **kwargs,
+        ) as response:
+            if response.status_code != 200:
+                response.read()
+                return f"[{response.status_code}] {response.text}"
+            _consume(response, state, deadline)
+    except httpx.TimeoutException:
+        # The OTHER shape: a stream that goes completely quiet. The in-loop
+        # check in _consume is for the noisy one, where heartbeats keep a read
+        # timeout from ever firing.
+        state["timed_out"] = True
+    except httpx.HTTPError as exc:
+        return f"stream failed: {exc}"
+    return None
+
+
+def _abort_turn(person: dict, text: str, state: dict, reason: str) -> dict:
+    """Give up on a turn — and do not leave its run executing.
+
+    🔴 CANCELLED, not abandoned, whatever the reason for giving up. When a turn
+    is abandoned its run is very often still EXECUTING, and a scenario that
+    walks away leaves a worker writing into the team that the next ask is about
+    to read. Stopping the gate's processes afterwards is not a substitute: the
+    run is durable, and lease recovery hands it to whichever worker comes next.
+    The scenario owns this run, and only the member who asked may stop it —
+    which is the token used here.
+
+    🔴 EVERY abort comes through here (fix.md F64, third pass). It used to be
+    reachable only from the timeout path, so an approval POST that raised
+    unwound straight out of `ask` — no cancellation, and no failure evidence
+    for the scorer either, because `http_errors` is written by `_note_failure`.
+
+    A cancellation that itself fails is kept in the reason rather than
+    swallowed: "we could not stop it" is the part an operator needs.
+    """
+    outcome = "no run to cancel"
+    if state["run_id"]:
+        try:
+            stopped = httpx.post(
+                f"{API}/agent/runs/{state['run_id']}/cancel",
+                headers=_headers(person), json={"team_id": TEAM}, timeout=30,
             )
-        return {}
-    body = resp.json()
-    reply = (body.get("reply") or "").strip()
+            outcome = f"cancel returned HTTP {stopped.status_code}"
+        except httpx.HTTPError as exc:
+            outcome = f"cancel failed: {exc}"
+    return _note_failure(person, text, f"{reason}; {outcome}")
+
+
+def _consume(response, state: dict, deadline: float) -> None:
+    """Fold one NDJSON stream of durable frames into the turn's state.
+
+    The frame protocol is the browser's: `run`/`status` carry the lifecycle,
+    step frames carry a `seq` and the text, and `done` closes a terminal run.
+    A `tool_result` whose response holds a `consent_id` is the step the runtime
+    parks on — the same thing the room renders as a consent card.
+
+    🔴 THE CLOCK IS CHECKED HERE (fix.md F64, second pass), before each frame
+    is folded in, and that placement is the whole fix. `httpx.Timeout(900)` is
+    an INACTIVITY timeout on reads, not a 900-second cap on a streamed
+    response — and `_run_frames` emits a heartbeat every 15 seconds of silence,
+    which resets it forever. A queued or stuck run could therefore hold this
+    open indefinitely while the deadline sat unconsulted between segments.
+    Checking after folding would be no better: a `done` arriving past the
+    budget would still be recorded as a completed answer, which is exactly what
+    the review reproduced (`done elapsed 0.062 limit 0.01`).
+    """
+    for line in response.iter_lines():
+        if _remaining(deadline) <= 0:
+            state["timed_out"] = True
+            return
+        line = line.strip()
+        if not line:
+            continue
+        frame = json.loads(line)
+        kind = frame.get("type")
+        if frame.get("seq") is not None:
+            state["last_seq"] = max(state["last_seq"], frame["seq"])
+        if kind in ("run", "status", "done"):
+            state["status"] = frame.get("status") or state["status"]
+            state["run_id"] = frame.get("run_id") or state["run_id"]
+            if frame.get("detail"):
+                state["detail"] = frame["detail"]
+        elif kind == "text":
+            state["reply_parts"].append(frame.get("text") or "")
+        elif kind == "error":
+            state["status"] = "failed"
+            state["detail"] = frame.get("detail") or state["detail"]
+        elif kind in ("empty", "busy"):
+            if frame.get("detail"):
+                state["detail"] = frame["detail"]
+        response_body = frame.get("response")
+        if isinstance(response_body, dict) and response_body.get("consent_id"):
+            state["consent_id"] = str(response_body["consent_id"])
+
+
+def ask(tag: str, text: str, thread: str = "group") -> dict:
+    """Address Comrade and FOLLOW THE RUN, the way the room does.
+
+    🔴 (fix.md F64) This used to POST /agent/turn and read `reply` and
+    `user_message_id` straight off the response. That endpoint only ADMITS a
+    turn — `TurnResponse` is `run_id` and `status`, and agent.worker executes
+    it afterwards — so every answer the scenario recorded was the empty string
+    and its evidence could not tell a finished turn from a queued one.
+
+    It waits properly now, and it APPROVES what the turn parks on: a scenario
+    that needs three tasks created and a pull request proposed cannot get them
+    by admitting a turn and walking away. That makes this the post-approval
+    continuation path as well as the answer path.
+    """
+    person = WHO[tag]
+    thread_id = _thread_for(person, thread)
+    print(f"\n  {person['name']:14} → Comrade: {text}")
+    started = time.monotonic()
+    deadline = started + TURN_TIMEOUT_SECONDS
+    state = {"run_id": None, "status": None, "detail": None,
+             "reply_parts": [], "last_seq": -1, "consent_id": None,
+             "timed_out": False}
+
+    problem = _stream_segment(
+        person, state, deadline, "POST", f"{API}/agent/turn/stream",
+        json={"team_id": TEAM, "text": text, "thread_id": thread_id},
+    )
+    if problem:
+        # Through the abort, not straight to the note: by the time a REATTACH
+        # fails the run id is known, and a stream that dies mid-admission may
+        # still have carried its opening `run` frame.
+        return _abort_turn(person, text, state, problem)
+
+    approvals = 0
+    while (not state["timed_out"]
+           and state["status"] == "waiting_for_permission"
+           and approvals < MAX_APPROVALS_PER_TURN):
+        consent_id = state["consent_id"]
+        if consent_id is None:
+            state["detail"] = "parked for permission with no consent card in the run"
+            break
+        # 🔴 The REMAINING budget, not a fresh one. Each resumed segment used
+        # to get the whole 900 seconds again, so a turn with four approvals
+        # could legitimately run for an hour under a limit that says fifteen
+        # minutes.
+        remaining = _remaining(deadline)
+        if remaining <= 0:
+            state["timed_out"] = True
+            break
+        try:
+            approved = httpx.post(
+                f"{API}/consent/{consent_id}/approve", headers=_headers(person),
+                json={"team_id": TEAM}, timeout=min(60.0, remaining),
+            )
+        except httpx.TimeoutException:
+            # 🔴 THE ANSWER IS LOST, NOT THE REQUEST. `approve_consent`
+            # requeues the run inside the same call, so a response that times
+            # out may well be one the server already acted on — the card
+            # approved and the turn running again. Retrying the POST would be
+            # blindly repeating a side effect; what this does instead is record
+            # the uncertainty and stop the run it knows about.
+            return _abort_turn(
+                person, text, state,
+                f"approving {consent_id} did not answer within"
+                f" {min(60.0, remaining):.0f}s, so it is unknown whether the"
+                " card was approved and the run requeued")
+        except httpx.HTTPError as exc:
+            return _abort_turn(
+                person, text, state,
+                f"approving {consent_id} failed in transport: {exc}")
+        if approved.status_code != 200:
+            return _abort_turn(
+                person, text, state,
+                f"approving {consent_id} failed:"
+                f" [{approved.status_code}] {approved.text}")
+        approvals += 1
+        state["consent_id"] = None
+        print(f"  {'':14} [approved {consent_id[:8]}, resuming]")
+        # Reattaching IS attaching — the same endpoint the browser reopens a
+        # run with — and `after_seq` is what stops the resumed segment from
+        # replaying the steps already folded in above.
+        problem = _stream_segment(
+            person, state, deadline, "GET",
+            f"{API}/agent/runs/{state['run_id']}/stream",
+            params={"team_id": TEAM, "after_seq": state["last_seq"]},
+        )
+        if problem:
+            return _abort_turn(person, text, state, problem)
+
+    took = time.monotonic() - started
+    if state["timed_out"]:
+        return _abort_turn(
+            person, text, state,
+            f"the turn exceeded {TURN_TIMEOUT_SECONDS}s (last status"
+            f" {state['status']!r} after {took:.0f}s)")
+    reply = "".join(state["reply_parts"]).strip()
+    status = state["status"]
     print(f"  {'Comrade':14} {reply[:300]}")
-    print(f"  {'':14} ({took:.0f}s, run {str(body.get('run_id'))[:8]})")
+    print(f"  {'':14} ({took:.0f}s, run {str(state['run_id'])[:8]},"
+          f" {status}{f', {approvals} approval(s)' if approvals else ''})")
     TRANSCRIPT.append({"kind": "agent", "asked_by": person["name"],
                        "question": text, "reply": reply,
                        "seconds": round(took, 1),
-                       "run_id": body.get("run_id"),
-                       "user_message_id": body.get("user_message_id")})
-    return body
+                       "run_id": state["run_id"],
+                       "status": status,
+                       "approvals": approvals,
+                       "detail": state["detail"]})
+    if CHECK_MODE and status in ("failed", "cancelled"):
+        raise RuntimeError(
+            f"the turn for {person['name']} ended {status}: {state['detail']}"
+        )
+    if CHECK_MODE and status not in TERMINAL_STATUSES | WAITING_STATUSES:
+        raise RuntimeError(
+            f"the turn for {person['name']} never settled (last status"
+            f" {status!r}) within {TURN_TIMEOUT_SECONDS}s"
+        )
+    return {"run_id": state["run_id"], "status": status, "reply": reply}
 
 
 #: The real GitHub App installation on the account that owns REPO. In the
@@ -203,12 +509,6 @@ def _collect_evidence() -> dict:
 
     run_ids = [t["run_id"] for t in TRANSCRIPT
                if t.get("kind") == "agent" and t.get("run_id")]
-    # Every message that was itself the INPUT to an agent turn (say() chat
-    # is not; ask() is — see TurnResponse.user_message_id in server/app.py).
-    # score_team_scenario uses this to tell a compiled fact that cites plain
-    # room chat from one that cites only what someone asked Comrade to do.
-    agent_input_message_ids = [t["user_message_id"] for t in TRANSCRIPT
-                                if t.get("kind") == "agent" and t.get("user_message_id")]
     http_errors = [t for t in TRANSCRIPT if t.get("kind") == "error"]
 
     conn = psycopg.connect(settings.comrade_db_url_admin)
@@ -216,10 +516,19 @@ def _collect_evidence() -> dict:
 
     runs: list[dict] = []
     steps: list[dict] = []
+    # Every message that was itself the INPUT to an agent turn (say() chat is
+    # not; ask() is). score_team_scenario uses this to tell a compiled fact
+    # that cites plain room chat from one that cites only what someone asked
+    # Comrade to do.
+    agent_input_message_ids: list[str] = []
     if run_ids:
         run_rows = conn.execute(
+            # 🔴 (fix.md F64) `input_message_id` comes from the RUN. It used to
+            # be read off the turn response, which does not carry one — the
+            # admission reply is `run_id` and `status` — so this list was
+            # always empty and every citation check silently passed.
             "select id, input_tokens, output_tokens, created_at, finished_at,"
-            "       status"
+            "       status, input_message_id"
             " from public.agent_runs where id = any(%s::uuid[])",
             (run_ids,),
         ).fetchall()
@@ -228,7 +537,9 @@ def _collect_evidence() -> dict:
             row = by_id.get(rid)
             if row is None:
                 continue
-            _id, in_tok, out_tok, created, finished, status = row
+            _id, in_tok, out_tok, created, finished, status, input_message_id = row
+            if input_message_id:
+                agent_input_message_ids.append(str(input_message_id))
             seconds = (finished - created).total_seconds() if finished else 0.0
             # status carries the runtime's own verdict on the turn. A turn
             # that ran tools and then produced no text is written 'failed'
@@ -361,7 +672,8 @@ def main() -> None:
     print("=" * 72)
     connect_repo()
     print("  [waiting for the worker to clone it]")
-    for _ in range(24):
+    # Discovery runs every five minutes; allow that interval plus clone time.
+    for _ in range(84):
         time.sleep(5)
         with user_session(WHO["priya"]["id"]) as conn:
             cloned = conn.execute(
@@ -372,9 +684,9 @@ def main() -> None:
             print(f"  [cloned at {cloned}]")
             break
     else:
-        print("  [NOT CLONED after 2 minutes]")
+        print("  [NOT CLONED after 7 minutes]")
         if CHECK_MODE:
-            raise RuntimeError("repository did not clone within 2 minutes")
+            raise RuntimeError("repository did not clone within 7 minutes")
 
     ask("marcus", "What's currently in our repository?")
 

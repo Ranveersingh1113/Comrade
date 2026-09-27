@@ -51,6 +51,19 @@ def _invite_or_resolve_user(email: str) -> str:
     if resp.status_code == 200:
         return str(resp.json()["id"])
 
+    # 🔴 (fix.md F59) BEFORE the "already registered" heuristic below, which
+    # reads the response body. A rejected key answers 401 with a body that
+    # contains neither "already" nor "exists", so it fell through to a bare
+    # `502 invite failed: 401` — an operator cannot tell that from a Supabase
+    # outage, and the deployment's own /ready said everything was fine.
+    if resp.status_code in (401, 403):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "the configured Supabase secret key was rejected by the project"
+            f" ({resp.status_code}), so invitations cannot be sent. Set a valid"
+            " SUPABASE_SECRET_KEY; /ready reports this as supabase_api.",
+        )
+
     if resp.status_code == 429:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,

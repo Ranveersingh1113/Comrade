@@ -26,7 +26,7 @@ from agent.plan_tools import read_plan
 from agent.repo_tools import connected_repo
 from pipeline.parsers import spotlight
 from shared.agent_runs import (
-    append_step, finish_run, pause_for_permission, start_run, usage_so_far,
+    append_step, finish_run, next_step_sequence, pause_for_permission, start_run, usage_so_far,
 )
 from shared.db import thread_lock
 from shared.observability import bind, log_context
@@ -207,9 +207,29 @@ def _continuation_content(
     )
 
 
+def _resolved_continuation_reply(
+    effects: list[dict[str, Any]], plan: dict[str, Any] | None,
+) -> str | None:
+    """Close a resolved one-action turn without letting the model repeat it."""
+    if plan and any(step.get("status") != "completed" for step in plan["steps"]):
+        return None
+    for effect in reversed(effects):
+        result = effect.get("result")
+        if not isinstance(result, dict) or not result.get("consent_id"):
+            continue
+        if result.get("status") == "rejected":
+            return "The requested action was rejected."
+        if result.get("status") == "executed" and effect.get("tool") == "repo_propose_pr":
+            action_result = result.get("result")
+            url = action_result.get("pr_url") if isinstance(action_result, dict) else None
+            return f"Approved action completed: {url}" if url else "Approved action completed."
+    return None
+
+
 def _permission_wait(step: dict[str, Any]) -> bool:
     return step.get("type") == "tool_result" and bool(
         isinstance(step.get("response"), dict) and step["response"].get("consent_id")
+        and step["response"].get("status", "pending") == "pending"
     )
 
 
@@ -291,6 +311,9 @@ async def stream_turn(
         # Inside the try: a failed history read must close the run row too, not
         # leave it 'running' forever.
         try:
+            # The lease fences writers; a resumed segment continues the same
+            # run's durable sequence instead of starting again at zero.
+            first_seq = await run_in_threadpool(next_step_sequence, team_id, run_id)
             # The summary and the replay have to MEET: everything since the
             # summary, not the last N messages, or up to
             # MIN_COMPACT_MESSAGES-1 of them sit in neither window
@@ -313,6 +336,18 @@ async def stream_turn(
                 history = [established, *history]
             effects = await run_in_threadpool(completed_effects, team_id, run_id)
             plan = await run_in_threadpool(read_plan, team_id, thread_id)
+            resolved_reply = _resolved_continuation_reply(effects, plan)
+            if resolved_reply is not None:
+                step = {"seq": first_seq, "type": "text", "text": resolved_reply}
+                await run_in_threadpool(
+                    append_step, team_id, run_id, step, worker_id=worker_id
+                )
+                await run_in_threadpool(
+                    _finish, team_id, run_id, "done", used_input, used_output, worker_id
+                )
+                yield step
+                yield {"type": "final", "run_id": run_id, "reply": resolved_reply}
+                return
             continuation = _continuation_content(effects, plan)
             # Resolved once per turn rather than per tool call: it is a DB read
             # and it cannot change mid-turn.
@@ -406,7 +441,7 @@ async def stream_turn(
                         )
                         yield {"type": "cancelled", "run_id": run_id}
                         return
-                    for step in _steps_from_event(event, len(all_steps)):
+                    for step in _steps_from_event(event, first_seq + len(all_steps)):
                         await run_in_threadpool(
                             append_step, team_id, run_id, step, worker_id=worker_id
                         )

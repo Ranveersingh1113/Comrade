@@ -230,3 +230,15 @@ def test_a_refused_run_does_not_count_as_verification(checkout, ctx, monkeypatch
     assert "error" in result_run
     result = repo_propose_pr("Add verification", "body", ctx)
     assert REFUSAL in result.get("error", ""), result
+
+
+def test_unverified_proposal_reports_no_effect(checkout, ctx, monkeypatch):
+    """Only a refusal before capture/proposal may advertise a safe retry."""
+    repo_edit("src/auth.py", "return True", "return False", ctx)
+    def forbidden(*a, **kw):
+        raise AssertionError("an unverified proposal reached its side effect")
+    monkeypatch.setattr("pipeline.repo_pr.capture_patch", forbidden)
+    monkeypatch.setattr("shared.consent.propose_action", forbidden)
+    result = repo_propose_pr("Change", "Needs testing", ctx)
+    assert REFUSAL in result["error"]
+    assert result["effect_not_started"] is True

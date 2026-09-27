@@ -70,6 +70,9 @@ class ChokepointPlugin(BasePlugin):
         tool_context: ToolContext,
     ) -> Optional[dict]:
         """None lets the call run; a dict refuses it and answers the model."""
+        # ADK invokes after_tool even for short-circuited calls. This flag is
+        # per call context, never shared session state or model-supplied args.
+        tool_context._comrade_effect_claimed = False
         spec = spec_for(tool.name)
         if spec.surface == "sandbox":
             # This branch USED to be `return None` — an unconditional allow —
@@ -118,6 +121,7 @@ class ChokepointPlugin(BasePlugin):
             return {"error": "effect_interrupted", "reason": str(exc)}
         except RunInactive as exc:
             return {"error": "run_cancelled", "reason": str(exc)}
+        tool_context._comrade_effect_claimed = result is None
         return result
 
     async def after_tool_callback(
@@ -126,8 +130,9 @@ class ChokepointPlugin(BasePlugin):
     ) -> Optional[dict]:
         spec = spec_for(tool.name)
         run_id = tool_context.state.get("agent_run_id")
-        if spec.writes and run_id:
+        if spec.writes and run_id and getattr(tool_context, "_comrade_effect_claimed", False):
             complete_effect(tool_context.state["team_id"], run_id, tool.name, tool_args, result)
+            tool_context._comrade_effect_claimed = False
         return None
 
     @staticmethod

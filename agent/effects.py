@@ -75,9 +75,16 @@ def claim_effect(
         inserted = conn.execute(
             "insert into public.agent_effects (run_id, team_id, effect_key, tool, args)"
             " select %s,%s,%s,%s,%s where exists (" + owns + ")"
-            " on conflict (run_id,effect_key) do nothing"
+            # Retry only the PR precondition that explicitly performed no
+            # effect. Unknown failures and completed writes stay cached.
+            " on conflict (run_id,effect_key) do update"
+            " set status='started', result=null, completed_at=null"
+            " where agent_effects.status='completed'"
+            " and agent_effects.tool='repo_propose_pr'"
+            " and agent_effects.result @> '{\"effect_not_started\":true}'::jsonb"
+            " and exists (" + owns + ")"
             " returning id",
-            (run_id, team_id, key, tool, Json(args), run_id, worker_id),
+            (run_id, team_id, key, tool, Json(args), run_id, worker_id, run_id, worker_id),
         ).fetchone()
         if inserted is not None:
             return None

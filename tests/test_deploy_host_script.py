@@ -61,86 +61,120 @@ def _assert_doubles_win(fake_bin, env, *names):
         )
 
 
-@pytest.mark.parametrize("failure",
-                         ["", "build", "migration", "lock",
-                          "proxyconfig", "proxydown"])
-def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
-    """Run the real shell script; fake only external host operations."""
+def _double(path, name, extra=()):
+    """One faked host command, which logs every call it is given."""
+    lines = ["#!/bin/sh", 'echo "%s $*" >> "$DEPLOY_LOG"' % name, *extra, "exit 0"]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    path.chmod(0o755)
+
+
+def _fake_host(tmp_path, *, failure="", caddy_host=None, model_host=None,
+               dotenv_host=None):
+    """A host with the repository checked out, and every external faked.
+
+    🔴 ONE fixture, shared (fix.md F61). `dca9019` inlined this into the
+    parametrised test and deleted it, leaving eight tests calling a name that
+    no longer existed — they failed with NameError before reaching any release
+    behaviour, and the three tests that commit ran by `-k` hid it.
+    """
     fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    (tmp_path / ".git").mkdir()
-    # The helper, where a real checkout puts it. The release resolves it from
-    # the working tree rather than from `$0`, because the workflow pipes this
-    # script in on stdin and `$0` is then `sh` (fix.md F35).
-    (tmp_path / "scripts").mkdir()
+    fake_bin.mkdir(exist_ok=True)
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    # The committed helper, where a real checkout puts it. The release resolves
+    # it from the working tree rather than from `$0` (fix.md F35).
+    (tmp_path / "scripts").mkdir(exist_ok=True)
     shutil.copy(ROOT / "scripts" / "proxy_check.sh",
                 tmp_path / "scripts" / "proxy_check.sh")
-    for command in ("git", "docker", "mkdir", "chown", "stat", "flock", "curl"):
-        executable = fake_bin / command
-        executable.write_text(
-            "#!/bin/sh\n"
-            f'echo "{command} $*" >> "$DEPLOY_LOG"\n'
-            + ("echo 999\n" if command == "stat" else "")
-            + ("[ \"$FAILURE\" != lock ] || exit 9\n" if command == "flock" else "")
-            # 🔴 The public check no longer speaks through the caddy container.
-            # `exec -T caddy wget https://localhost/...` asked for a hostname
-            # Caddy has no site for, and disabled certificate verification while
-            # it was there (fix.md F35). It now runs scripts/proxy_check.sh on
-            # the host, so `curl` is the external operation to fake — and the
-            # real script runs.
-            + ("[ \"$FAILURE\" != proxydown ] || exit 7\n"
-               if command == "curl" else "")
-            + ('''case "$*" in
-  *"config --services")
-    # The prod overlay has a caddy service, so the release's proxy checks
-    # must actually run here rather than being skipped.
-    printf 'api\\nfrontend\\ncaddy\\n'; exit 0 ;;
-  *"exec -T caddy printenv COMRADE_HOST")
-    # 🔴 The site's own hostname, read from the container serving it.
-    echo comrade.example.test; exit 0 ;;
-  *config)
-    # The resolved model, with an env_file service's copy FIRST — which is what
-    # a key search finds, and is not the name Caddy serves. A release that goes
-    # back to scraping this fails the assertions below instead of passing them.
-    printf '      COMRADE_HOST: from-env-file.test\\n'; exit 0 ;;
-  *" build") [ "$FAILURE" != build ] || exit 7 ;;
-  *" -T migrate") [ "$FAILURE" != migration ] || exit 8 ;;
-  *"validate --config"*) [ "$FAILURE" != proxyconfig ] || exit 6 ;;
-  *"exec -T caddy"*) [ "$FAILURE" != proxydown ] || exit 5 ;;
-esac
-''' if command == "docker" else "")
-            + "exit 0\n",
-            encoding="utf-8", newline="\n",
-        )
-        executable.chmod(0o755)
+    if dotenv_host:
+        (tmp_path / ".env").write_text(
+            "POSTGRES_PASSWORD=x\nCOMRADE_HOST=%s\n" % dotenv_host,
+            encoding="utf-8", newline="\n")
+
+    for name in ("git", "mkdir", "chown"):
+        _double(fake_bin / name, name)
+    _double(fake_bin / "stat", "stat", ["echo 999"])
+    _double(fake_bin / "flock", "flock", ['[ "$FAILURE" != lock ] || exit 9'])
+    # 🔴 The public check no longer speaks through the caddy container.
+    # `exec -T caddy wget https://localhost/...` asked for a hostname Caddy has
+    # no site for, and disabled certificate verification while it was there
+    # (fix.md F35). It runs scripts/proxy_check.sh on the host now, so `curl`
+    # is the external operation to fake — and the real script runs.
+    _double(fake_bin / "curl", "curl",
+            ['[ "$FAILURE" != proxydown ] || exit 7'])
+    # Three different questions of the same command: `config --services` says
+    # which services exist; `exec -T caddy printenv` is the site's own
+    # hostname; a bare `config` is the resolved model, whose FIRST COMRADE_HOST
+    # belongs to an env_file service and is deliberately a different value.
+    answers = ['case "$*" in',
+               '  *"config --services") printf \'api\\nfrontend\\ncaddy\\n\'; exit 0 ;;']
+    if caddy_host:
+        answers.append(
+            '  *"exec -T caddy printenv COMRADE_HOST") echo %s; exit 0 ;;' % caddy_host)
+    if model_host:
+        answers.append(
+            "  *config) printf '      COMRADE_HOST: %s\\n'; exit 0 ;;" % model_host)
+    answers += [
+        '  *" build") [ "$FAILURE" != build ] || exit 7 ;;',
+        '  *" -T migrate") [ "$FAILURE" != migration ] || exit 8 ;;',
+        '  *"validate --config"*) [ "$FAILURE" != proxyconfig ] || exit 6 ;;',
+        '  *"exec -T caddy"*) [ "$FAILURE" != proxydown ] || exit 5 ;;',
+        'esac',
+    ]
+    _double(fake_bin / "docker", "docker", answers)
     # Not logged, and not real: the release retries readiness 24 times and the
     # proxy 12 times, five seconds apart, so an unfaked `sleep` turns a failure
     # case into a test timeout rather than a result.
     nap = fake_bin / "sleep"
     nap.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     nap.chmod(0o755)
-    log = tmp_path / "commands.log"
-    env = {**os.environ,
-           "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
-           "DEPLOY_LOG": log.as_posix(), "FAILURE": failure,
-           }
+
+    env = {
+        **os.environ,
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "DEPLOY_LOG": (tmp_path / "commands.log").as_posix(),
+        "FAILURE": failure,
+    }
     # NOT set here. The release reads the hostname out of the running caddy
     # container, which the double above answers, so an inherited variable
-    # cannot be what makes this pass.
+    # cannot be what makes these pass.
     env.pop("COMRADE_HOST", None)
+    return env
+
+
+def _as_the_workflow_does(tmp_path, env):
+    """`sh /tmp/comrade-deploy.sh <sha>` — a FILE, the shape F58 moved to.
+
+    The release is no longer piped into `sh`, because a `docker compose run`
+    can drain that stdin and swallow the rest of the script. So this runs the
+    committed file by path, which is what the workflow does.
+    """
     # 🔴 Asserted BEFORE the script runs, and the path put in front INSIDE the
     # shell. Prepending to the Windows PATH is not enough on every host (see
     # `_posix`), and where it lost the script ran a real `git fetch origin
     # abc123`, died there, and every failure case still "passed" on that
     # unrelated early exit.
+    fake_bin = tmp_path / "bin"
     _assert_doubles_win(fake_bin, env, "git", "docker", "flock", "curl")
-    result = subprocess.run(
+    return subprocess.run(
         [SH, "-c", f'export PATH="{_posix(fake_bin)}:$PATH"\nexec sh "$0" "$@"',
          str(ROOT / "scripts/deploy_host.sh"), "abc123"],
         cwd=tmp_path, env=env,
         capture_output=True, text=True, encoding="utf-8", timeout=180,
     )
-    calls = log.read_text().splitlines()
+
+
+@pytest.mark.parametrize("failure",
+                         ["", "build", "migration", "lock",
+                          "proxyconfig", "proxydown"])
+def test_deployment_orders_release_and_stops_on_failure(tmp_path, failure):
+    """Run the real shell script; fake only external host operations."""
+    env = _fake_host(tmp_path, failure=failure,
+                     caddy_host="comrade.example.test",
+                     model_host="from-env-file.test")
+
+    result = _as_the_workflow_does(tmp_path, env)
+
+    calls = (tmp_path / "commands.log").read_text().splitlines()
     # The fetch is the first thing the script does after taking the lock, so
     # its absence means the run never got past the lock — correct only for the
     # lock case itself.
@@ -237,8 +271,86 @@ def test_the_workflow_runs_the_release_from_a_file_not_a_pipe():
         "the release is piped into sh again; a compose run can eat the rest of it"
     )
     assert "sh /tmp/comrade-deploy.sh $GITHUB_SHA" in workflow
-    # The exit code must survive the cleanup, or a failed deploy reports success.
-    assert "rc=$?" in workflow and "exit $rc" in workflow
+
+
+def _the_command_ssm_receives(tmp_path, sha="deadbeef"):
+    """Build the remote command by RUNNING the workflow's own send-command.
+
+    Not a substring search over the YAML: the defect below is entirely in what
+    the runner's bash does to that line before AWS is called, so the line has
+    to be executed, with `aws` replaced by something that prints the arguments
+    it was handed.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/deploy-pilot.yml").read_text(encoding="utf-8"))
+    step = next(s for s in workflow["jobs"]["deploy"]["steps"]
+                if "SSM" in s.get("name", ""))
+    lines = step["run"].splitlines()
+    # Only the assignment. The polling loop that follows calls `aws` again and
+    # would sleep for fifteen minutes against a stand-in.
+    end = next(i for i, line in enumerate(lines) if "Command.CommandId" in line)
+    send = "\n".join(lines[:end + 1]) + '\nprintf "%s\\n" "$command_id"\n'
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    (fake_bin / "aws").write_text(
+        '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n',
+        encoding="utf-8", newline="\n")
+    (fake_bin / "aws").chmod(0o755)
+
+    env = {**os.environ, "GITHUB_SHA": sha, **(step.get("env") or {})}
+    out = _in_shell(fake_bin, send, env=env)
+    assert out.returncode == 0, out.stderr
+    parameters = next(line for line in out.stdout.splitlines()
+                      if line.startswith("commands=["))
+    return parameters[len('commands=["'):-len('"]')]
+
+
+def test_a_failed_release_cannot_report_success(tmp_path):
+    """🔴 THE DEFECT (fix.md F60), introduced by the F58 repair itself.
+
+    `--parameters "commands=[\\"...; rc=$?; ...; exit $rc\\"]"` is a
+    DOUBLE-QUOTED string in the runner's bash, so the runner expanded both of
+    those before SSM saw them: `$?` became the runner's own last status and
+    `$rc` became empty. What the host actually received ended
+
+        ...; rc=0; rm -f /tmp/comrade-deploy.sh; exit
+
+    and a bare `exit` exits with the status of the preceding command — the
+    `rm`, which always succeeds. A release exiting 7 reported Success, which is
+    the very thing F58 was fixing.
+
+    The previous check here asserted that the strings `rc=$?` and `exit $rc`
+    appear in the YAML. They do, in the broken version too, so it passed on the
+    defect. This runs the construction and then the wrapper it produces.
+    """
+    remote = _the_command_ssm_receives(tmp_path)
+
+    # Unexpanded on the way out: these have to reach the host as variables.
+    assert "rc=$?" in remote, remote
+    assert remote.endswith("exit $rc"), remote
+    assert "$GITHUB_SHA" not in remote, "the commit must expand on the runner"
+    assert "deadbeef:scripts/deploy_host.sh" in remote, remote
+
+    # And the wrapper that carries the status back, run for real. The release
+    # itself is stood in for, because the rest of the command reaches for
+    # /opt/comrade on the pilot host.
+    #
+    # 🔴 Cut at the RELEASE INVOCATION, not at `; rc=`. Anchoring on `rc=`
+    # follows the mutation: move the capture below the `rm` and the slice moves
+    # with it, so the wrapper under test is no longer the one the host runs and
+    # a cleanup-status bug passes.
+    release = "sh /tmp/comrade-deploy.sh deadbeef"
+    tail = remote[remote.index(release) + len(release):]
+    for release_exit in (7, 0):
+        ran = subprocess.run([SH, "-c", f"(exit {release_exit}){tail}"],
+                             capture_output=True, text=True, timeout=60)
+        assert ran.returncode == release_exit, (
+            f"a release exiting {release_exit} was reported as"
+            f" {ran.returncode} through the cleanup: {tail}"
+        )
 
 
 def test_every_one_off_container_in_the_release_closes_its_stdin():

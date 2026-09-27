@@ -259,6 +259,10 @@ def _requested(monkeypatch, path: str, document_id: str) -> str:
 
     class _Response:
         headers = {"content-length": "2"}
+        # A real httpx.Response has one, and download_document now names a
+        # rejected service key before raise_for_status can turn it into an
+        # unlabelled 401 against a URL containing the object path (fix.md F59).
+        status_code = 200
 
         def raise_for_status(self):
             pass
@@ -360,6 +364,10 @@ def test_the_request_carries_no_query_of_its_own(clean, monkeypatch):
 
     class _Response:
         headers = {"content-length": "2"}
+        # A real httpx.Response has one, and download_document now names a
+        # rejected service key before raise_for_status can turn it into an
+        # unlabelled 401 against a URL containing the object path (fix.md F59).
+        status_code = 200
 
         def raise_for_status(self):
             pass

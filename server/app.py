@@ -226,7 +226,11 @@ def ready(response: Response) -> dict:
         checks["workers"] = _worker_check()
         checks["sandbox"] = _sandbox_check()
 
-    ok = all(v == "ok" for v in checks.values())
+    # Outside the database gate: it asks a third party, not Postgres, and it is
+    # the one check whose verdict is reported rather than enforced.
+    checks["supabase_api"] = _supabase_check()
+
+    ok = _readiness_ok(checks)
     if not ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {"status": "ready" if ok else "not_ready", "checks": checks}
@@ -386,6 +390,98 @@ def _queue_check(sql: str, complaint: str) -> str:
     return f"{stalled} " + complaint.format(mins=READY_STALL_MINUTES)
 
 
+#: Checks that are REPORTED but do not fail the endpoint.
+#:
+#: 🔴 (fix.md F59) Everything else here is fatal on purpose — this file exists
+#: because "a deploy goes green while nothing works". `supabase_api` is the one
+#: exception, and it is a deliberate policy choice rather than an oversight:
+#: the Supabase HTTP key is needed by invites and by reading an uploaded
+#: document back out of Storage, and by NOTHING on the path that serves an
+#: agent turn. A deployment with a dead key still answers questions, so failing
+#: readiness would take a working pilot offline and block every release.
+#:
+#: To make it fatal, delete the name from this set. That is the whole change.
+ADVISORY_CHECKS = frozenset({"supabase_api"})
+
+
+def _readiness_ok(checks: dict[str, str]) -> bool:
+    """Does this set of verdicts mean the deployment is ready?
+
+    Its own function so the ADVISORY_CHECKS policy can be tested directly. As
+    an expression inside the endpoint it could only be exercised by running the
+    whole thing against a live Postgres, which is how a policy this small ends
+    up with no test at all.
+    """
+    return all(verdict == "ok" for name, verdict in checks.items()
+               if name not in ADVISORY_CHECKS)
+
+
+def _supabase_check() -> str:
+    """Is the configured Supabase secret key actually accepted by the project?
+
+    🔴 THE DEFECT (fix.md F59). Nothing asked. `/ready` reported all eight
+    checks ok on a deployment whose `SUPABASE_SECRET_KEY` was rejected by every
+    plane of its own project — so `POST /auth/v1/invite` answered 401 and the
+    only way to find out was for a leader to try to invite a teammate and get
+    back `502 invite failed: 401`.
+
+    The API is not reached on the turn path, which is exactly why this hid: the
+    agent, the queues, the workers and the sandbox were all genuinely fine.
+
+    BOTH PLANES, because they validate the key separately and were measured
+    failing differently — auth answered `401 Invalid API key` while storage
+    answered `Invalid Compact JWS`, the same key at the same moment. One probe
+    would have reported half the story.
+    """
+    key = settings.supabase_secret_key
+    base = settings.supabase_url.rstrip("/")
+    if not base or not key:
+        return "not configured"
+
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    # 🔴 Each plane's own REJECTION statuses, measured rather than assumed.
+    # They answer differently for the same dead key — auth `401 Invalid API
+    # key`, storage `400 Invalid Compact JWS` — and a 400 from storage is
+    # therefore a verdict about the key while a 500 from auth is not.
+    #
+    # The distinction is not pedantry: the local stack answers 500 to
+    # /auth/v1/admin/users for reasons of its own, with a perfectly valid key,
+    # and the first version of this reported that as a rejected key. A check
+    # that names the wrong cause sends an operator to reissue a credential that
+    # was never the problem.
+    planes = {
+        # What server/invites.py needs.
+        "auth": ("/auth/v1/admin/users?page=1&per_page=1", (401, 403)),
+        # What shared/storage.py needs to read an uploaded document back.
+        "storage": ("/storage/v1/bucket", (400, 401, 403)),
+    }
+    broken = []
+    for plane, (path, rejected) in planes.items():
+        try:
+            # Short, and never retried: a readiness probe that hangs on a
+            # third party is a readiness probe that gets killed.
+            reply = httpx.get(
+                base + path, headers=headers,
+                timeout=READY_HTTP_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - unreachable counts as broken
+            broken.append(f"{plane}: {safe_error(exc)}")
+            continue
+        if reply.status_code in rejected:
+            broken.append(f"{plane}: HTTP {reply.status_code}, key rejected")
+        elif reply.status_code >= 400:
+            broken.append(
+                f"{plane}: HTTP {reply.status_code}, the service is unwell"
+                " (this one is not about the key)")
+    if not broken:
+        return "ok"
+    return (
+        "; ".join(broken)
+        + " — invites and reading uploaded documents will fail;"
+        " agent turns are unaffected"
+    )
+
+
 def _worker_check() -> str:
     """Both workers, present and recent, whether or not there is work."""
     try:
@@ -466,6 +562,11 @@ READY_STALL_MINUTES = 10
 #: A readiness probe that hangs is a readiness probe that gets killed, and an
 #: unreachable role is exactly the case where a connect can hang.
 READY_CONNECT_SECONDS = 3
+
+#: The same idea for the one check that leaves the machine. Deliberately small:
+#: /ready is polled by the release, and waiting on somebody else's API is how a
+#: readiness probe becomes the outage.
+READY_HTTP_SECONDS = 5
 #: Missing migrations are NAMED rather than counted — "3 missing" sends an
 #: operator to diff two lists by hand at the moment they can least afford it —
 #: but a fresh database is missing all of them, and that is not a report.

@@ -41,6 +41,16 @@ def start_run(
     return str(row[0])
 
 
+def next_step_sequence(team_id: str, run_id: str) -> int:
+    """Continue persisted steps after a permission wait or worker recovery."""
+    with team_session(Role.AGENT, team_id) as conn:
+        row = conn.execute(
+            "select coalesce(max(seq) + 1, 0) from public.agent_steps where run_id=%s",
+            (run_id,),
+        ).fetchone()
+    return row[0]
+
+
 def append_step(
     team_id: str, run_id: str, step: dict[str, Any], *, worker_id: str | None = None
 ) -> None:

@@ -199,6 +199,48 @@ def download_document(
         "apikey": settings.supabase_secret_key,
     }
     with httpx.stream("GET", url, headers=headers, timeout=60.0) as response:
+        # 🔴 (fix.md F59) Named before `raise_for_status`, which would report
+        # this as an unlabelled 401 against a URL containing the object path.
+        # A rejected service key is a DEPLOYMENT fault, not a fault of this
+        # document, and the two were indistinguishable in the worker log.
+        #
+        # Left retryable rather than permanent, but that is NOT self-healing
+        # and saying so was the original version of this comment. The worker
+        # gives a job `MAX_ATTEMPTS = 3` and then parks it as `failed`
+        # (pipeline/worker.py), and three attempts take minutes — far less than
+        # it takes to notice a rejected key and configure a new one. So the
+        # jobs from the broken window are already parked by the time the fix
+        # lands, and nothing retries them.
+        #
+        # Requeueing them is one statement, scoped to this cause by the message
+        # below — which is the reason it is worth wording exactly:
+        #
+        #   update public.jobs
+        #      set status = 'pending', attempts = 0, last_error = null,
+        #          available_at = now(), finished_at = null, worker_id = null
+        #    where status = 'failed'
+        #      and last_error like '%rejected the configured secret key%';
+        #
+        # `attempts = 0` is the part that matters: the claim query refuses any
+        # job at MAX_ATTEMPTS, so clearing the status alone requeues a row that
+        # no worker will ever pick up.
+        if response.status_code in (400, 401, 403):
+            # 🔴 400 IS in that list, and the status alone is NOT enough to act
+            # on. Supabase Storage answers 400 both for a rejected key
+            # (`Invalid Compact JWS`, measured on the pilot) and for an object
+            # that is simply not there (`Object not found`, measured against
+            # the local stack) — and the first version of this guard listed
+            # only 401/403, so it did not fire on the shape actually measured.
+            # The body is what separates them, and it is read only here, on a
+            # response that is already an error.
+            response.read()
+            body = response.text.lower()
+            if response.status_code != 400 or "jws" in body or "jwt" in body:
+                raise RuntimeError(
+                    "Supabase rejected the configured secret key"
+                    f" ({response.status_code}); no document can be read back"
+                    " out of Storage until SUPABASE_SECRET_KEY is valid"
+                )
         response.raise_for_status()
         declared = response.headers.get("content-length")
         if declared and int(declared) > max_bytes:

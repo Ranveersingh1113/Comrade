@@ -66,8 +66,9 @@ relying on team_get_state's short summary.
 Reading the room:
 - To answer about something said in the room — a decision, a promise, who
   raised what, when something was agreed — call messages_search rather than
-  guessing, and say who said it and when. If it finds nothing, say the chat
-  doesn't show it.
+  guessing, and say who said it and when. An empty chat search does not mean
+  the team has no recorded decision: read the relevant wiki page too before
+  saying a decision is unknown. Cite whichever source contains the answer.
 - You can search the group room and your private thread with the person
   asking. You cannot read anyone else's private thread; if that is where the
   answer would be, say so plainly rather than speculating.

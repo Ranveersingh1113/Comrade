@@ -48,6 +48,81 @@ done
 step() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
 
 # ---------------------------------------------------------------------------
+# The processes the agent-eval lane owns
+# ---------------------------------------------------------------------------
+# 🔴 (fix.md F63, reopened) `kill` on a `uv run` reaches the WRAPPER. The
+# python it spawned keeps :8000, and the next invocation of this script meets
+# it at the backend precondition — a refusal pointing nowhere near the lane
+# that leaked it. So the interpreter is resolved once and each server below is
+# started directly: the pid we hold is the pid that serves.
+lane_pids=""
+
+#: How long an owned process may take to finish the job in hand after TERM.
+#: 🔴 Both workers DRAIN on their first TERM — they finish the item they are
+#: holding and then exit — so this is a real wait, not a formality, and model
+#: or compiler work can outlast it. Overridable only so a test can exercise the
+#: escalation below without waiting half a minute for it.
+LANE_DRAIN_SECONDS="${LANE_DRAIN_SECONDS:-30}"
+
+lane_survivors() {
+  survivors=""
+  for pid in $lane_pids; do
+    kill -0 "$pid" 2>/dev/null && survivors="$survivors $pid"
+  done
+  printf '%s' "$survivors"
+}
+
+lane_stop() {
+  [ -n "$lane_pids" ] || return 0
+  kill $lane_pids 2>/dev/null || true
+  # Waited for, not fired and forgotten: a delivered signal is not an exited
+  # process, and these two deliberately finish their current job first.
+  waited=0
+  while [ "$waited" -lt "$LANE_DRAIN_SECONDS" ] && [ -n "$(lane_survivors)" ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # 🔴 ESCALATED, NOT FORGOTTEN (fix.md F63, third pass). This used to clear
+  # `lane_pids`, echo the survivors and return ZERO — so a pipeline or agent
+  # worker that outlived TERM kept writing to the database while the gate
+  # printed `all gates passed`, and clearing the list stopped the EXIT trap
+  # from ever trying again. Only pids this lane started are ever signalled;
+  # nothing here matches on process names.
+  stubborn="$(lane_survivors)"
+  if [ -n "$stubborn" ]; then
+    echo "did not stop within ${LANE_DRAIN_SECONDS}s, killing:$stubborn" >&2
+    kill -9 $stubborn 2>/dev/null || true
+  fi
+  # Reaped, or a zombie reads as a live process to `kill -0` below.
+  for pid in $lane_pids; do wait "$pid" 2>/dev/null || true; done
+  stubborn="$(lane_survivors)"
+  if [ -n "$stubborn" ]; then
+    echo "OWNED PROCESSES STILL RUNNING:$stubborn" >&2
+    return 1
+  fi
+  lane_pids=""
+  return 0
+}
+
+#: The gate's exit status and the cleanup's, merged. A cleanup that could not
+#: establish termination fails the run; a scenario that already failed keeps
+#: its own status.
+lane_exit() {
+  status=$?
+  lane_stop || status=1
+  trap - EXIT INT TERM
+  exit "$status"
+}
+
+#: An interrupted gate has not passed. The trap used to run cleanup and then
+#: let the shell decide, which on some shells is a zero exit.
+lane_interrupted() {
+  lane_stop || true
+  trap - EXIT INT TERM
+  exit "$1"
+}
+
+# ---------------------------------------------------------------------------
 # A running worker silently breaks the suite
 # ---------------------------------------------------------------------------
 # 🔴 Learned the hard way: a live `python -m pipeline.worker` drains the job
@@ -177,28 +252,80 @@ if [ "$AGENT_EVAL" -eq 1 ]; then
   step "agent eval (does it answer? — live judge prompts)"
   uv run pytest tests/test_agent_usefulness_live.py -q -m live
 
-  api_health="$(curl -fsS http://localhost:8000/health 2>/dev/null || echo '')"
-  case "$api_health" in
-    *'"database":"ok"'*) ;;
+  # 🔴 THIS LANE OWNS THE WHOLE STACK THE SCENARIO NEEDS (fix.md F63). It used
+  # to REFUSE to run unless an API was already answering on :8000 — an API that
+  # no invocation of this script can leave there:
+  #
+  #   * the backend precondition at the top exits 1 while anything answers on
+  #     :8000, so it cannot have been started before the run;
+  #   * Playwright owns the one the browser lane uses and stops it with the
+  #     lane (fix.md F57), so it is gone by the time we reach here;
+  #   * `--quick --with-agent-eval` skips the browser lane entirely and never
+  #     had one at all.
+  #
+  # ALL THREE, and the agent worker is the one the first repair forgot.
+  # `POST /agent/turn` only ENQUEUES — "agent.worker executes it", says the
+  # endpoint — and the pipeline worker does not read that queue. A lane with an
+  # API and a pipeline worker admits every turn and executes none of them.
+  #
+  # The pipeline worker is here because the scenario connects a repository and
+  # waits for the clone.
+  step "agent eval (live four-person scenario)"
+  PY="$(uv run python -c 'import sys; print(sys.executable)')"
+  "$PY" -m uvicorn server.app:app --port 8000 >/dev/null 2>&1 &
+  api_pid=$!
+  "$PY" -m pipeline.worker &
+  pipeline_pid=$!
+  "$PY" -m agent.worker &
+  agent_pid=$!
+  lane_pids="$api_pid $pipeline_pid $agent_pid"
+  # Every exit path, interruption included. A worker left behind drains the job
+  # queue that other gates' tests enqueue, and an API left behind is exactly
+  # the second writer the backend precondition refuses to run beside.
+  trap lane_exit EXIT
+  trap 'lane_interrupted 130' INT
+  trap 'lane_interrupted 143' TERM
+
+  # 🔴 `/ready`'s OWN worker check, not a sleep: it reports ok only when BOTH
+  # an agent and a pipeline worker have beaten recently, which is precisely the
+  # precondition this lane could not previously state. It also cannot answer at
+  # all unless the API is up and reaching the database, so one poll covers all
+  # three processes.
+  for _ in $(seq 1 90); do
+    case "$(curl -sS http://localhost:8000/ready 2>/dev/null || echo '')" in
+      *'"workers":"ok"'*) break ;;
+    esac
+    sleep 1
+  done
+  case "$(curl -sS http://localhost:8000/ready 2>/dev/null || echo '')" in
+    *'"workers":"ok"'*) ;;
     *)
-      echo "the API on :8000 is not answering (or can't reach the db); the" >&2
-      echo "live scenario needs it: uv run uvicorn server.app:app --port 8000" >&2
+      echo "the API, agent worker and pipeline worker this lane started did" >&2
+      echo "not all report ready within 90s. /ready says:" >&2
+      curl -sS http://localhost:8000/ready 2>/dev/null >&2 || true
       exit 1 ;;
   esac
 
-  # The live scenario needs the pipeline worker to clone the repo. Started
-  # and stopped HERE, around just this step: the precondition check above
-  # already established no worker was running when this script started, and
-  # a worker left running after this block would silently break every other
-  # gate that shares this machine (the queue tests drain jobs against
-  # themselves — see the comment on that check).
-  step "agent eval (live four-person scenario)"
-  uv run python -m pipeline.worker &
-  worker_pid=$!
-  trap 'kill "$worker_pid" 2>/dev/null || true' EXIT
   uv run python -m sim.scenario --check
-  kill "$worker_pid" 2>/dev/null || true
-  trap - EXIT
+
+  # 🔴 The cleanup's own verdict decides too. The port check below only ever
+  # sees the API; a worker that outlives its signal holds no port and would
+  # otherwise pass unnoticed straight into `all gates passed`.
+  if ! lane_stop; then
+    echo "the lane could not stop processes it started; see above." >&2
+    trap - EXIT INT TERM
+    exit 1
+  fi
+  trap - EXIT INT TERM
+  # And the port, for anything holding it that this lane did not start — a
+  # child of one of ours, say. Still a failure rather than a warning: the next
+  # invocation refuses to start beside it, at a check pointing nowhere near
+  # this lane.
+  if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+    echo "something this lane started is still answering on :8000 after" >&2
+    echo "cleanup. The next gate run will refuse to start beside it." >&2
+    exit 1
+  fi
 fi
 
 if [ "$RESET" -eq 1 ]; then

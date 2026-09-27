@@ -280,10 +280,19 @@ def execute_consent(team_id: str, consent_id: str) -> dict:
         return {"status": "executed", "result": result, "agent_run_id": str(agent_run_id) if agent_run_id else None}
 
 
-def _requeue_permission_run(team_id: str, run_id: str | None) -> None:
+def _requeue_permission_run(
+    team_id: str, run_id: str | None, consent_id: str, resolution: dict,
+) -> None:
     if not run_id:
         return
     with team_session(Role.AGENT, team_id) as conn:
+        # Refresh the durable handoff before a worker can resume. Replaying
+        # the original pending result otherwise parks on an already decided card.
+        conn.execute(
+            "update public.agent_effects set result=result || %s::jsonb"
+            " where run_id=%s and status='completed' and result->>'consent_id'=%s",
+            (Json(resolution), run_id, consent_id),
+        )
         conn.execute(
             "update public.agent_runs set status='queued', worker_id=null, lease_expires_at=null"
             " where id=%s and status='waiting_for_permission'",
@@ -388,7 +397,8 @@ def approve_consent(
                 # Consent already executed. Do not lie that it did not; report
                 # the failed optional grant so caller can retry with Allow once.
                 result["permission_grant_error"] = str(exc)
-        _requeue_permission_run(team_id, result.get("agent_run_id"))
+        _requeue_permission_run(team_id, result.get("agent_run_id"), consent_id,
+                               {"status": "executed", "result": result.get("result")})
     return result
 
 
@@ -413,7 +423,8 @@ def reject_consent(
     # waiting run; reject wrote its reason and stopped, so the run stayed
     # parked and there was never a next turn to read the reason on. "No" is an
     # answer, and the model has to be running to receive it.
-    _requeue_permission_run(team_id, str(row[1]) if row[1] else None)
+    _requeue_permission_run(team_id, str(row[1]) if row[1] else None, consent_id,
+                           {"status": "rejected", "resolution_reason": reason})
     return {"status": "rejected"}
 
 
@@ -441,7 +452,8 @@ def edit_and_approve(
         )
     result = execute_consent(team_id, consent_id)
     if result.get("status") == "executed":
-        _requeue_permission_run(team_id, result.get("agent_run_id"))
+        _requeue_permission_run(team_id, result.get("agent_run_id"), consent_id,
+                               {"status": "executed", "result": result.get("result")})
     return result
 
 

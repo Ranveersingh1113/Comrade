@@ -45,6 +45,17 @@ jobs:
       # others, and no single passing run demonstrates a fix. Running from a
       # file removes the class by construction: there is no shared stdin left
       # for anything to drain.
+      #
+      # 🔴 `\$?` AND `\$rc`, ESCAPED (fix.md F60). Unescaped, this argument is
+      # a double-quoted string in the RUNNER's bash, so the runner expanded both
+      # before SSM ever saw them: `$?` became the runner's own last status (0) and
+      # `$rc` became empty, sending
+      #   ... sh /tmp/comrade-deploy.sh <sha>; rc=0; rm -f /tmp/...; exit
+      # to the host. A bare `exit` exits with the status of the PRECEDING command
+      # - the `rm` - so every failed release reported Success. Same class as F58,
+      # reintroduced by the fix for it.
+      #
+      # $GITHUB_SHA is deliberately NOT escaped: that one must expand here.
       - name: Deploy exact commit through SSM
         env:
           INSTANCE_ID: i-0e5e97d751ffbd262
@@ -53,7 +64,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "Deploy Comrade $GITHUB_SHA" \
-            --parameters "commands=[\"cd /opt/comrade && git fetch --depth=1 origin $GITHUB_SHA && git show $GITHUB_SHA:scripts/deploy_host.sh > /tmp/comrade-deploy.sh && sh /tmp/comrade-deploy.sh $GITHUB_SHA; rc=$?; rm -f /tmp/comrade-deploy.sh; exit $rc\"]" \
+            --parameters "commands=[\"cd /opt/comrade && git fetch --depth=1 origin $GITHUB_SHA && git show $GITHUB_SHA:scripts/deploy_host.sh > /tmp/comrade-deploy.sh && sh /tmp/comrade-deploy.sh $GITHUB_SHA; rc=\$?; rm -f /tmp/comrade-deploy.sh; exit \$rc\"]" \
             --query 'Command.CommandId' --output text)
           # SSM's built-in waiter gives a Docker build only ~100 seconds.
           # The host build routinely exceeds that, so wait for its real terminal state.

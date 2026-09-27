@@ -522,6 +522,23 @@ def test_connecting_a_repo_eventually_makes_it_visible_to_the_agent(
     # code, which is the entire reason this one exists.
     from pipeline.worker import run_once, tick
 
+    # Exercise repository discovery/claim/clone, not other local teams' chat
+    # compiles. Their backlog can exhaust the bounded drain (and spend money).
+    from pipeline import worker
+    due = worker._due
+    monkeypatch.setattr(worker, "_due", lambda name, seconds: name == "workspace" and due(name, seconds))
+    monkeypatch.setattr(worker, "_fail_expired_leases", lambda: None)
+    assert "where ((status" in worker._CLAIM_SQL
+    monkeypatch.setattr(worker, "_CLAIM_SQL", worker._CLAIM_SQL.replace(
+        "where ((status", f"where team_id='{TEAM_A}' and ((status", 1,
+    ))
+    enqueue = enqueue_sync
+    monkeypatch.setattr("pipeline.repo_sync.enqueue_sync", lambda team, repo:
+                        enqueue(team, repo) if team == TEAM_A else None)
+    foreign_before = admin.execute(
+        "select id, status, attempts from public.jobs where team_id <> %s order by id",
+        (TEAM_A,),
+    ).fetchall()
     tick()
     # BOUNDED. run_once returns True for a job it re-queued after a transient
     # failure, so `while run_once(): pass` only terminates if every failure
@@ -533,6 +550,10 @@ def test_connecting_a_repo_eventually_makes_it_visible_to_the_agent(
 
     assert connected_repo(TEAM_A, A1) == "acme/app"
     assert (repo_checkout(TEAM_A, "acme/app") / "app.py").exists()
+    assert admin.execute(
+        "select id, status, attempts from public.jobs where team_id <> %s order by id",
+        (TEAM_A,),
+    ).fetchall() == foreign_before
 
 
 def test_a_fresh_checkout_is_not_re_cloned_every_tick(
@@ -549,7 +570,7 @@ def test_a_fresh_checkout_is_not_re_cloned_every_tick(
         " values (%s,%s, now())",
         (TEAM_A, "acme/app"),
     )
-    assert sweep_stale_checkouts() == []
+    assert f"{TEAM_A}/acme/app" not in sweep_stale_checkouts()
 
 
 def test_a_failing_clone_is_not_retried_at_full_speed(
@@ -574,7 +595,7 @@ def test_a_failing_clone_is_not_retried_at_full_speed(
         (TEAM_A, "acme/broken"),
     )
     # It would be queued right now, with nothing having failed yet.
-    assert sweep_stale_checkouts()
+    assert f"{TEAM_A}/acme/broken" in sweep_stale_checkouts()
 
     admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))
     admin.execute(
@@ -583,7 +604,7 @@ def test_a_failing_clone_is_not_retried_at_full_speed(
         " values (%s,'sync_repo',%s,%s,'failed','no credential', now())",
         (TEAM_A, Json({"repo_full_name": "acme/broken"}), "acme/broken"),
     )
-    assert sweep_stale_checkouts() == [], "a just-failed clone was retried immediately"
+    assert f"{TEAM_A}/acme/broken" not in sweep_stale_checkouts(), "a just-failed clone was retried immediately"
 
     # And it IS retried once the backoff has passed — a reconciler that gives
     # up permanently is not a reconciler.
@@ -592,5 +613,5 @@ def test_a_failing_clone_is_not_retried_at_full_speed(
         " where team_id=%s",
         (SYNC_RETRY_BACKOFF_SECONDS + 60, TEAM_A),
     )
-    assert sweep_stale_checkouts(), "the clone was never retried after the backoff"
+    assert f"{TEAM_A}/acme/broken" in sweep_stale_checkouts(), "the clone was never retried after the backoff"
     admin.execute("delete from public.jobs where team_id=%s", (TEAM_A,))

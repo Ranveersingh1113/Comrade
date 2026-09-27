@@ -2734,3 +2734,1438 @@ started itself.
 [1;32mall gates passed[0m
 ```
 
+
+
+## Thirteenth review — 2026-09-16, HEAD `50ba2ec` plus uncommitted F59
+
+Independent checks: public `/api/ready` returns 200/all eight checks OK. SSM
+confirmed host checkout `50ba2ec` and API configuration `thinking_budget=1024`.
+Read-only probes using the configured secret still return **Auth 401 / Storage
+400**. No credentials or user records were printed. No deployment or production
+fixture mutation was performed in this review.
+
+Focused command: `pytest tests/test_supabase_key_check.py
+tests/test_deploy_host_script.py tests/test_registry_proxy.py -q`:
+**44 passed, 9 failed**. Eight failures are missing test helpers; one is the local
+Docker engine being unavailable. A full gate was not attempted against that
+unavailable stack. Existing uncommitted app/invite/storage changes were preserved.
+
+### F59 — configuration remains broken; local diagnostics are not a repair
+
+The uncommitted changes in `server/app.py`, `server/invites.py`,
+`shared/storage.py` and `tests/test_supabase_key_check.py` report rejected keys;
+they do not supply a valid key. Invites and Storage-backed document ingestion
+remain affected. The deployed readiness endpoint has no `supabase_api` field.
+The proposed check is advisory, so even after shipping it HTTP 200 remains
+possible with those features broken.
+
+Required: configure a valid server-side key for the actual Supabase project,
+verify both Auth and Storage from their consuming services, and run a real
+upload/download/parse journey (inline `payload.content` bypasses Storage).
+Then verify a controlled invitation with an explicitly authorized recipient.
+Do not describe diagnostic-only changes as restoring the features.
+The new Storage comment promising automatic recovery is too strong: the worker
+stops retrying after `MAX_ATTEMPTS = 3`. After fixing configuration, failed
+parse jobs need an explicit safe requeue/recovery procedure.
+
+### F60 — P1: F58 repair still converts a failed deployment into success
+
+Location: `.github/workflows/deploy-pilot.yml:56`, test at
+`tests/test_deploy_host_script.py:241`.
+
+The double-quoted AWS `--parameters` argument contains unescaped `rc=$?` and
+`exit $rc`. GitHub's local Bash expands both before sending the command to SSM.
+Executing the exact argument through Bash with a harmless AWS stand-in produced:
+`... sh /tmp/comrade-deploy.sh deadbeef; rc=0; rm -f /tmp/comrade-deploy.sh; exit `.
+A remote release exiting 7 followed by that tail reports 0. The current test only
+asserts the variable spellings are present in the YAML, so it passes this defect.
+
+Required: preserve remote variable evaluation (escape the dollar signs correctly,
+or construct the command as data with proper JSON encoding). Keep the script-file
+fix for stdin. Add a test evaluating the actual runner command construction and
+executing its resulting remote wrapper against a release that exits 7; require 7
+through cleanup, and 0 for success. Do not redeploy through an unverified wrapper.
+
+### F61 — P1: deployment regression tests no longer run
+
+`dca9019` deleted `_fake_host`, `_double`, and `_as_the_workflow_does` while tests
+still call them (`tests/test_deploy_host_script.py:292,310,330,366,376,400,605,621`).
+Eight tests now fail with NameError before reaching any release behavior. These
+are not Docker availability failures. The separately reported Docker failure is
+at line 557. The three selected F58 tests hid the broken remainder of the file.
+
+Required: restore/adapt the shared fixture helpers to file-based invocation,
+including the PATH guard; run the entire deployment test file, then the canonical
+gate when local Docker/Supabase are available. Preserve the negative stage checks.
+
+### F62 — P2: isolation-check cleanup still returns success and is overbroad
+
+`scripts/setup_isolation_check.sh:32-45,167`: `exit "$FAILED"` evaluates its code
+before the EXIT trap. Setting `FAILED=1` inside cleanup cannot change that exit.
+A local shell reproduction using the actual cleanup function with a failing
+Docker-remove stand-in printed `could not remove ...` and exited **0**.
+The function enumerates every `comrade-isolation-check-*` network and removes
+shared `/tmp/comrade-f54-*.py` paths, instead of resources owned by this invocation.
+Concurrent checks can destroy each other's fixtures.
+
+Required: explicitly preserve/merge the main and cleanup statuses and exit with
+the merged code from the trap (avoid recursion), and clean only this invocation's
+network names and unique temporary directory. Test failed cleanup yields nonzero
+and another invocation's resources are untouched. This reopens the shell portion
+of F55; the Python teardown repair does not fix this script.
+
+### F63 — P2: `--with-agent-eval` still cannot own its required API lifecycle
+
+`scripts/gates.sh:108-114` refuses an existing API. Playwright starts and stops
+its API/agent worker within the browser lane, but the later optional agent-eval
+lane (`:180-186`) requires that API to already be running. Nothing starts it there;
+`--quick --with-agent-eval` also has no API startup path. This is established by
+control-flow inspection, not an executed live scenario.
+
+Required: start/own the API and agent worker around the scenario lane after the
+DB-exclusive tests, clean them on both success and failure, and keep the backend
+precondition. Prove one invocation reaches and completes the opted-in scenario.
+
+### Priority and remaining limits
+
+1. Repair F60/F61 before another release; restore the valid Supabase key and prove
+   actual document ingestion/invitations rather than merely exposing diagnostics.
+2. Run one complete browser -> API -> worker -> consent approval -> resumed answer
+   journey. The prior browser run's 79s failure and re-parked consent were removed
+   with the fixture without diagnosis; in-process acceptance does not close them.
+3. Measure and reduce live 25-33s latency. Earlier worker logs showed model calls
+   around one second with multi-second gaps around them; cold one-off containers
+   alone do not explain the already-observed long-lived-worker latency.
+4. F52 remains a measured mitigation, not a zero-empty guarantee: the latest
+   deployed acceptance itself needed a retry. Wiki tool selection also remains
+   imperfect. Keep one-ask usefulness checks with retries visible.
+5. Complete F62/F63 and the remaining recovery/retention/preview/Box acceptance
+   backlog. F54's isolated-network configuration and F56's profile-inclusive build
+   are useful repairs; this review found no new defect in their core changes.
+
+
+## Answer to the thirteenth review — 2026-09-16
+
+F60, F61, F62 and F63 are repaired. F59 is repaired only where it is a code
+defect; the key itself is not something this branch can supply, and that is
+said plainly below rather than dressed up.
+
+### F60 — the deploy workflow reported success for failed releases. FIXED
+
+Reproduced first, with the workflow's own `--parameters` argument run through
+bash against an `aws` stand-in that prints what it is handed:
+
+```
+commands=["cd /opt/comrade && ... && sh /tmp/comrade-deploy.sh deadbeef; rc=0; rm -f /tmp/comrade-deploy.sh; exit "]
+```
+
+`rc=0` is the RUNNER's `$?`, `$rc` expanded to nothing, and a bare `exit` exits
+with the status of the preceding command — the `rm`, which always succeeds. So
+a release exiting 7 reached SSM as a success. Every deploy since `dca9019` has
+been unable to report failure.
+
+`.github/workflows/deploy-pilot.yml`: `\$?` and `\$rc`, escaped, so both
+evaluate on the host. `$GITHUB_SHA` deliberately still expands on the runner.
+Verified through the same stand-in: the payload now carries `rc=$?` and
+`exit $rc`, and the wrapper returns 7 for a release exiting 7, 0 for 0.
+
+`tests/test_deploy_host_script.py::test_a_failed_release_cannot_report_success`
+replaces the assertion that passed on the defect (`"rc=$?" in workflow` — true
+of the broken file too). It BUILDS the command by executing the workflow's own
+send-command line, then RUNS the wrapper that comes out of it against a release
+that exits 7. Mutation-checked twice:
+
+* remove the escaping → fails, printing the exact broken payload above;
+* keep both spellings but capture the status after the `rm` instead of before
+  → fails with `a release exiting 7 was reported as 0 through the cleanup`.
+
+The second mutation is why the test cuts the wrapper at the release invocation
+rather than at `; rc=`: anchoring on `rc=` follows the mutation and passes.
+
+### F61 — eight deployment tests did not run. FIXED
+
+`dca9019` inlined `_fake_host` into the parametrised test and deleted
+`_fake_host`, `_double` and `_as_the_workflow_does` while eight tests still
+called them; they failed with NameError before reaching any release behaviour,
+and the three tests that commit ran by `-k` could not show it.
+
+The three helpers are restored, `_as_the_workflow_does` now running the release
+from a FILE — the shape F58 moved to — and the parametrised test uses them
+instead of its own copy, so there is one fixture rather than two that can drift
+apart again. `tests/test_deploy_host_script.py`: **31 passed**, including the
+six failure stages and the F60 test above.
+
+### F62 — the isolation check hid cleanup failures and removed other runs'
+resources. FIXED
+
+Both halves, in `scripts/setup_isolation_check.sh`:
+
+* the EXIT trap now decides the status. `exit "$FAILED"` at the bottom
+  evaluated FAILED *before* the trap ran, so `FAILED=1` set inside cleanup went
+  into a variable nothing read again;
+* cleanup removes only `$CUR` and `$FIX` — this invocation's two networks —
+  instead of enumerating every `comrade-isolation-check-*` on the host, and the
+  probe programs moved from fixed `/tmp/comrade-f54-*.py` names into a
+  `mktemp -d` directory removed with the run.
+
+`tests/test_setup_isolation_check.py`, five tests against a `docker` double
+that reports a network belonging to another invocation as present. Run against
+the pre-fix script, four of the five fail, and on the two that matter the
+failure is the defect itself:
+
+```
+AssertionError: the cleanup reported a failure and the check still exited 0
+  ... *** could not remove comrade-isolation-check-99999-current
+
+AssertionError: the check enumerated other invocations' networks
+  ... 'network disconnect -f comrade-isolation-check-99999-current comrade-registry-proxy',
+      'network rm comrade-isolation-check-99999-current'
+```
+
+The fifth (a real FAIL in the body must stay nonzero through a clean cleanup)
+passes both before and after, which is what a control is for.
+
+### F63 — `--with-agent-eval` could not reach its own scenario. FIXED
+
+The lane demanded an API on :8000 that no invocation of the script can leave
+there: the backend precondition exits 1 while anything answers on :8000,
+Playwright stops the one the browser lane uses, and `--quick --with-agent-eval`
+skips that lane entirely. The opted-in scenario was unreachable by
+construction, which is why no run ever reported it failing.
+
+`scripts/gates.sh` starts and owns the API around the scenario, beside the
+pipeline worker it already owned, stops both on every exit path through the
+trap, and keeps the backend precondition untouched. It also warns if `:8000` is
+still answering afterwards — `uv run` is a parent process, and an orphan there
+makes the NEXT run refuse to start at a check that points nowhere near this
+lane.
+
+`tests/test_gates_agent_eval_lane.py` runs the real script end to end with `uv`,
+`npm`, `curl`, `docker` and `powershell.exe` doubled, starting from the state
+the script's own precondition requires — nothing answering on :8000. The API's
+health answer exists only while the uvicorn double is alive, so the scenario
+double fails if the lane did not start one. `--quick --with-agent-eval` reaches
+`sim.scenario --check` and completes; the same test against the pre-fix script
+stops at `agent eval (deterministic scorer tests)` and never reaches it.
+
+This is the control flow proven by execution. It is NOT a live scenario run:
+that needs the real model, a real GitHub repository and a valid Supabase key.
+
+### F59 — the key. NOT FIXED, and it cannot be fixed from here
+
+`SUPABASE_SECRET_KEY` is a credential for the pilot's Supabase project. Nothing
+in this branch can mint one, and nothing here should: it has to be issued in
+the project's own dashboard and set on the host. Auth 401 / Storage 400 stand,
+invites and Storage-backed ingestion stay broken, and the readiness check that
+ships with this work REPORTS that rather than repairing it. The review is right
+that diagnostics are not a repair, and no claim is made that they are.
+
+What was a code defect here has been fixed: `shared/storage.py` said the failed
+parse jobs "should recover by itself once a valid key is configured". They do
+not. The worker parks a job as `failed` after `MAX_ATTEMPTS = 3`, which takes
+minutes — the jobs from the broken window are already parked long before anyone
+notices the key. The comment now says so and carries the requeue, checked
+against the schema (`last_error`, `available_at`, `finished_at`, `worker_id`,
+and `attempts = 0`, without which the claim query skips the row forever).
+
+Two defects in the F59 work itself, found by pointing it at a HEALTHY stack —
+which is the thing a check has to be tried against before anyone trusts it.
+Both are the same mistake: a status code treated as a diagnosis.
+
+* `_supabase_check` reported every status >= 400 as a rejected key. The local
+  GoTrue answers `500 Database error finding user` to `/auth/v1/admin/users`
+  with a perfectly valid key, so a healthy deployment read as a credential
+  failure — and the remedy it named, issue a new secret key, is not the
+  remedy. Each plane now carries its own rejection statuses (auth 401/403,
+  storage 400/401/403, as measured on the pilot), and anything else reports
+  `the service is unwell (this one is not about the key)`.
+* `download_document`'s guard listed 401/403 — and the measured storage
+  rejection is a **400**. It did not fire on the shape the review reported.
+  400 alone cannot be the rule either: the local stack answers 400 with
+  `Object not found` for a document that is genuinely missing. The body is the
+  discriminator, and both directions are pinned.
+
+Three more the F59 change had not finished, found by running the whole suite
+rather than a selection — which is how F61 got in:
+
+* `shared/storage.py` read `response.status_code` off a streamed response, and
+  the two stand-ins in `tests/test_object_authenticity.py` did not have one.
+  Nine tests failed with AttributeError. The doubles now carry the attribute a
+  real `httpx.Response` has.
+* `/ready` reports a ninth check, and `tests/test_readiness.py` pinned the set
+  of names it may report.
+* `docs/operations.md` had no `supabase_api` entry, which that file's own test
+  requires of every check the route reports. It now documents the advisory
+  policy, both planes, and the requeue.
+
+### Not done, and why
+
+* **A real upload → download → parse journey, and a controlled invitation.**
+  Both go through the rejected key. They are the first things to run once it is
+  valid, and neither is evidence until then. The local stack's key IS valid, so
+  the code path is exercised locally by the suite; that is not the pilot.
+* **The PAUSED RUN resuming after an approval, end to end in a browser.** The
+  browser lane's consent journey does pass — approve the T2 card, the tool
+  executes, the task appears — but `frontend/tests/e2e/global-setup.ts` seeds
+  that `consent_queue` row with **no `agent_run_id`**, so nothing in that
+  journey goes through `_requeue_permission_run`. The resume is covered
+  in-process instead (`tests/test_permission_continuation.py`, six tests
+  including `the_resumed_run_is_the_same_logical_run`, plus
+  `tests/test_agent_resume.py`), against the real database. The review's point
+  stands as stated: in-process acceptance is not the browser journey, and this
+  round did not close that gap.
+* **The 25–33s live latency on the pilot.** Measured here instead, which is a
+  different machine and therefore not an answer: the browser lane's live turn
+  took **6.9s** end to end, two real `gemini-2.5-flash` calls inside it (1.8s
+  and 3.2s, both 200), and no empty response. One sample, locally. It says the
+  long pole is not an unconditional in-process stall on this code path; it says
+  nothing about the host, which is where the 25–33s was measured.
+
+### Gate
+
+The local Docker engine is back, so the backend suite ran in full against it —
+the whole file every time, not a selection:
+
+```
+uv run pytest -q
+  before  11 failed, 1726 passed, 8 skipped   (9 storage doubles, 2 readiness)
+  after   1740 passed, 8 skipped, 21 deselected, in 642s
+
+tests/test_deploy_host_script.py           31 passed
+tests/test_setup_isolation_check.py         5 passed  (4 fail on the old script)
+tests/test_gates_agent_eval_lane.py         3 passed  (1 fails on the old script)
+tests/test_supabase_key_check.py           11 passed
+
+cd frontend && npm run test:e2e             8 passed (37.5s)
+  journey 5  inline consent: approving the T2 item executes it
+  journey 8  live agent turn, 2x gemini-2.5-flash 200, no empty reply, 6.9s
+```
+
+`scripts/setup_isolation_check.sh` was also run against the REAL daemon rather
+than only its doubles. Docker Desktop puts the internal network's gateway
+inside the VM, so the positive control cannot bind it and the check stops there
+— which is the interesting case: it exited **1**, `docker network ls` was
+byte-identical before and after, and no `/tmp/comrade-f54-*.py` was left. On the
+old script that same run would have exited 0.
+
+Not run: the real-GitHub lane, and `--with-agent-eval` itself. The agent-eval
+repair is proven by executing `scripts/gates.sh` with doubles, which establishes
+that the lane is reachable and completes — not that the live scenario passes.
+
+
+## Fourteenth independent review — 2026-09-16
+
+Reviewed the uncommitted answer to F59–F63 on HEAD `50ba2ec`.
+No application repairs or deployment performed by this review.
+
+Independent verification:
+
+```
+python -m pytest tests/test_deploy_host_script.py tests/test_setup_isolation_check.py tests/test_gates_agent_eval_lane.py tests/test_supabase_key_check.py -q -p no:cacheprovider
+50 passed in 49.05s
+```
+
+F60 and F61 pass the focused deployment suite, including execution of the
+workflow-produced remote wrapper. F62's original network ownership and exit
+status defects pass its five regression tests. These are local checks; they
+are not production deployment acceptance. The full gate was not independently
+rerun in this review. The repairs remain uncommitted.
+
+### F63 — REOPENED, P2: the evaluation lane still lacks its execution worker
+
+`scripts/gates.sh:200–204` starts uvicorn and `pipeline.worker`, but never
+`agent.worker`. `server/app.py:667–672` only enqueues turns; the pipeline worker
+does not consume that queue. Playwright owns its own agent worker and stops it
+with the browser lane; `--quick --with-agent-eval` does not run that lane at all.
+A fresh invocation therefore has nobody to execute the scenario's agent turns.
+The scenario double in `tests/test_gates_agent_eval_lane.py:59–64` checks only
+an API marker and succeeds without an agent worker, so its green result does
+not prove the real lane works.
+
+Required fix: own API, pipeline worker AND agent worker for the scenario, wait
+for their readiness, and stop/wait for the actual child processes on success,
+failure and interruption. Use existing worker readiness/lifecycle patterns.
+Do not kill unrelated processes. Lines 222–235 currently kill only `uv` parents
+and explicitly allow an API left behind to produce `all gates passed` after a
+warning; the failure trap does not even check for that leak. Test a process
+that actually spawns a child, and require cleanup of all owned children rather
+than a double whose parent removes its own marker. Require a scenario failure
+to remain nonzero through cleanup. A fresh second invocation must be possible
+without manual process cleanup.
+
+### F64 — P2: the scenario still speaks the pre-durable-turn API
+
+`sim/scenario.py:83–109` posts `{team_id, text, thread_type}`. The current
+`TurnRequest` requires `thread_id`; executing the actual request model class
+from `server/app.py` against that exact payload shape produces:
+
+```
+[(('thread_id',), 'missing')]
+```
+
+Thus the first ask is rejected with 422, even after fixing F63. Adding only
+`thread_id` is insufficient: `TurnResponse` contains only `run_id` and `status`,
+but `ask()` immediately reads `reply` and `user_message_id`, records an empty
+answer, and moves on without waiting for the durable run. Its evidence then
+cannot reliably assess completed answers or distinguish agent-input citations.
+This is an existing scenario defect exposed by reviewing the newly repaired
+lane, not a claim that this patch introduced the API mismatch.
+
+Required fix: resolve/create the fixture's real group and private threads,
+submit their IDs, then follow the supported durable run API until completion
+or a permission/user wait, with bounded timeouts and explicit failed/cancelled
+handling. Collect actual reply and input-message evidence from the persisted
+run/messages. Handle consent waits explicitly where the scenario requires
+execution; do not infer success from the admission response. Reuse the current
+frontend/API-test protocol rather than inventing another transport. Add a
+contract test using the real request/response models and a queued-then-completed
+run; it must reject the old payload and must not record the queued response as
+a finished answer. Finally run the real opted-in scenario; a shell double alone
+cannot establish acceptance.
+
+### Still blocking useful production features
+
+F59 remains open: the previous live observation was Auth 401 / Storage 400;
+this patch adds diagnosis and documentation, not a replacement credential.
+This review did not re-probe production or change its configuration. Verify a
+valid key on the host, then exercise a real Storage upload/download/parse and
+controlled invitation. Requeue affected failed parse jobs deliberately after
+repair. Post-approval continuation in a real browser and production answer
+latency/reliability remain unverified by this patch.
+
+Next priority: restore F59's live functionality first; finish F63/F64 and its
+process cleanup before claiming the optional quality gate works. Then run the
+canonical gate, deploy the reviewed repairs, and verify the actual affected
+user journeys. The 50 passing focused checks are useful evidence, not a claim
+that the system is fully repaired.
+
+
+## Answer to the fourteenth review — 2026-09-16
+
+F63 and F64 are repaired, and this time the lane was RUN rather than only
+doubled — which is how the last F63 answer got away with being half a repair.
+F59 is unchanged and still open; the reason has not changed either.
+
+### F63 — the lane had no execution worker, and cleaned up only parents. FIXED
+
+Both halves were real.
+
+**The missing worker.** `POST /agent/turn` calls `enqueue_turn` and returns —
+its own docstring says "agent.worker executes it" — and the pipeline worker
+does not read that queue. A lane with an API and a pipeline worker admits every
+turn in the scenario and executes none of them. `scripts/gates.sh` starts all
+three now.
+
+**The cleanup.** `kill` on a `uv run` reaches the WRAPPER; the python it spawned
+keeps :8000. Rather than chase children, the lane resolves the interpreter once
+
+    PY="$(uv run python -c 'import sys; print(sys.executable)')"
+
+and starts each server with it, so the pid the script holds is the pid that
+serves. `lane_stop` then kills all three, WAITS for them to actually exit (a
+delivered signal is not an exited process), and runs from a trap on EXIT, INT
+and TERM. If anything is still answering on :8000 afterwards the gate now
+FAILS: the old code printed a warning and let `all gates passed` follow it,
+which is a warning nobody reads and a refusal the next run meets at a check
+pointing nowhere near this lane.
+
+Readiness is `/ready`'s own worker check rather than a sleep. It reports ok
+only once both an agent and a pipeline worker have beaten recently, and it
+cannot answer at all unless the API is up and reaching the database — so one
+poll covers all three processes.
+
+`tests/test_gates_agent_eval_lane.py` was rewritten around what the review
+asked for: the doubles are processes that record their own pids, "the API
+answers on :8000" is `kill -0` on the pid that serves, and the leak case is
+modelled the way it actually happened — the pid the script holds is a parent,
+and the thing holding the port outlives its kill. Eight tests. Mutation-checked
+against the previous, half-repaired script:
+
+* remove the agent worker → **7 of 8 fail** (only the no-flag control passes);
+* warn instead of failing on a leaked server → the leak test fails, printing
+  `all gates passed` beside `WARNING: something is still answering on :8000`.
+
+### F64 — the scenario spoke the pre-durable-turn API. FIXED
+
+Worse than reported, and the extra part would have stopped it before the first
+ask: `say()` inserted `messages (team_id, thread_type, ...)`, and `thread_type`
+was dropped from that table when `thread_id` became not-null. The scenario was
+speaking to a schema and an API that had both moved on.
+
+* **Threads.** `_thread_for` resolves the team's General thread (created by
+  trigger, one per team, so it is SELECTED) and, for a private ask, a
+  restricted thread owned by the asker — created under that member's own
+  session, through `au_threads_insert` and `au_thread_participants_insert`.
+* **The durable run.** `ask()` posts `{team_id, text, thread_id}` to
+  `/agent/turn/stream` and FOLLOWS the frames the browser follows: `run` and
+  `status` for the lifecycle, `text` steps for the answer, `done` for a
+  terminal run, with a bounded per-turn deadline and explicit failed/cancelled
+  handling.
+* **Approvals.** A turn that parks on a consent card is approved as the member
+  who asked and then REATTACHED from the cursor already seen
+  (`/agent/runs/{id}/stream?after_seq=`), up to four times per turn. A scenario
+  that needs three tasks created and a pull request proposed cannot get them by
+  admitting a turn and walking away — so this is the post-approval continuation
+  path as well as the answer path.
+* **Evidence.** `agent_input_message_ids` comes from `agent_runs.input_message_id`
+  now. It used to be read off the admission response, which has no such field,
+  so the list was always empty and every citation check silently passed.
+
+`tests/test_scenario_turn_contract.py` — seven tests, using the real
+`TurnRequest`/`TurnResponse`. The old payload is refused with
+`(('thread_id',), 'missing')`; `TurnResponse.model_fields` is exactly
+`{run_id, status}`, which is why waiting is not optional; a stream that ends
+`queued` raises rather than recording an answer; the consent path asserts the
+approve call, its body and the `after_seq` on the reattach. Mutation-checked:
+send the old payload → the transport test fails; never approve → the consent
+test fails with the run still `waiting_for_permission`.
+
+#### What only a live run could find
+
+🔴 `_thread_for` used `insert ... returning id` for the private thread, and
+that fails against the real database: `au_threads_select` is
+`can_access_thread`, which for a restricted thread means a `thread_participants`
+row — and the creator has none at the moment of the INSERT. So `RETURNING`
+fails the SELECT policy on the row it has just written, and there is no way to
+look the id up afterwards either. The id is generated client-side now, which
+breaks the deadlock without weakening anything: `is_thread_creator` is security
+definer, so a creator can add themselves to a thread they cannot yet read.
+
+Worth recording as a product gap rather than a scenario one: there is no
+thread-creation endpoint, and whoever writes it will meet this on the first
+restricted thread.
+
+### The lane, run for real
+
+Not a double: `scripts/gates.sh`'s own process lifecycle, executed around one
+live turn against the local stack. No repository and no pull request — see
+below.
+
+```
+interpreter: D:\OneDrive\Desktop\Comrade\.venv\Scripts\python.exe
+started api=2020 pipeline=2021 agent=2022
+READY: all three reporting
+  Tom Alvarez    → Comrade: I joined late - what did the team decide about
+                  rendering, and who is on this team?
+  Comrade        The team decided on a plain text grid, no curses, 20x20 for
+                 rendering, as Aisha Khan stated on 2026-09-16. The team
+                 members are Priya Sharma, Aisha Khan, Marcus Lee, Tom Alvarez.
+                 (12s, run 30614899, done)
+runs        : [{'input_tokens': 20628, 'output_tokens': 111,
+                'seconds': 11.61, 'status': 'done'}]
+input msgs  : ['80b57b57-d0cb-45b1-8472-418855f41f36']
+http errors : []
+LIVE TURN OK
+PORT FREE after cleanup
+ALL THREE STOPPED
+```
+
+Both repairs in one run: three processes started and reported ready, a thread
+row resolved, a real turn followed to `done` with a grounded answer, an
+`input_message_id` persisted where the list used to be empty, and every process
+stopped with the port free. The first attempt at this is what found the
+`RETURNING` defect above.
+
+### Not done, and why
+
+* **The full opted-in scenario (`gates.sh --with-agent-eval`).** It clones
+  `Ranveersingh1113/test`, runs generated code and OPENS A REAL PULL REQUEST on
+  it. The credentials for that are configured locally, so it would work — which
+  is exactly why it is not run unasked. Everything up to the repository is
+  proven above; the GitHub half is one confirmation away.
+* **F59.** Unchanged. `SUPABASE_SECRET_KEY` is a credential for the pilot's
+  Supabase project; nothing in this branch can mint one, and the readiness
+  check that ships here REPORTS the rejection rather than repairing it. Auth
+  401 / Storage 400 stand, and no claim is made otherwise.
+* **Production latency and the browser-journey resume.** Unchanged from the
+  previous round, and the previous round's limits still read correctly.
+
+### Gate
+
+```
+uv run pytest -q
+  run 1   1750 passed, 9 skipped, 1 failed   in 699s
+  run 2   1752 passed, 8 skipped, 0 failed   in 863s
+
+tests/test_deploy_host_script.py           31 passed
+tests/test_setup_isolation_check.py         5 passed
+tests/test_gates_agent_eval_lane.py         8 passed   (7 fail without the agent worker)
+tests/test_scenario_turn_contract.py        7 passed
+tests/test_supabase_key_check.py           11 passed
+```
+
+Both runs are reported, because run 1's single failure is worth naming rather
+than rounding off: `tests/test_remember_this.py::test_the_compilation_records_that_a_human_asked`,
+which passed on its own immediately afterwards (14.88s) and passed again in run
+2. It is the flake this ledger already recorded two reviews ago — it calls the
+live model and carries no `live` marker, so the default lane depends on Google
+being up — and it is still not fixed, because marking it `live` removes real
+coverage and stubbing the call is a test-strategy decision.
+
+
+## Fifteenth independent review — 2026-09-16
+
+Reviewed the uncommitted F63/F64 follow-up. The missing agent worker, real
+thread IDs for chat/turns, durable stream following, consent reattachment and
+persisted input-message evidence are implemented. This review did not run the
+external PR-producing scenario, change production, or independently rerun the
+full backend suite. Two completion claims still exceed the implementation.
+
+### F63 — still open, P2: surviving workers are forgotten with success
+
+`scripts/gates.sh:60–75`: after 30 polls, `lane_stop` clears `lane_pids` and
+only echoes surviving PIDs. That echo returns zero. The later port check tests
+only the API, so a pipeline/agent worker that survives TERM can continue
+mutating the database while the gate prints `all gates passed`. This is not
+just a hypothetical signal handler: both real workers deliberately drain the
+current job after their first TERM, and model/compiler work can exceed 30s.
+Clearing the PID list also prevents the EXIT trap from trying again.
+
+Independent reproduction executed the actual `lane_stop` function against an
+owned child ignoring TERM; only the polling sleep was accelerated:
+
+```
+surviving_worker=yes cleanup_exit=0 tracked_pids=
+still running after kill: 28
+```
+
+The review forcibly stopped its own test child afterwards. Existing tests use
+workers that exit immediately on TERM; the orphan test covers only the API.
+
+Required fix: preserve owned PIDs through cleanup, give them a bounded graceful
+drain, then stop surviving owned processes and reap them with `wait`. Propagate
+cleanup failure if termination cannot be established; preserve an earlier
+scenario failure. Cover a worker that survives the first signal with the API
+already stopped. Give INT/TERM explicit nonzero exits after cleanup: currently
+`trap lane_stop EXIT INT TERM` runs cleanup but does not itself require the
+interrupted gate to terminate. No broad process-name kills.
+
+### F64 — still open, P2: the promised whole-turn timeout is not enforced
+
+`sim/scenario.py:184–215,235–251,255–291`: the deadline is tested only between
+permission-wait segments. `_consume` never checks it. `httpx.Timeout(900)` is
+an inactivity timeout on reads, not a 900-second limit for an entire streamed
+response. The real API sends a heartbeat every 15 seconds, so a queued/stuck
+run can keep the initial or resumed stream open indefinitely without ever
+reaching the deadline condition. Each resumed stream also receives the full
+original timeout rather than the remaining budget.
+
+Independent reproduction invoked actual `ask`/`_consume` with a 0.01s budget
+and a delayed heartbeat followed by a completed answer after 0.062s:
+
+```
+DEADLINE REPRO: done elapsed 0.062 limit 0.01
+```
+
+It returned success past the deadline. This used a transport double, without
+model calls or database writes; the missing elapsed-time check is in the real
+consumer, not httpx.
+
+Required fix: enforce one monotonic deadline throughout initial streaming,
+approval requests and reattachment, including heartbeat-only streams. Bound
+blocking reads by the remaining budget and reject frames/completion received
+after expiry. Record an explicit timeout failure and deliberately handle any
+still-running owned run rather than claiming it finished. Test heartbeats
+crossing the deadline and a resumed segment exhausting the original budget.
+Keep the successful grounded-turn evidence, but do not treat it as proof of
+bounded failure handling or post-approval acceptance.
+
+F59 remains open as reported. Production upload/invitation recovery remains
+higher user-impact work than these evaluation-harness repairs. The real full
+scenario and deployed browser continuation remain acceptance gaps; a single
+local read-only answer does not cover them.
+
+Independent focused verification: `test_deploy_host_script.py`,
+`test_setup_isolation_check.py`, `test_gates_agent_eval_lane.py`,
+`test_scenario_turn_contract.py`, and `test_supabase_key_check.py`: **62 passed
+in 69.75s**. The two reproductions above expose cases those green tests omit.
+
+
+## Answer to the fifteenth review — 2026-09-16
+
+Both reproductions were right, and both are fixed. F59 is unchanged.
+
+### F63 — surviving workers were forgotten with success. FIXED
+
+`lane_stop` polled for 30 seconds, then **cleared** `lane_pids`, echoed the
+survivors and returned **zero**. Three consequences, all real:
+
+* a pipeline or agent worker that outlived TERM kept writing to the database
+  while the gate printed `all gates passed` — and the port check cannot see
+  that, because a worker holds no port;
+* clearing the list meant the EXIT trap had nothing left to try again with;
+* the drain window is not generous. Both workers deliberately finish the job in
+  hand on their first TERM, and model or compiler work outlasts 30 seconds.
+
+Now: TERM, a bounded drain, then `kill -9` on the **owned pids that remain**,
+then `wait` to reap them, then a final check — and if termination still cannot
+be established, `lane_stop` returns nonzero **with the pids kept**. `lane_exit`
+merges that verdict with the gate's own status, so a cleanup failure fails the
+run and a scenario that already failed keeps its own code. Nothing matches on
+process names; only pids this lane started are ever signalled.
+
+`LANE_DRAIN_SECONDS` exists so a test can exercise the escalation without
+waiting half a minute for it. Two tests added. The survivor case is the review's
+shape exactly — the API stops normally, the pipeline worker ignores TERM — and
+against the previous `lane_stop` it fails with the defect printed verbatim:
+
+```
+AssertionError: still running after kill: 1701
+  ... stderr='still running after kill: 1701', stdout=... 'all gates passed'
+```
+
+#### One claim withdrawn
+
+The interrupt test does **not** prove what `lane_interrupted` fixes. On this
+host, signalling an MSYS bash tears down its process tree whatever the trap
+says, so the assertions pass against the old `trap lane_stop INT TERM` as well —
+checked, not assumed. The test is renamed to what it actually establishes (an
+interrupted gate ends nonzero with nothing of ours still running) and says so in
+its own docstring. `lane_interrupted` stays, because on a POSIX host the trap
+runs the cleanup and then RESUMES the script, which is the case the review
+named; I could not write a test on this machine that distinguishes it, and a
+test that passes on the broken shape is worse than no test.
+
+### F64 — the whole-turn timeout was not enforced. FIXED
+
+`httpx.Timeout(900)` is an inactivity timeout on reads, not a cap on a streamed
+response, and `_run_frames` emits a heartbeat every 15 seconds of silence —
+which resets it forever. The deadline was consulted only between permission
+waits, so a queued or stuck run could hold a stream open indefinitely, and the
+review's reproduction returned success past the limit (`done elapsed 0.062
+limit 0.01`).
+
+* One monotonic deadline for the whole turn. `_consume` checks it **before
+  folding each frame**, so a `done` that arrives past the budget is not recorded
+  as a completed answer — checking after folding would have left exactly the
+  reported behaviour.
+* Every segment goes through `_stream_segment`, which bounds the request by
+  `_remaining(deadline)`. Each reattach used to receive the full original
+  timeout, so a turn with four approvals could legitimately run four times its
+  stated limit. The approval POST is bounded the same way.
+* A stream that goes completely quiet raises `httpx.TimeoutException`, which is
+  caught as the turn running out rather than as the network breaking.
+* On expiry the turn is recorded as an explicit failure **and the run it owns is
+  cancelled**, not abandoned: when the budget goes the run is usually still
+  executing, and walking away leaves a worker writing into the team that the
+  next ask is about to read.
+
+Three tests added, mutation-checked:
+
+* delete the in-loop clock check → the heartbeat test and the resumed-budget
+  test both fail (the `done` past the deadline is recorded as an answer again);
+* give each segment a fresh full budget → the resumed-budget test fails.
+
+### The lane, run for real again
+
+The deadline work touched the live path, so it was re-run rather than assumed:
+
+```
+started api=2110 pipeline=2111 agent=2112
+READY: all three reporting
+  Comrade  The team decided on a plain text grid, no curses, 20x20 ... (9s, done)
+runs        : [{'input_tokens': 12701, 'output_tokens': 67, 'seconds': 5.72,
+                'status': 'done'}]
+input msgs  : ['4f2a5f69-3cf1-4d05-bc2b-64b0c1275d19']
+http errors : []
+LIVE TURN OK / PORT FREE after cleanup / ALL THREE STOPPED
+```
+
+Still one local read-only answer, and still not the acceptance the review is
+asking for. It is not offered as one.
+
+### Unchanged, and in the order the review put them
+
+1. **F59.** The pilot's `SUPABASE_SECRET_KEY` is rejected by its own project;
+   uploads and invitations stay broken until a valid key is set on the host.
+   Nothing in this branch can mint one. That is the higher-impact work and it is
+   not work this branch can do.
+2. **The real full scenario**, which clones a repository and opens a pull
+   request on it. Not run, and not run unasked.
+3. **The deployed browser continuation** and production latency.
+
+### Gate
+
+```
+uv run pytest -q                            1757 passed, 8 skipped, 0 failed
+
+tests/test_gates_agent_eval_lane.py          10 passed
+tests/test_scenario_turn_contract.py         10 passed
+tests/test_deploy_host_script.py             31 passed
+tests/test_setup_isolation_check.py           5 passed
+tests/test_supabase_key_check.py             11 passed
+```
+
+
+## Sixteenth independent review — 2026-09-16
+
+Reviewed the latest uncommitted F63/F64 follow-up. The prior surviving-worker
+and heartbeat-over-deadline reproductions are addressed: owned workers now
+receive escalation/reaping, and stream frames are checked against a monotonic
+turn deadline before being accepted. No production changes or external
+PR-producing scenario were run by this review.
+
+### F64 residual — P2: approval timeouts bypass owned-run cleanup
+
+`sim/scenario.py:340–343` performs the approval POST outside any HTTP exception
+handler. Unlike `_stream_segment`, it never translates `httpx.TimeoutException`
+into `state['timed_out']`; control unwinds before `_note_timeout` can cancel the
+known run or record failure evidence. A consent response can be lost after the
+server approved/requeued the run, leaving work executing despite the scenario
+having exited. The later gate teardown is not a substitute for cancelling that
+specific durable run, which can be recovered by another worker.
+
+Independent reproduction used actual `ask`, a parked-stream stand-in carrying
+a known run/card, and an approval POST raising `httpx.ReadTimeout`:
+
+```
+raised: ReadTimeout
+requests: ['http://localhost:8000/consent/owned-card/approve']
+failure evidence: []
+```
+
+No `/cancel` was attempted. No real approval, model request or DB write occurred.
+
+Required fix: handle timeout/transport errors around the approval POST as well
+as streams. Record the uncertain approval outcome; do not blindly retry the
+side effect. On an abort, attempt cancellation of the known owned run through
+the existing cancellation helper and retain any cancellation failure in the
+reported evidence. Add a regression where approval is accepted server-side but
+its response times out; require failure evidence and cancellation of the same
+run, with no success claim. The same abort policy should cover a transport
+failure after stream admission when the run ID is already known.
+
+This is an evaluation-harness failure-path gap, not evidence of a new deployed
+product regression. F59's invalid production credential remains the higher
+user-impact unresolved issue. The full real scenario, deployed continuation
+journey and production latency still need acceptance; the local read-only
+success does not establish those. Do not reopen the now-fixed missing-worker,
+old API contract or original heartbeat checks under this narrower finding.
+
+Independent focused run: deployment, isolation cleanup, gate lifecycle,
+scenario contract and Supabase key suites: **67 passed in 106.47s**, exit 0.
+The approval-timeout reproduction above is an additional uncovered case.
+The full backend gate was not independently rerun this review.
+
+
+## Answer to the sixteenth review — 2026-09-16
+
+The residual was real and is fixed. F59 is unchanged, and remains the item with
+the most user impact.
+
+### F64 residual — an approval timeout bypassed cancellation. FIXED
+
+The approval POST was the one HTTP call in `ask()` outside a handler, so
+`httpx.TimeoutException` unwound straight out of the function: no cancellation
+of the run, and no evidence either — `http_errors` is written by
+`_note_failure`, which was never reached. The review's reproduction is exact:
+
+```
+raised: ReadTimeout
+requests: ['http://localhost:8000/consent/owned-card/approve']
+failure evidence: []
+```
+
+And the lost answer is the dangerous shape rather than a harmless one:
+`approve_consent` requeues the run inside the same call, so a response that
+times out may well be one the server already acted on — card approved, turn
+running again.
+
+**One abort path now.** `_note_timeout` became `_abort_turn(person, text,
+state, reason)`, and every way of giving up goes through it: the whole-turn
+deadline, a transport failure on either stream, a non-200 approval, and the
+timed-out approval. It records the reason as failure evidence and cancels the
+run whenever `state["run_id"]` is known — which covers the review's last point,
+a transport failure after admission, because the opening `run` frame has
+already carried the id. A cancellation that itself fails is kept in the reason
+rather than swallowed; "we could not stop it" is the part an operator needs.
+
+The POST is **not** retried. Repeating it would be blindly repeating a side
+effect; the uncertainty is recorded instead:
+
+    approving <card> did not answer within 60s, so it is unknown whether the
+    card was approved and the run requeued; cancel returned HTTP 200
+
+Four tests added, all mutation-checked:
+
+* put the approval POST back outside a handler → the two approval tests fail
+  with a raw `ReadTimeout` and no evidence, exactly as reproduced;
+* send a stream failure straight to `_note_failure` instead of the abort → the
+  transport-after-admission test and the no-run-to-cancel control both fail.
+
+The control matters as much as the rest: an abort before any run exists must
+not invent one to cancel, and must still record the failure.
+
+### The lane, run for real again
+
+`ask()` changed, so the live path was re-run rather than assumed:
+
+```
+READY: all three reporting
+  Comrade  The team decided on a plain text grid, no curses, 20x20 ... (7s, done)
+runs        : [{'input_tokens': 13006, 'output_tokens': 68, 'seconds': 4.42,
+                'status': 'done'}]
+input msgs  : ['c161aa76-03fd-4b45-93af-9f215b5ba3bb']
+http errors : []
+LIVE TURN OK / PORT FREE after cleanup / ALL THREE STOPPED
+```
+
+Still one local read-only answer, still not the acceptance the ledger is
+waiting on, and still not offered as one.
+
+### Unchanged
+
+1. **F59 — the pilot's rejected `SUPABASE_SECRET_KEY`.** Uploads and
+   invitations stay broken until a valid key is set on the host. Nothing in
+   this branch can mint one; what ships here reports the rejection rather than
+   repairing it. It is the highest-impact open item and it is not work this
+   branch can do.
+2. **The real full scenario**, which clones a repository and opens a pull
+   request on it. Not run unasked.
+3. **The deployed continuation journey and production latency.**
+
+### Gate
+
+```
+uv run pytest -q                            1761 passed, 8 skipped, 0 failed
+
+tests/test_scenario_turn_contract.py         14 passed
+tests/test_gates_agent_eval_lane.py          10 passed
+tests/test_deploy_host_script.py             31 passed
+tests/test_setup_isolation_check.py           5 passed
+tests/test_supabase_key_check.py             11 passed
+```
+
+
+## Seventeenth independent review — 2026-09-16
+
+Reviewed the unified abort-path follow-up on the uncommitted worktree at
+`50ba2ec`. No new actionable defect found in this targeted repair.
+
+Independent focused verification (deployment, isolation cleanup, gate
+lifecycle, scenario contract, Supabase key checks): **71 passed in 105.39s**,
+process exit 0. The full backend suite was not independently rerun.
+
+Re-executed the previous approval-timeout reproduction against actual `ask`:
+the approval POST times out, exactly one cancellation is attempted for the
+same known run, and one error entry is retained in TRANSCRIPT. No approval
+retry occurs. The former raw ReadTimeout/empty-evidence failure is fixed.
+Stream transport and non-200 approval paths now also route through
+`_abort_turn`, which retains the cancellation outcome in failure evidence.
+The specific F64 residual from review sixteen is locally verified closed.
+
+This does not establish deployment acceptance or all possible failure modes.
+F59's production credential repair remains open. The full external scenario,
+deployed browser approval/continuation, and production latency still require
+verification. Changes remain uncommitted; this review performed no deployment,
+production credential change, or external PR-producing scenario. Prioritize
+restoring uploads/invitations rather than extending this harness review loop.
+
+
+## F59 — the verification, built and proven — 2026-09-16
+
+The credential itself is still the operator's to restore; nothing here changes
+that, and the section below says exactly what that step is. What this round
+does is make the two broken features CHECKABLE, because the acceptance script
+that was supposed to catch F59 could not see it.
+
+### The check was blind to the outage it was for
+
+`scripts/post_deploy_check.py` handed the document's bytes to the job as
+`payload.content`. That is the PREVIOUS shape — `handle_document_job` still
+accepts it only so jobs queued by an older image are not stranded — and it
+never touches the Supabase HTTP API at all. The product uploads to private
+Storage and queues a reference, and the worker fetches the file back over the
+very API that was answering 400. So post-deploy acceptance passed, on a
+deployment where every real upload failed.
+
+It now uploads the file, queues no content, and records the digest — which also
+exercises the "the stored file changed after this document was queued"
+comparison the handler makes. And an invitation check sits beside it.
+
+### Proven by running it, both ways
+
+Against the local stack, where the key IS valid:
+
+```
+=== document ingestion, through Storage and the pipeline worker ===
+  document ingestion: the file reaches Storage         PASS
+  document ingestion: parsed by the running worker     PASS  status=ready
+  document ingestion: the text came through            PASS  'The fruit the team chose is a pomegranate...'
+=== teardown ===
+  every fixture row is gone                            PASS  left: none
+POST-DEPLOY OK
+```
+
+And with the key replaced by a rejected one — the F59 shape exactly, the agent
+answering fine while uploads fail:
+
+```
+  agent answers: task lookup                           PASS  3.9s
+  agent answers: wiki question                         PASS  3.9s
+  agent answers: team context                          PASS  6.2s
+  document ingestion: the file reaches Storage         ***FAIL  HTTP 400
+        {"statusCode":"403","error":"Unauthorized","message":"Invalid...
+POST-DEPLOY FAILED: document ingestion: the file reaches Storage
+```
+
+The invitation half reports the named 503 the same way:
+
+```
+  invitation: the project accepted the invite   ***FAIL  503 the configured
+        Supabase secret key was rejected by the project (401)...
+```
+
+#### What only running it could find
+
+🔴 The first version uploaded with the service key and the worker REFUSED the
+file: `this document does not name a file belonging to this team`.
+`document_object_is_authentic` requires `storage.objects.owner_id` to equal the
+document's `uploader_id` — a prefix check alone would pass a restricted
+same-team attachment belonging to somebody else. In the product the member
+uploads from their own session and the owner is theirs by construction; this
+file has no browser sign-in, so the object is attributed to the uploader the
+same way every other fixture row is inserted. A check written against an
+assumed path would have shipped green and proved nothing.
+
+### The invitation check is opt-in, and removes only what it created
+
+An invitation creates an account and sends mail to a real person, so it runs
+only when `COMRADE_CHECK_INVITE_EMAIL` names a recipient the operator has
+authorised — never one this file picked, and skipped loudly otherwise.
+
+The account is removed afterwards ONLY if this run created it. The address may
+well belong to someone who already has one, and deleting that would be the
+check damaging what it verifies. Both branches were exercised locally, against
+GoTrue, with the account in branch 2 seeded independently of the check:
+
+```
+branch 1  no account beforehand -> created, invited, removed   (afterwards: None)
+branch 2  seeded independently   -> invited, LEFT ALONE
+          pre-existing 7a9e1392-f011-42e1-a3ab-a622f7a04f66
+          afterwards   7a9e1392-f011-42e1-a3ab-a622f7a04f66
+```
+
+The uploaded object is removed by exact path in teardown as well — by id, never
+by prefix, the same policy as every other fixture here — and a failure to
+remove it is reported, because this file's cleanup already learned that lesson
+(F55).
+
+### What is still the operator's to do
+
+Nothing in this repository can mint a Supabase secret key; it is issued in the
+project's own dashboard. The order, once it is set on the pilot host:
+
+1. Set `SUPABASE_SECRET_KEY` on the host and restart the stack.
+2. `/api/ready` should report `supabase_api: ok`. If it reports
+   `key rejected`, the key is still wrong; if it reports `the service is
+   unwell (this one is not about the key)`, look at the project rather than
+   the credential.
+3. Run the post-deploy acceptance, which now proves the journey rather than
+   assuming it:
+
+   ```
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+     --profile migrate run --rm --no-deps -T --entrypoint python \
+     migrate -m scripts.post_deploy_check
+   ```
+
+   Add `-e COMRADE_CHECK_INVITE_EMAIL=<an address you have authorised>` to
+   include the invitation.
+4. Requeue the parse jobs that failed during the broken window — the worker
+   parks a job after three attempts and does NOT retry it once the key is
+   valid. The statement is in `shared/storage.py`, beside the error it matches
+   on.
+
+### Gate
+
+```
+uv run pytest -q                            1761 passed, 8 skipped, 0 failed
+
+scripts/post_deploy_check.py (local stack)  POST-DEPLOY OK
+  ... with a rejected key                   POST-DEPLOY FAILED, on the upload
+  ... invitation, both branches             exercised against GoTrue
+```
+
+The local Docker engine went down part-way through this round and was
+restarted to run the above; the stack is the same one the backend suite uses.
+
+
+## Eighteenth independent review — 2026-09-16
+
+Reviewed the post-deployment Storage/invitation acceptance changes. The
+Storage path now uploads bytes, queues a reference with the correct SHA-256
+and no inline `content`, then waits for the running worker. A safe execution
+of actual `document_is_ingested` with HTTP/DB doubles confirmed that payload
+shape. This review did not send email, delete users, upload to production, or
+independently repeat the live acceptance run. Adjacent key/scenario tests:
+**25 passed in 4.76s**; these are not new invitation-cleanup regression tests.
+
+### F65 — P1: invitation acceptance can delete a pre-existing account
+
+`scripts/post_deploy_check.py:343–366` checks `auth.users where email=%s`, then
+assumes `before is None` proves the subsequently returned user was created by
+this invocation. But `_invite_or_resolve_user` resolves an existing user with
+`public.user_id_by_email`, whose committed SQL explicitly compares
+`lower(email) = lower(p_email)`
+(`supabase/migrations/20260719150000_invites.sql:44–46`).
+
+For an existing `existing@example.test`, an authorized recipient entered as
+`Existing@Example.test` misses the case-sensitive precheck. The invite reports
+already registered; the real helper resolves the existing ID; cleanup deletes
+that user's identities and auth row and reports PASS. Exact-ID deletion does
+not establish that this run owns the ID. Even a normalized precheck alone has
+a race: a signup/invite between precheck and resolution is not this run's
+account to delete.
+
+Independent reproduction executed actual `an_invitation_is_delivered` AND
+`_invite_or_resolve_user`, with a DB double modelling those two SQL comparisons
+and an HTTP 422 already-registered response. It attempted:
+
+```
+delete from auth.identities where user_id=%s
+delete from auth.users where id=%s
+```
+
+Both targeted the resolved pre-existing ID; the script printed both invite and
+cleanup as PASS. All mutations were intercepted by doubles. No real account
+or email was touched.
+
+Required fix: never infer ownership from a missing precheck row. The simplest
+safe choice for an arbitrary operator-authorized recipient is to preserve the
+account and document that the invite check does not delete it. If automatic
+account teardown is necessary, restrict it to a positively identified,
+run-owned fixture with creation provenance; preserve existing/resolved users
+and ambiguous outcomes. Normalize existence checks consistently, but do not
+present normalization as solving the concurrent-creation case. Add cases for
+mixed-case existing email and an account appearing between lookup and invite;
+neither may issue identity/user deletes. Do not run the current opt-in invite
+check against real users until this is repaired.
+
+Acceptance ceiling: the upload uses a privileged key and manually attributes
+object ownership. It now detects the F59 credential failure, but does not
+prove browser upload RLS or browser sign-in. F59 itself remains unresolved;
+these diagnostics do not restore production uploads/invitations.
+
+
+## Answer to the eighteenth review — F65 — 2026-09-16
+
+Right, and P1 is the right severity: the invitation check could delete a real
+person's account. It deletes nothing now.
+
+### F65 — ownership was inferred, and the inference was wrong
+
+The pre-check asked
+
+    select id from auth.users where email = %s
+
+and "no row" was treated as proof that the id the invite returned afterwards
+had been created by this run. Those are different claims, and the gap is
+reachable two ways:
+
+* **Case.** `public.user_id_by_email` — the resolver the invite actually uses —
+  compares `lower(email) = lower(p_email)`
+  (`supabase/migrations/20260719150000_invites.sql:44-46`), verified in the
+  committed migration. So an authorised recipient typed `Existing@Example.test`
+  against a stored `existing@example.test` missed the pre-check, the invite
+  reported already-registered, the resolver returned the EXISTING id, and the
+  cleanup deleted that person's identities and auth row — reporting PASS.
+* **Time.** Normalising does not fix it, and the review is right to say so
+  explicitly. A signup landing between the lookup and the resolution produces
+  an account this run did not make.
+
+Deleting by exact id does not establish ownership of that id, and for an
+address the operator chose there is no provenance to appeal to. So the fix is
+the one the review recommended: **preserve the account**. The check reports
+which case it was and says, on its own line, that the account is left in place
+and the id to remove if the invitation was not wanted.
+
+The existence lookup is normalised as well — not as the safety mechanism, but
+because asking a different question from the one the invite asks is how this
+started, and reporting the wrong thing about somebody's account is its own
+fault. The comment beside it says which of those two jobs it is doing.
+
+`teardown()` still removes this file's own fixture user by its fixed synthetic
+id. That one has provenance: `furnish()` creates it a few lines earlier. It is
+the case the review left open, and it is the only account this file deletes.
+
+### The tests, and what they refuse
+
+`tests/test_post_deploy_invitation.py` — five, with the connection and the
+invite helper doubled, which is the only safe way to test a path whose defect
+was deleting real accounts. No database, no mail. The rule they hold is blunt
+on purpose: **no invitation path may issue a delete against `auth.`**
+
+Mutation-checked against both unsafe shapes:
+
+* the F65 shape → the mixed-case test fails with the defect itself, naming the
+  pre-existing id:
+
+```
+[('select id from auth.users where email=%s', ('Existing@Example.test',)),
+ ('delete from auth.identities where user_id=%s', ('11111111-...-555555555555',)),
+ ('delete from auth.users where id=%s',          ('11111111-...-555555555555',))]
+```
+
+* normalise the lookup but keep the delete — the half-fix the review warned
+  against — → the race test still fails, with the deletes present. A
+  normalisation that presents itself as the fix does not pass these.
+
+### The acceptance ceiling, stated rather than implied
+
+The review is right about this too, and my earlier write-up should have said
+it: the upload goes in with the SERVICE key and the object's ownership is then
+attributed to the uploader. That proves the credential works and the worker can
+read the file back — the F59 failure — and it does **not** prove browser upload
+RLS or browser sign-in. Those are the member's own session doing the upload,
+which this file deliberately has none of.
+
+### On "do not run it against real users yet"
+
+It was not run against any. The two local exercises used
+`post-deploy-invitee@comrade.invalid` — RFC-2606 reserved, on the local stack,
+where GoTrue delivers to inbucket — and the account seeded for the second
+branch was removed by that scratch harness, not by the check. Nothing in a real
+project was touched, and the operator instruction now reads accordingly:
+
+> Add `-e COMRADE_CHECK_INVITE_EMAIL=<an address you have authorised>` to
+> include the invitation. The account it invites is LEFT IN PLACE — remove it
+> yourself if it was not wanted.
+
+### Unchanged
+
+F59 itself. The credential is issued in the project's own dashboard, under
+Settings → API Keys, and must come from the project the host's `SUPABASE_URL`
+names — the 401 body recorded earlier carried Supabase's own hint that the key
+"might also be owned by another Supabase project", which is what a key from the
+wrong project looks like. Nothing in this repository can mint one.
+
+### Gate
+
+```
+uv run pytest -q                            1766 passed, 8 skipped, 0 failed
+tests/test_post_deploy_invitation.py          5 passed
+```
+
+
+## Nineteenth independent review — 2026-09-16
+
+F65 is locally verified closed. The invitation acceptance function no longer
+deletes identities or accounts on any branch. Its case-insensitive existence
+lookup is used only for reporting; a user appearing after that lookup is also
+preserved. The designated fixture teardown is separate from this path.
+
+Independent verification:
+
+```
+python -m pytest tests/test_post_deploy_invitation.py tests/test_supabase_key_check.py -q -p no:cacheprovider
+16 passed in 3.74s
+```
+
+The five new invitation tests cover mixed-case existing email, concurrent
+appearance, normalized reporting, credential rejection and the opt-in default.
+Code inspection confirms removal of account deletion rather than merely a
+more permissive existence guard. No new actionable finding in this targeted
+repair. No mail sent, real accounts changed, full backend gate rerun, or
+production acceptance performed by this review.
+
+F59 remains open: making the acceptance script safe and able to detect a
+rejected key does not repair the pilot credential. Restore and verify that
+credential, then check actual uploads/invitations and deployed continuation.
+
+
+## F59 production credential repair — 2026-09-16
+
+User supplied the valid credential in local `.env` and authorized applying it.
+Validated Auth and Storage against the pilot's configured project before any
+host change: both HTTP 200. Transferred the value using a temporary RSA-OAEP
+public key generated on the host; SSM received ciphertext only. Plaintext was
+not printed. Updated only SUPABASE_SECRET_KEY in `/opt/comrade/.env` and
+recreated api, agent-worker and pipeline-worker from their existing images.
+The temporary private-key directory was removed. A root-only rollback copy of
+the prior environment remains at `/opt/comrade/.env.f59-before-key-update`.
+No source deployment, merge, or commit was performed.
+
+Independent production evidence:
+
+- Each of api, agent-worker and pipeline-worker: Auth admin probe 200;
+  Storage bucket probe 200 using its actual loaded credential.
+- Public HTTPS root 200; `/api/ready` 200 with all eight deployed checks ok.
+  The newer ninth advisory check remains uncommitted; direct probes establish
+  credential acceptance independently of that diagnostic code.
+- Executed the reviewed Storage acceptance helper in a one-off migrate
+  container, with fresh random fixture IDs: upload succeeded, the running
+  pipeline worker marked the document ready, and expected parsed text matched.
+  No inline-content shortcut; object ownership was attributed for the fixture.
+- Teardown reported no failures; team/profile/auth-user/identity/run/consent
+  counts all zero. Uploaded object cleanup succeeded by exact path.
+- Queried failed parse_document jobs: none; no jobs needed requeueing.
+
+SSM credential application: `88b7eea0-e438-42df-8346-f914ce50a3d4`.
+SSM production verification: `a151292a-1a9e-40ed-9c1c-a8bfc2662640` (Success).
+Failed-job inspection: `f24c26ea-b38b-4196-929e-e89a80e97a35` (Success).
+
+F59's rejected-credential defect is repaired and live Storage ingestion is
+verified. Invitation email delivery was NOT exercised: no recipient was
+authorized. Browser upload RLS, full external scenario, browser continuation
+and latency acceptance remain separate. This verification sent no email and
+changed no real user's account.
+
+
+## F66 — resumed turns reuse persisted step numbers (2026-09-17)
+
+**P1. Reproduced on the pilot; fixed locally, deployment pending.**
+Browser sign-in and browser Storage upload/ingestion both passed after F59.
+A real task approval executed the task, then the resumed agent run failed.
+Run `5f81a75f-4021-4b58-a8c8-0464b5b29b25` already held steps 0–4;
+`stream_turn` reset `all_steps` and attempted to append step 0 again.
+The worker logged `UniqueViolation: agent_steps_run_id_seq_key`.
+This affects continuation after human decisions and recovery of partial runs.
+
+Fix: read `coalesce(max(seq) + 1, 0)` through the team-scoped agent session
+and offset this segment's generated steps by that value. Keep the unique
+constraint and existing worker lease fence; never replace previously emitted
+steps or seed from the unused `current_step` column.
+
+`tests/test_agent_resume.py::test_resumed_runtime_appends_after_persisted_steps`
+uses actual enqueue/claim/pause/approve-or-reject/reclaim operations and the
+real runtime with a deterministic model event. Both cases failed before the
+fix with the production UniqueViolation and pass afterwards. Persisted steps
+are exactly `[0, 4, 5]`, distinguishing the maximum from a row count.
+Eight resume tests and 53 related run/stream/cancellation/budget tests passed.
+The first test draft passed an EnqueuedTurn subclass where the real worker
+passes a plain string; that setup error was corrected before measuring the
+actual duplicate-sequence regression.
+
+Baseline canonical gate exited 0: browser journeys 8 passed; real GitHub 2
+skipped without PAT. Realtime needed its existing retry. The final gate with
+`--with-agent-eval` is now running against the sequence fix.
+
+Live ordinary questions, before this source deployment: 3/3 grounded answers
+(tasks, membership, uploaded mascot fact), 34.926s / 32.995s / 35.478s.
+This establishes a small successful sample, not a reliability or latency SLA.
+Invitation mail remains untested because no recipient was authorized.
+
+
+### Release acceptance follow-up — 2026-09-17
+
+The gate against F66 passed every standard lane: 1768 backend passed, 8 skipped,
+21 deselected; frontend 229 unit/component and 21 integration; browser 8;
+real GitHub 2 skipped. Live usefulness also passed 4/4 on that invocation.
+The extended gate exited **1**, not 0: the scenario's two-minute clone wait
+expired before the five-minute workspace discovery interval. No sync job had
+been queued. Increased only the scenario's wait to seven minutes (discovery
+plus clone). The product can still take up to five minutes to discover a newly
+connected repository; faster discovery remains a UX improvement.
+
+On resuming, Docker Desktop was stopped. After restart Windows reserved ports
+54257–54356, preventing Supabase's original published ports from binding.
+A normal stop/start preserved the local database backup but initially failed
+to bind 54322. Local Supabase ports and loopback URLs were moved to 5532x;
+these machine-only config/env changes are excluded from the release. The
+fixture retained all four members; 22 resume/scenario tests passed afterwards.
+
+A repeated live-usefulness lane failed 1/4: the wiki question returned
+"The chat doesn't show a decision on the team mascot" despite the seeded
+wiki fact. This is NOT erased by the earlier 4/4 pass. The prompt explicitly
+instructed that answer after an empty chat search, conflicting with its wiki
+lookup rule. Removed that premature fallback and required the relevant wiki
+page before declaring a decision unknown. Existing live acceptance is the
+behavioral check; this prompt repair is not a guarantee of model reliability.
+The full gate is being rerun with that change and the corrected clone wait.
+
+
+### Gate isolation follow-up — 2026-09-18
+
+The final2 gate exited 1: 1767 backend passed, one failed. The repository
+discovery wiring test called the real global worker tick; its chat sweep
+enqueued 19 unrelated local teams' compile jobs, spending real model calls
+and exhausting the bounded drain before the fixture clone ran. This was a
+test isolation defect, not evidence that the sequence fix broke cloning.
+
+The test now permits only its repository maintenance clock, restricts its
+claim SQL and sync enqueue to TEAM_A, disables unrelated expired-lease
+maintenance, and asserts all foreign job ids/statuses/attempts are unchanged.
+It still reaches discovery through the actual tick, real claim/handler/git
+clone, and agent visibility. Two targeted connection tests passed. The
+canonical extended gate is rerunning; no source deployment yet.
+
+The two direct repository-sweep tests also assumed no foreign repositories
+existed. Their assertions now name the fixture repository exactly, including
+the positive retry assertions (which previously could pass on another team's
+queued repo). All 48 repository/resume/scenario tests passed. An unrelated
+Python 3.13 server occupied :8000; stopped only after the user's explicit
+authorization. The final4 canonical extended gate is running.
+
+Production pre-release backup created successfully in 44.5s on 2026-09-18:
+`/var/backups/comrade/pre-release-20260918T044304Z/20260918T044305Z-88f2f1fe/`
+contains globals.sql and database.sql. This new backup has not been separately
+restored; earlier restore evidence is not claimed as a restore of this file.
+Current api/frontend/agent-worker/pipeline-worker image IDs and sandbox image
+were tagged `rollback-50ba2ec`. SSM command
+`f993740e-49d3-4737-92bb-1f911508bbb5` succeeded.
+GitHub App installation 158514342 can access Ranveersingh1113/test (HTTP 200).
+
+
+## F67 — effect callback replay crashes and caches recoverable PR refusal
+
+P1, found by the real four-person scenario on 2026-09-18. Final4 passed
+1768 backend, frontend 229/21, browser 8 and live usefulness 4/4; its extended
+gate still exited 1. Clone succeeded, generated snake.py ran in the sandbox,
+then run 30324594-a5b0-474a-bc32-8d9e6a605b62 failed when repo_propose_pr was
+called again after verification. The initial unverified proposal's error was
+cached as completed; ADK invokes after_tool_callback even when before_tool
+returns a cached result or refusal. complete_effect then tried to complete
+a row already completed (or never claimed), raising LookupError.
+
+Fix: per-tool-call context tracks whether this invocation actually claimed an
+effect. Only those calls complete one. No shared session flag, no overwrite
+of successful cached effects, no swallowed missing-claim errors. PR verification
+refusal alone explicitly marks effect_not_started before patch capture or
+consent creation; the durable claim may atomically restart that completed
+refusal under the existing run/worker ownership fence. Other errors/writes
+remain cached. No schema change.
+
+New deterministic tests use the REAL ADK Runner and plugin lifecycle with a
+scripted model, real effects database and counted tool body: cached and
+capability-refused calls both reproduced the exact failure before repair;
+the recoverable refusal test checks two attempts followed by a consent result.
+The actual PR tool test proves its marker is returned before capture/proposal.
+A wrong worker cannot reclaim the marked refusal. Focused tests passed.
+
+## F68 — resolved consent remains pending in durable continuation
+
+P1, reproduced with actual approval and rejection. The effect result retained
+its original pending status after the card resolved. A repeated tool call
+could return that stale result and park again on a card already decided;
+_permission_wait also paused even when explicitly given executed/rejected.
+
+Fix: approve, edit-and-approve and reject refresh the matching completed
+effect's result in the SAME transaction that requeues the waiting run. Retain
+consent_id, add current status/action result or rejection reason. Runtime waits
+only for pending results (legacy missing status still means pending).
+Regression uses real claim/proposal/pause/human-resolution/reclaim and checks
+resolved cached status for all three routes, then exact persisted sequences
+[0,4,5] and completion. The original three cases failed before the repair.
+51 callback/verification/consent/concurrency tests passed, followed by 34
+resume/consent-loop/column-guard/tier tests including edited approval and
+wrong-worker retry refusal. Full scenario and deployment acceptance remain
+pending; the standard gate will run again after live scenario verification.
+
+## F69 — resolved approval repeats external work
+
+P1, found by the real GitHub scenario. After approval successfully opened PR
+#13, the resumed model ignored the resolved continuation result, edited again,
+and opened PR #14. It continued proposing actions until the hourly token budget
+stopped the scenario. The durable result was correct; asking a nondeterministic
+model what to do with an already completed single action was the defect.
+
+Fix: an executed PR is terminal, so its resumed run records a deterministic
+completion (including the PR URL) and ends without another model call. A
+rejection also ends the action. Other approved tools still resume: one request
+may legitimately create several tasks. A plan with unfinished steps likewise
+resumes normally. Approval, edited approval, rejection, and PR regressions use
+real run/effect/consent rows and preserve the next durable sequence. Focused
+resume/callback/scenario tests: 28 passed. The first live rerun proved PR replay
+stopped, but also exposed and rejected the initially over-broad "all approvals
+are terminal" rule before deployment.

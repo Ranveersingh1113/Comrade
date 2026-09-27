@@ -684,7 +684,8 @@ def repo_propose_pr(title: str, body: str, tool_context: ToolContext) -> dict:
     except (CapabilityError, WorkspaceError) as exc:
         return {"error": str(exc)}
     if _unverified(tool_context, root=root):
-        return {"error": NEEDS_VERIFICATION}
+        # Before patch capture/proposal: a later check may safely retry this.
+        return {"error": NEEDS_VERIFICATION, "effect_not_started": True}
 
     try:
         patch = capture_patch(str(team_id), str(repo), str(thread_id))

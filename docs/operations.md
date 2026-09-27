@@ -166,6 +166,44 @@ is presumed gone.
 relevant worker's logs. A worker that is running but cannot reach the database
 will also show here, and `checks.roles` will say so too.
 
+### `supabase_api`
+
+Whether the configured `SUPABASE_SECRET_KEY` is actually accepted by the
+Supabase project, asked of both planes that validate it separately: `auth`
+(what invitations use) and `storage` (what reading an uploaded document back
+uses).
+
+**THE ONE ADVISORY CHECK ON THIS ROUTE.** Every other check here fails
+readiness; this one is reported and does not. That is deliberate: the key is
+touched by invitations and by Storage-backed document ingestion, and by
+NOTHING on the path that serves an agent turn. A deployment with a dead key
+still answers questions, so failing readiness would take a working pilot
+offline and block every release. To make it fatal, remove the name from
+`ADVISORY_CHECKS` in `server/app.py`; that is the whole change.
+
+It exists because `/ready` reported all eight other checks ok on a deployment
+whose key was rejected by its own project — `auth` answered `401 Invalid API
+key` while `storage` answered `400 Invalid Compact JWS`, the same key at the
+same moment — and the only way to find out was for a leader to invite a
+teammate and get back `502 invite failed: 401`. Both planes are probed because
+one of them would have reported half the story.
+
+Values are `ok`, `not configured`, or a list naming each broken plane, its
+status, and **whether that status is about the key**, followed by what it
+costs. The planes reject differently — auth with 401/403, storage with 400 as
+well — and anything else is reported as `the service is unwell (this one is not
+about the key)`. That distinction is load-bearing: the local stack answers 500
+to `/auth/v1/admin/users` with a perfectly valid key, and a check that called
+that a rejected key would send you to reissue a working credential.
+
+**Do:** for `key rejected`, issue a fresh secret key in the project's own
+dashboard and set `SUPABASE_SECRET_KEY` on the host; nothing in the repository
+can mint one. For `the service is unwell`, the key is not the problem — look at
+the Supabase project's own status first.
+Afterwards, requeue the parse jobs that failed during the broken window — the
+worker parks a job after three attempts and does NOT retry it once the key is
+valid. The statement is in `shared/storage.py` beside the error it matches on.
+
 ### `sandbox`
 
 What the execution worker says it can run a team's code with.

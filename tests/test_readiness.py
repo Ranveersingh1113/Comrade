@@ -155,7 +155,7 @@ def test_readiness_needs_no_authentication(seeded, client):
     # end of this file pin.
     assert set(body["checks"]) <= {
         "database", "migrations", "roles", "agent_queue", "pipeline_queue",
-        "expired_leases", "workers", "sandbox",
+        "expired_leases", "workers", "sandbox", "supabase_api",
     }
 
 

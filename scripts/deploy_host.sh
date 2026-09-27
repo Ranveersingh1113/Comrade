@@ -178,9 +178,14 @@ $COMPOSE up -d
 # ---------------------------------------------------------------------------
 # /ready checks the schema version and whether a worker is draining the queue,
 # so it answers "can this serve a turn" rather than "is the process alive".
-for _attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
+# A healthy production response currently takes about 11s because this endpoint
+# verifies four database roles and both Supabase planes.  The old 10s client
+# timeout killed every successful response just before it arrived.  Thirty
+# seconds also exceeds the endpoint's own cumulative network timeout budget;
+# ten attempts preserve the old overall release deadline.
+for _attempt in 1 2 3 4 5 6 7 8 9 10; do
   if $COMPOSE exec -T api python -c \
-    "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=10)"; then
+    "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=30)"; then
     ready=yes
     break
   fi

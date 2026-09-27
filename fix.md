@@ -4169,3 +4169,15 @@ real run/effect/consent rows and preserve the next durable sequence. Focused
 resume/callback/scenario tests: 28 passed. The first live rerun proved PR replay
 stopped, but also exposed and rejected the initially over-broad "all approvals
 are terminal" rule before deployment.
+
+## F70 — healthy production readiness exceeds the deploy probe timeout
+
+P1, found by deploying `f713b06`. The production `/ready` response completed
+successfully in 10.6–10.9 seconds, but `deploy_host.sh` killed each request at
+10 seconds. Twenty-four healthy responses were discarded and GitHub Actions
+reported a failed deployment after the new containers were already serving.
+
+Fix: the probe now allows 30 seconds, longer than the endpoint's four database
+role and two Supabase-plane network budgets. Retries drop from 24 to 10, keeping
+the overall failure deadline near its previous value. The focused deployment
+suite passes; production redeployment is pending.

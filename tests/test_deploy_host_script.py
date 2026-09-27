@@ -243,6 +243,13 @@ def test_workflow_serializes_and_runs_requested_commit():
     assert "cancel-in-progress: false" in workflow
 
 
+def test_readiness_probe_outlives_the_endpoint_network_budget():
+    """Production needs ~11s for four DB roles and two Supabase planes."""
+    code = (ROOT / "scripts" / "deploy_host.sh").read_text()
+    assert "urlopen('http://localhost:8000/ready', timeout=30)" in code
+    assert "for _attempt in 1 2 3 4 5 6 7 8 9 10; do" in code
+
+
 def test_the_workflow_runs_the_release_from_a_file_not_a_pipe():
     """🔴 THE DEFECT (fix.md F58). The release used to arrive as
     `git show <sha>:scripts/deploy_host.sh | sh -s <sha>`, which makes the

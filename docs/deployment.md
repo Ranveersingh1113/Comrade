@@ -2,9 +2,12 @@
 
 ## Live deployment
 
-Comrade is hosted at [https://13-62-11-26.nip.io](https://13-62-11-26.nip.io).
+Comrade is hosted at [https://35-154-205-187.nip.io](https://35-154-205-187.nip.io).
 
-The pilot runs on an AWS EC2 instance in `eu-north-1`, with hosted Supabase for the database, auth, storage, and realtime services.
+The pilot runs on EC2 instance `i-092982a47a98c7106` in `ap-south-1`, beside
+the hosted Supabase database, auth, storage, and realtime services. Three
+grounded production turns measured 4.0–6.8 seconds after the move; 25 database
+round trips measured 1.9 ms median and 2.5 ms p95.
 
 ## Production layout
 
@@ -83,7 +86,7 @@ This makes `master` the production source of truth. Feature branches do not depl
 
 ## Health checks and troubleshooting
 
-`https://13-62-11-26.nip.io/api/ready` returns a JSON status with three checks:
+`https://35-154-205-187.nip.io/api/ready` returns a JSON status with mandatory checks including:
 
 | Check | Meaning when unhealthy |
 |---|---|

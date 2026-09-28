@@ -28,7 +28,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: arn:aws:iam::276833795981:role/ComradePilotGithubDeploy
-          aws-region: eu-north-1
+          aws-region: ap-south-1
       # 🔴 A FILE, NOT A PIPE (fix.md F58). This used to be
       #   `git show $SHA:scripts/deploy_host.sh | sh -s $SHA`
       # and the release is then its own stdin. `docker compose run` reads
@@ -58,7 +58,7 @@ jobs:
       # $GITHUB_SHA is deliberately NOT escaped: that one must expand here.
       - name: Deploy exact commit through SSM
         env:
-          INSTANCE_ID: i-0e5e97d751ffbd262
+          INSTANCE_ID: i-092982a47a98c7106
         run: |
           command_id=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \

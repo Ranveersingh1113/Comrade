@@ -243,6 +243,14 @@ def test_workflow_serializes_and_runs_requested_commit():
     assert "cancel-in-progress: false" in workflow
 
 
+def test_workflow_targets_the_accepted_mumbai_host():
+    workflow = (ROOT / ".github/workflows/deploy-pilot.yml").read_text()
+
+    assert "aws-region: ap-south-1" in workflow
+    assert "INSTANCE_ID: i-092982a47a98c7106" in workflow
+    assert "i-0e5e97d751ffbd262" not in workflow
+
+
 def test_readiness_probe_outlives_the_endpoint_network_budget():
     """Production needs ~11s for four DB roles and two Supabase planes."""
     code = (ROOT / "scripts" / "deploy_host.sh").read_text()

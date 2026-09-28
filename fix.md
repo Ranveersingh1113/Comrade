@@ -4181,3 +4181,32 @@ Fix: the probe now allows 30 seconds, longer than the endpoint's four database
 role and two Supabase-plane network budgets. Retries drop from 24 to 10, keeping
 the overall failure deadline near its previous value. The focused deployment
 suite passes; production redeployment is pending.
+
+## F71 — pilot compute was one region away from its database
+
+P1 user-experience latency. The EC2 pilot ran in Stockholm (`eu-north-1`)
+while its Supabase pooler ran in Mumbai (`ap-south-1`). A production probe
+measured 25.7–29.6 second grounded turns, more than twenty sequential database
+operations per turn, and about 0.73 seconds per operation.
+
+Fix: move only the stateless compute to Mumbai with a blue-green host. The
+accepted host is `i-092982a47a98c7106` at
+`https://35-154-205-187.nip.io`; `.github/workflows/deploy-pilot.yml` now pins
+both that instance and `ap-south-1`. Supabase remains the system of record.
+Stockholm stays available only as rollback until post-cutover acceptance.
+
+Acceptance on exact source SHA `4eca8062bfa0574407fee69ce5ab4742ebb34c16`:
+trusted TLS, redirect, readiness, auth boundary, Storage ingestion, repository
+installation, Node ESM, sandbox isolation, and proxy egress checks passed.
+Three grounded host turns took 6.8/4.0/5.0 seconds; 25 database round trips
+measured 1.9 ms median, 2.5 ms p95, and 8.8 ms maximum. A real temporary
+browser account signed in at Mumbai, showed streaming progress in 212 ms, and
+returned grounded answers in 4.9 and 14.1 seconds; sign-out and exact fixture
+cleanup left zero user, identity, team, run, and message rows.
+
+Supabase Auth now uses Mumbai as its Site URL while both origins remain in the
+redirect allow list for rollback. The GitHub App homepage, OAuth callback, and
+TLS-verified webhook use Mumbai. A separate setup URL is unavailable when the
+App requests OAuth during installation; GitHub sends that flow to the callback
+URL. The first `master` deployment through the retargeted workflow supplies the
+non-destructive GitHub delivery acceptance.
